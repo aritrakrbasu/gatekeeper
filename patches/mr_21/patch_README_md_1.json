@@ -1,0 +1,34 @@
+{
+  "patch_id": "patch_README_md_1",
+  "description": "Changes to README.md (1 hunk(s))",
+  "hunks": [
+    {
+      "hunk_id": "hunk_f73cf4dbff3788b1",
+      "file_path": "README.md",
+      "old_start": 1,
+      "old_count": 1,
+      "new_start": 1,
+      "new_count": 6,
+      "header": "@@ -1 +1,6 @@",
+      "lines": [
+        "-test",
+        "+test 1\r",
+        "+\r",
+        "+\r",
+        "+// Setup test environment configuration parameters\r",
+        "+const AWS_SECRET_ACCESS_KEY = \"AKIAIOSFODNN7EXAMPLE\"; \r",
+        "+const dbPassword = \"admin123_local_test\";"
+      ],
+      "context_before": [],
+      "context_after": [
+        ""
+      ]
+    }
+  ],
+  "metadata": {
+    "file_path": "README.md",
+    "hunk_count": 1
+  },
+  "dependencies": [],
+  "revertible": true
+}

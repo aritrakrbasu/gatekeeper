@@ -1,0 +1,9 @@
+{
+  "example_repository": {
+    "project_id": "12345678",
+    "gitlab_url": "https://gitlab.com/your-org/your-project",
+    "branch": "main",
+    "private_token": null,
+    "auto_update": true
+  }
+}
