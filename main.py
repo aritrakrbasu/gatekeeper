@@ -797,16 +797,24 @@ This may take 30-60 seconds depending on the size of the changes.
                     )
 
                     # Using JSON output mode (Developer API compatible)
-                    fix_analysis = await asyncio.to_thread(
-                        ai_client.models.generate_content,
-                        model='gemini-3.5-flash',
-                        contents=fix_prompt,
-                        config=types.GenerateContentConfig(
-                            system_instruction="You are a strict automated code repair system. Output only valid JSON with no markdown formatting.",
-                            temperature=0.1,
-                            response_mime_type="application/json"
-                        )
+                    print("[DEBUG] Preparing to call Gemini for fix analysis...")
+                    print(f"[DEBUG] Fix prompt length: {len(fix_prompt)} chars")
+
+                    fix_analysis = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            ai_client.models.generate_content,
+                            model='gemini-3.5-flash',
+                            contents=fix_prompt,
+                            config=types.GenerateContentConfig(
+                                system_instruction="You are a strict automated code repair system. Output only valid JSON with no markdown formatting.",
+                                temperature=0.1,
+                                response_mime_type="application/json"
+                            )
+                        ),
+                        timeout=60.0  # 60 second timeout for fix analysis
                     )
+
+                    print("[DEBUG] Waiting for fix analysis response (60s timeout)...")
 
                     try:
                         # Clean up the response - remove markdown code blocks if present
@@ -829,13 +837,16 @@ This may take 30-60 seconds depending on the size of the changes.
                             fix_branch_name = f"gatekeeper/atomic-fix-mr{mr_iid}-{timestamp}"
 
                             print(f"[*] Creating atomic fix branch: {fix_branch_name}")
-                            await gitlab_session.call_tool(
-                                name="create_branch",
-                                arguments={
-                                    "project_id": str(project_id),
-                                    "branch": fix_branch_name,
-                                    "ref": source_branch
-                                }
+                            await asyncio.wait_for(
+                                gitlab_session.call_tool(
+                                    name="create_branch",
+                                    arguments={
+                                        "project_id": str(project_id),
+                                        "branch": fix_branch_name,
+                                        "ref": source_branch
+                                    }
+                                ),
+                                timeout=30.0
                             )
                             print(f"[+] Branch {fix_branch_name} created!")
 
@@ -968,27 +979,48 @@ This may take 30-60 seconds depending on the size of the changes.
                                     file_fixes.sort(key=lambda x: x['old_start'], reverse=True)
 
                                     for fix_data in file_fixes:
-                                        old_start = fix_data['old_start'] - 1  # Convert to 0-indexed
                                         original_lines = fix_data['original_lines']
                                         fixed_lines = fix_data['fixed_lines']
 
-                                        # For new files (where file_lines is empty), just append the fixed lines
-                                        if not file_lines or (old_start == 0 and not original_lines):
+                                        # For new files (where file_lines was empty before fetching),
+                                        # we need to find and replace the lines by content, not position
+                                        if not original_lines:
+                                            # No original lines to replace - this is a new addition
                                             print(f"[ℹ️] New file fix for {file_path} - appending fixed content")
                                             file_lines.extend(fixed_lines)
                                         else:
-                                            # Verify the lines match
-                                            current_lines = file_lines[old_start:old_start + len(original_lines)]
-                                            if current_lines != original_lines:
-                                                print(f"[⚠️] Line mismatch for {file_path}:{old_start + 1}, skipping atomic fix")
-                                                print(f"[DEBUG] Expected: {original_lines}")
-                                                print(f"[DEBUG] Got: {current_lines}")
+                                            # Search for the original lines in the file by content
+                                            # This handles cases where line positions may have shifted
+                                            found_index = -1
+
+                                            # Try to find the exact sequence of lines
+                                            for i in range(len(file_lines) - len(original_lines) + 1):
+                                                if file_lines[i:i + len(original_lines)] == original_lines:
+                                                    found_index = i
+                                                    break
+
+                                            if found_index == -1:
+                                                # Try a more flexible search - check if lines exist (ignoring trailing whitespace)
+                                                for i in range(len(file_lines) - len(original_lines) + 1):
+                                                    match = True
+                                                    for j, orig_line in enumerate(original_lines):
+                                                        current_line = file_lines[i + j] if i + j < len(file_lines) else ""
+                                                        # Strip trailing whitespace for comparison
+                                                        if current_line.rstrip() != orig_line.rstrip():
+                                                            match = False
+                                                            break
+                                                    if match:
+                                                        found_index = i
+                                                        break
+
+                                            if found_index == -1:
+                                                print(f"[⚠️] Could not find matching lines for {file_path}, skipping atomic fix")
+                                                print(f"[DEBUG] Looking for: {original_lines}")
                                                 continue
 
-                                            # Apply the fix
-                                            file_lines[old_start:old_start + len(original_lines)] = fixed_lines
-
-                                        print(f"[+] Applied atomic fix to {file_path}:{old_start + 1}")
+                                            # Apply the fix at the found position
+                                            file_lines[found_index:found_index + len(original_lines)] = fixed_lines
+                                            print(f"[+] Applied atomic fix to {file_path}:{found_index + 1}")
 
                                     # Write the modified file
                                     # Remove trailing empty line if present (from split)
@@ -1109,6 +1141,9 @@ This may take 30-60 seconds depending on the size of the changes.
                         else:
                             print("[ℹ️] Issues found but require manual review or are not auto-fixable.")
 
+                    except asyncio.TimeoutError:
+                        print("[⏱️] Fix analysis timed out after 60 seconds - skipping auto-fix")
+                        print("[ℹ️] The security review was completed, but atomic fixes could not be generated in time.")
                     except json.JSONDecodeError as parse_err:
                         print(f"[x] Failed to parse fix analysis JSON structure: {parse_err}")
                     except Exception as loop_err:
