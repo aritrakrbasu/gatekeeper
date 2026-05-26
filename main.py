@@ -55,8 +55,10 @@ from config.phoenix_mcp import get_phoenix_bridge, close_phoenix_bridge
 
 # AI Observability - Evaluations and Self-Improvement
 from ai_observability import (
-    get_evaluator,
+    get_phoenix_sdk_evaluator,
     EvaluationCriteria,
+    PHOENIX_SDK_AVAILABLE,
+    get_legacy_evaluator,  # Fallback
     get_prompt_manager,
     analyze_and_improve,
 )
@@ -736,30 +738,22 @@ This may take 30-60 seconds depending on the size of the changes.
                     print("[*] Step 4: Shipping code diff to Gemini Pro Core for automated security review...")
                     print("[ℹ️] This may take 30-60 seconds depending on diff size...")
 
-                    # Create explicit span for code review to enable proper evaluation linkage
+                    # NOTE: Arize auto-traces all Gemini calls via instrument_google_genai()
+                    # Phoenix SDK auto-traces evaluations via async_evaluate_dataframe
+                    # Custom spans are optional - Arize handles the heavy lifting!
+
+                    # Optional: Set business context for better trace organization
                     from opentelemetry import trace
                     tracer = trace.get_tracer(__name__)
 
                     audit_report = ""
-                    with tracer.start_as_current_span(
-                        "code_review.gatekeeper",
-                        attributes={
-                            "operation": "code_review",
-                            "mr_id": str(mr_iid),
-                            "project_id": str(project_id),
-                            "source_branch": source_branch,
-                            "file_count": str(len(changed_files) if changed_files else 0),
-                            "diff_size": str(len(raw_diff_content)),
-                        }
-                    ):
-                        # Also set span attributes using the helper (for backwards compatibility)
+                    with tracer.start_as_current_span("gatekeeper.code_review"):
+                        # Set business context attributes (optional but helpful for filtering)
                         set_span_attributes(
-                            operation="code_review",
                             mr_id=str(mr_iid),
                             project_id=str(project_id),
                             source_branch=source_branch,
                             file_count=len(changed_files) if changed_files else 0,
-                            diff_size=len(raw_diff_content),
                         )
 
                         # Load comprehensive Senior PR Reviewer prompt
@@ -776,7 +770,7 @@ This may take 30-60 seconds depending on the size of the changes.
                         # Use native Gemini client (auto-traced by Arize if configured)
                         response = await asyncio.to_thread(
                             ai_client.models.generate_content,
-                            model='gemini-3.5-flash',
+                            model='gemini-3.1-flash-lite',
                             contents=review_prompt,
                             config=types.GenerateContentConfig(
                                 system_instruction=system_instruction,
@@ -798,22 +792,42 @@ This may take 30-60 seconds depending on the size of the changes.
 
                                 # Run evaluation directly - attributes will be set on the current span
                                 # The evaluation span has been removed to keep attributes with the LLM call
-                                evaluator = get_evaluator()
-                                eval_result = await evaluator.evaluate_review(
-                                    diff=raw_diff_content[:5000],  # Limit size for evaluation
-                                    review=audit_report[:10000],  # Limit size
-                                    criteria=[
-                                        EvaluationCriteria.SECURITY_COVERAGE,
-                                        EvaluationCriteria.CODE_QUALITY_COVERAGE,
-                                        EvaluationCriteria.ACTIONABILITY,
-                                        EvaluationCriteria.CLARITY,
-                                    ],
-                                    metadata={
-                                        "mr_id": str(mr_iid),
-                                        "project_id": str(project_id),
-                                        "source_branch": source_branch,
-                                    }
-                                )
+                                # Use Phoenix SDK evaluator if available, otherwise fall back to legacy
+                                if PHOENIX_SDK_AVAILABLE:
+                                    evaluator = get_phoenix_sdk_evaluator()
+                                    eval_result = await evaluator.evaluate_review_async(
+                                        diff=raw_diff_content[:5000],  # Limit size for evaluation
+                                        review=audit_report[:10000],  # Limit size
+                                        criteria=[
+                                            EvaluationCriteria.SECURITY_COVERAGE,
+                                            EvaluationCriteria.CODE_QUALITY_COVERAGE,
+                                            EvaluationCriteria.ACTIONABILITY,
+                                            EvaluationCriteria.CLARITY,
+                                        ],
+                                        metadata={
+                                            "mr_id": str(mr_iid),
+                                            "project_id": str(project_id),
+                                            "source_branch": source_branch,
+                                        }
+                                    )
+                                else:
+                                    # Fall back to legacy evaluator
+                                    evaluator = get_legacy_evaluator()
+                                    eval_result = await evaluator.evaluate_review(
+                                        diff=raw_diff_content[:5000],
+                                        review=audit_report[:10000],
+                                        criteria=[
+                                            EvaluationCriteria.SECURITY_COVERAGE,
+                                            EvaluationCriteria.CODE_QUALITY_COVERAGE,
+                                            EvaluationCriteria.ACTIONABILITY,
+                                            EvaluationCriteria.CLARITY,
+                                        ],
+                                        metadata={
+                                            "mr_id": str(mr_iid),
+                                            "project_id": str(project_id),
+                                            "source_branch": source_branch,
+                                        }
+                                    )
 
                                 evaluation_score = eval_result["average_score"]
                                 print(f"[+] Evaluation score: {evaluation_score}/5")
@@ -952,15 +966,8 @@ This may take 30-60 seconds depending on the size of the changes.
                     try:
                         print("[*] Checking if issues can be auto-fixed via atomic patches...")
 
-                        # Create a span for auto-fix generation - evaluation attributes will be set HERE
-                        with tracer.start_as_current_span(
-                            "auto_fix_generation.gatekeeper",
-                            attributes={
-                                "operation": "auto_fix_generation",
-                                "mr_id": str(mr_iid),
-                                "project_id": str(project_id),
-                            }
-                        ):
+                        # Optional: Create span for auto-fix generation (Arize auto-traces the LLM call)
+                        with tracer.start_as_current_span("gatekeeper.auto_fix"):
                             # Parse the diff into atomic patches for granular fixes
                             print("[*] Parsing diff into atomic hunk-level patches...")
                             patch_parser = AtomicPatchParser(context_lines=3)
@@ -1004,7 +1011,7 @@ This may take 30-60 seconds depending on the size of the changes.
                             response = await asyncio.wait_for(
                                 asyncio.to_thread(
                                     ai_client.models.generate_content,
-                                    model='gemini-3.5-flash',
+                                    model='gemini-3.1-flash-lite',
                                     contents=fix_prompt,
                                     config=types.GenerateContentConfig(
                                         system_instruction="You are a strict automated code repair system. Output only valid JSON with no markdown formatting.",
@@ -1036,21 +1043,40 @@ This may take 30-60 seconds depending on the size of the changes.
                                     print("[*] Step 4.6: Running LLM-as-a-Judge evaluation on auto-fixes...")
                                     print("[ℹ️] Auto-fix evaluation attributes will be set on this span (auto_fix_generation.gatekeeper)")
 
-                                    evaluator = get_evaluator()
-                                    fix_eval_result = await evaluator.evaluate_auto_fix(
-                                        fixes=str(fix_data),  # Convert to string for evaluation
-                                        review=audit_report[:5000],
-                                        criteria=[
-                                            EvaluationCriteria.FIX_CORRECTNESS,
-                                            EvaluationCriteria.FIX_SAFETY,
-                                            EvaluationCriteria.FIX_COMPLETENESS,
-                                        ],
-                                        metadata={
-                                            "mr_id": str(mr_iid),
-                                            "project_id": str(project_id),
-                                            "fixes_count": str(len(fix_data.get("fixes", []))),
-                                        }
-                                    )
+                                    # Use Phoenix SDK evaluator if available, otherwise fall back to legacy
+                                    if PHOENIX_SDK_AVAILABLE:
+                                        evaluator = get_phoenix_sdk_evaluator()
+                                        fix_eval_result = await evaluator.evaluate_auto_fix_async(
+                                            fixes=str(fix_data),  # Convert to string for evaluation
+                                            review=audit_report[:5000],
+                                            criteria=[
+                                                EvaluationCriteria.FIX_CORRECTNESS,
+                                                EvaluationCriteria.FIX_SAFETY,
+                                                EvaluationCriteria.FIX_COMPLETENESS,
+                                            ],
+                                            metadata={
+                                                "mr_id": str(mr_iid),
+                                                "project_id": str(project_id),
+                                                "fixes_count": str(len(fix_data.get("fixes", []))),
+                                            }
+                                        )
+                                    else:
+                                        # Fall back to legacy evaluator
+                                        evaluator = get_legacy_evaluator()
+                                        fix_eval_result = await evaluator.evaluate_auto_fix(
+                                            fixes=str(fix_data),  # Convert to string for evaluation
+                                            review=audit_report[:5000],
+                                            criteria=[
+                                                EvaluationCriteria.FIX_CORRECTNESS,
+                                                EvaluationCriteria.FIX_SAFETY,
+                                                EvaluationCriteria.FIX_COMPLETENESS,
+                                            ],
+                                            metadata={
+                                                "mr_id": str(mr_iid),
+                                                "project_id": str(project_id),
+                                                "fixes_count": str(len(fix_data.get("fixes", []))),
+                                            }
+                                        )
 
                                     print(f"[+] Auto-fix evaluation score: {fix_eval_result['average_score']}/5")
 

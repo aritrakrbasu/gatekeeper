@@ -3,6 +3,7 @@
 ## Context
 
 The Gatekeeper currently uses a **custom LLM-as-a-Judge implementation** with:
+
 - Direct Gemini API calls with regex-based score extraction
 - Manual span attribute setting for Phoenix integration
 - Custom PhoenixEvaluationExporter for sending evaluations to Evaluations tab
@@ -11,6 +12,7 @@ The Gatekeeper currently uses a **custom LLM-as-a-Judge implementation** with:
 **Problem**: The custom implementation is fragile (regex parsing), lacks built-in rate limiting, and requires significant maintenance.
 
 **Solution**: Migrate to Phoenix SDK's built-in `ClassificationEvaluator` which provides:
+
 - **Function calling** for reliable structured JSON output (no more regex)
 - **Built-in rate limiting** and dynamic concurrency (up to 20x speedup)
 - **Automatic OpenTelemetry tracing** (no manual span attributes)
@@ -44,7 +46,7 @@ class PhoenixSDKEvaluator:
     """
     def __init__(
         self,
-        model: str = "gemini-3.5-flash",
+        model: str = "gemini-3.1-flash-lite",
         concurrency: int = 4,
         max_retries: int = 3
     ):
@@ -176,6 +178,7 @@ class PhoenixSDKEvaluator:
 Refine existing prompts to be optimized for Phoenix's function calling approach. Add explicit JSON output instructions and clear scoring rubrics:
 
 **Current prompt format** (evaluators.py:81-222):
+
 ```python
 EVALUATION_PROMPTS = {
     EvaluationCriteria.SECURITY_COVERAGE: """
@@ -194,6 +197,7 @@ Evaluate: Did this review adequately identify security vulnerabilities?
 ```
 
 **Refined Phoenix SDK format** (optimized for function calling):
+
 ```python
 SECURITY_PROMPT = """
 You are evaluating a code review for security vulnerability coverage.
@@ -227,6 +231,7 @@ Return a JSON object with 'score' (1-5), 'label' (critical/high/medium/low/poor)
 **File: `main.py`** (MODIFY)
 
 Change evaluator calls from:
+
 ```python
 evaluator = get_evaluator()
 eval_result = await evaluator.evaluate_review(
@@ -238,6 +243,7 @@ eval_result = await evaluator.evaluate_review(
 ```
 
 To:
+
 ```python
 evaluator = get_phoenix_sdk_evaluator()
 eval_result = await evaluator.evaluate_review_async(
@@ -251,11 +257,13 @@ eval_result = await evaluator.evaluate_review_async(
 ### Phase 4: Remove Manual Tracing Code
 
 **Delete/Deprecate these functions:**
+
 - `set_span_attributes()` calls in evaluators.py (auto-traced by Phoenix)
 - `_log_to_phoenix()` method (replaced by SDK's automatic logging)
 - `PhoenixEvaluationExporter.flush_async()` (SDK handles exports)
 
 **Keep:**
+
 - `trace_utils.py` for trace ID extraction (still needed for linking)
 - `__init__.py` exports
 
@@ -264,6 +272,7 @@ eval_result = await evaluator.evaluate_review_async(
 **File: `requirements.txt`** (VERIFY)
 
 Ensure Phoenix SDK is properly configured:
+
 ```
 phoenix>=6.0.0  # Already present
 arize-phoenix>=6.0.0  # Already present
@@ -271,17 +280,18 @@ arize-phoenix>=6.0.0  # Already present
 
 ## Files to Modify
 
-| File | Action | Description |
-|------|--------|-------------|
-| `ai_observability/phoenix_sdk_evaluator.py` | CREATE | New Phoenix SDK-based evaluator |
-| `ai_observability/__init__.py` | MODIFY | Export new evaluator, keep old for backward compatibility |
-| `ai_observability/evaluators.py` | RENAME | Rename to `evaluators_legacy.py` for backup |
-| `main.py` | MODIFY | Update evaluator import and calls |
-| `requirements.txt` | VERIFY | Ensure Phoenix SDK dependencies present |
+| File                                        | Action | Description                                               |
+| ------------------------------------------- | ------ | --------------------------------------------------------- |
+| `ai_observability/phoenix_sdk_evaluator.py` | CREATE | New Phoenix SDK-based evaluator                           |
+| `ai_observability/__init__.py`              | MODIFY | Export new evaluator, keep old for backward compatibility |
+| `ai_observability/evaluators.py`            | RENAME | Rename to `evaluators_legacy.py` for backup               |
+| `main.py`                                   | MODIFY | Update evaluator import and calls                         |
+| `requirements.txt`                          | VERIFY | Ensure Phoenix SDK dependencies present                   |
 
 ## Verification Steps
 
 1. **Unit Test**: Run evaluator with sample diff and review
+
    ```python
    evaluator = get_phoenix_sdk_evaluator()
    result = await evaluator.evaluate_review_async(
@@ -308,6 +318,7 @@ arize-phoenix>=6.0.0  # Already present
 ## Rollback Plan
 
 If issues arise:
+
 1. Revert `main.py` import to use `evaluators_legacy.py`
 2. Comment out new Phoenix SDK evaluator in `__init__.py`
 3. Restart service - old implementation resumes

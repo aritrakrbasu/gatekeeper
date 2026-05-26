@@ -232,7 +232,7 @@ Return only the number, nothing else.
 
     def __init__(
         self,
-        judge_model: str = "gemini-3.5-flash",
+        judge_model: str = "gemini-3.1-flash-lite",
         phoenix_client=None,
     ):
         """
@@ -577,7 +577,7 @@ Return only the number, nothing else.
             # --- EXPORT FORMAL EVALUATIONS TO PHOENIX EVALUATIONS TAB ---
             # This creates evaluation records that appear in the Phoenix Evaluations tab
             try:
-                from .phoenix_evaluations import get_evaluation_exporter
+                from .phoenix_evaluations_export import get_evaluation_exporter
 
                 # Get the current span ID
                 span_id = get_current_span_id()
@@ -816,7 +816,7 @@ def get_evaluator() -> ReviewQualityEvaluator:
     global _evaluator
 
     if _evaluator is None:
-        judge_model = os.getenv("JUDGE_MODEL", "gemini-3.5-flash")
+        judge_model = os.getenv("JUDGE_MODEL", "gemini-3.1-flash-lite")
         _evaluator = ReviewQualityEvaluator(judge_model=judge_model)
 
     return _evaluator
