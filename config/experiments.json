@@ -1,0 +1,5 @@
+{
+  "experiments": [],
+  "last_updated": null,
+  "description": "A/B experiment tracking for prompt improvements. Experiments are automatically created when the self-improvement loop tests new prompt variants."
+}

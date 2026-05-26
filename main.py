@@ -1,6 +1,7 @@
 import os
 import asyncio
 import json
+import logging
 import time
 import subprocess
 import platform
@@ -10,6 +11,10 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.types import Implementation
 from dotenv import load_dotenv
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Google Gemini Client
 from google import genai
@@ -31,6 +36,31 @@ from impact_analysis import (
 )
 from repo_manager import get_repo_manager
 
+# Arize Observability
+from config.arize_config import (
+    init_arize,
+    instrument_google_genai,
+    is_arize_configured,
+    init_phoenix_client,
+    get_phoenix_client,
+    get_phoenix_endpoint,
+    is_phoenix_configured,
+    ENABLE_EVALUATIONS,
+    ENABLE_SELF_IMPROVEMENT,
+    set_span_attributes,
+)
+
+# Phoenix MCP Bridge for Self-Introspection
+from config.phoenix_mcp import get_phoenix_bridge, close_phoenix_bridge
+
+# AI Observability - Evaluations and Self-Improvement
+from ai_observability import (
+    get_evaluator,
+    EvaluationCriteria,
+    get_prompt_manager,
+    analyze_and_improve,
+)
+
 # Detect the correct GitNexus command for the platform
 if platform.system() == "Windows":
     GITNEXUS_CMD = "gitnexus.cmd"
@@ -41,8 +71,28 @@ load_dotenv()
 
 app = FastAPI(title="The Gatekeeper Gemini Orchestrator")
 
-# Initialize the official Google Gen AI Client
-# Automatically extracts GEMINI_API_KEY from environment variables
+# Initialize Arize Observability (if configured)
+arize_initialized = init_arize(
+    project_name="gatekeeper",
+)
+
+if arize_initialized:
+    # Instrument Google GenAI for automatic tracing
+    instrument_google_genai()
+    print("[OK] Arize observability initialized - Google GenAI calls will be traced")
+else:
+    print("[INFO] Arize not configured - running without tracing")
+
+# Initialize Phoenix client for evaluations and self-improvement
+phoenix_initialized = init_phoenix_client()
+if phoenix_initialized:
+    print(f"[OK] Phoenix client initialized - Mode: {get_phoenix_endpoint()}")
+    print(f"[INFO] Evaluations enabled: {ENABLE_EVALUATIONS}")
+    print(f"[INFO] Self-improvement enabled: {ENABLE_SELF_IMPROVEMENT}")
+else:
+    print("[INFO] Phoenix not configured - evaluations and self-improvement disabled")
+
+# Create the Gemini client (auto-instrumented if Arize is enabled)
 ai_client = genai.Client()
 
 # Global process variables for persistent MCP channels
@@ -50,6 +100,9 @@ mongo_session = None
 gitlab_session = None
 nexus_session = None
 mcp_ready = False  # Track when MCP sessions are ready
+
+# Phoenix MCP Bridge for self-introspection
+phoenix_bridge = None
 
 # Load prompts from prompts directory
 PROMPTS_DIR = Path(__file__).parent / "prompts"
@@ -65,7 +118,23 @@ def load_prompt(prompt_name: str) -> str:
 
 async def boot_mcp_bridge():
     """Spins up and maintains persistent stdio pipes to MongoDB, GitLab, and GitNexus MCP servers"""
-    global mongo_session, gitlab_session, nexus_session, mcp_ready
+    global mongo_session, gitlab_session, nexus_session, mcp_ready, phoenix_bridge
+
+    # Initialize Phoenix MCP Bridge for self-introspection
+    print("[*] Initializing Phoenix MCP Bridge for self-introspection...")
+    if is_phoenix_configured():
+        try:
+            phoenix_bridge = await get_phoenix_bridge()
+            if phoenix_bridge.is_connected():
+                print("[✅] Phoenix MCP Bridge connected - Agent can now introspect!")
+            else:
+                print("[⚠️] Phoenix MCP Bridge failed to connect")
+        except Exception as e:
+            print(f"[⚠️] Phoenix MCP Bridge initialization error: {e}")
+            phoenix_bridge = None
+    else:
+        print("[ℹ️] Phoenix not configured - self-introspection disabled")
+        phoenix_bridge = None
 
     # 1. MongoDB Server Parameters (Direct Binary Mapping)
     mongo_params = StdioServerParameters(
@@ -322,15 +391,50 @@ async def startup_event():
     asyncio.create_task(boot_mcp_bridge())
 
 
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Clean up resources on shutdown."""
+    global phoenix_bridge
+
+    print("[*] Shutting down Gatekeeper service...")
+
+    # Close Phoenix MCP bridge
+    if phoenix_bridge:
+        try:
+            await close_phoenix_bridge()
+            phoenix_bridge = None
+            print("[✅] Phoenix MCP bridge closed")
+        except Exception as e:
+            print(f"[⚠️] Error closing Phoenix bridge: {e}")
+
+    # Shutdown Arize tracer provider
+    try:
+        from config.arize_config import shutdown as shutdown_arize
+        shutdown_arize()
+        print("[✅] Arize tracer provider shut down")
+    except Exception as e:
+        print(f"[⚠️] Error shutting down Arize: {e}")
+
+    print("[✅] Gatekeeper shutdown complete")
+
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint to verify MCP bridge status."""
+    phoenix_connected = False
+    if phoenix_bridge:
+        phoenix_connected = phoenix_bridge.is_connected()
+
     return {
         "status": "healthy",
         "mcp_ready": mcp_ready,
         "mongo_connected": mongo_session is not None,
         "gitlab_connected": gitlab_session is not None,
-        "nexus_connected": nexus_session is not None
+        "nexus_connected": nexus_session is not None,
+        "phoenix_connected": phoenix_connected,
+        "arize_initialized": arize_initialized,
+        "evaluations_enabled": ENABLE_EVALUATIONS,
+        "self_improvement_enabled": ENABLE_SELF_IMPROVEMENT,
     }
 
 @app.post("/webhooks/gitlab")
@@ -632,29 +736,116 @@ This may take 30-60 seconds depending on the size of the changes.
                     print("[*] Step 4: Shipping code diff to Gemini Pro Core for automated security review...")
                     print("[ℹ️] This may take 30-60 seconds depending on diff size...")
 
-                    # Load comprehensive Senior PR Reviewer prompt
-                    system_instruction = load_prompt("senior_pr_reviewer")
+                    # Create explicit span for code review to enable proper evaluation linkage
+                    from opentelemetry import trace
+                    tracer = trace.get_tracer(__name__)
 
-                    # Include impact context in the review prompt
-                    review_prompt = f"""Review this raw pull request diff change stream:
+                    audit_report = ""
+                    with tracer.start_as_current_span(
+                        "code_review.gatekeeper",
+                        attributes={
+                            "operation": "code_review",
+                            "mr_id": str(mr_iid),
+                            "project_id": str(project_id),
+                            "source_branch": source_branch,
+                            "file_count": str(len(changed_files) if changed_files else 0),
+                            "diff_size": str(len(raw_diff_content)),
+                        }
+                    ):
+                        # Also set span attributes using the helper (for backwards compatibility)
+                        set_span_attributes(
+                            operation="code_review",
+                            mr_id=str(mr_iid),
+                            project_id=str(project_id),
+                            source_branch=source_branch,
+                            file_count=len(changed_files) if changed_files else 0,
+                            diff_size=len(raw_diff_content),
+                        )
+
+                        # Load comprehensive Senior PR Reviewer prompt
+                        system_instruction = load_prompt("senior_pr_reviewer")
+
+                        # Include impact context in the review prompt
+                        review_prompt = f"""Review this raw pull request diff change stream:
 
 {raw_diff_content}
 
 {impact_context}
 """
 
-                    response = await asyncio.to_thread(
-                        ai_client.models.generate_content,
-                        model='gemini-3.5-flash',
-                        contents=review_prompt,
-                        config=types.GenerateContentConfig(
-                            system_instruction=system_instruction,
-                            temperature=0.1
+                        # Use native Gemini client (auto-traced by Arize if configured)
+                        response = await asyncio.to_thread(
+                            ai_client.models.generate_content,
+                            model='gemini-3.5-flash',
+                            contents=review_prompt,
+                            config=types.GenerateContentConfig(
+                                system_instruction=system_instruction,
+                                temperature=0.1,
+                            )
                         )
-                    )
+                        audit_report = response.text
 
-                    audit_report = response.text
-                    print(f"[✅] Step 4 complete: Gemini analysis compiled ({len(audit_report)} chars)")
+                        print(f"[✅] Step 4 complete: Gemini analysis compiled ({len(audit_report)} chars)")
+
+                        # --- 📊 LLM-as-a-Judge EVALUATION ---
+                        # Run evaluation INSIDE the code_review.gatekeeper span so attributes are set here
+                        evaluation_section = ""
+                        evaluation_score = 0
+                        try:
+                            if ENABLE_EVALUATIONS:
+                                print("[*] Step 4.5: Running LLM-as-a-Judge evaluation...")
+                                print("[ℹ️] Evaluation attributes will be set on this span (code_review.gatekeeper)")
+
+                                # Run evaluation directly - attributes will be set on the current span
+                                # The evaluation span has been removed to keep attributes with the LLM call
+                                evaluator = get_evaluator()
+                                eval_result = await evaluator.evaluate_review(
+                                    diff=raw_diff_content[:5000],  # Limit size for evaluation
+                                    review=audit_report[:10000],  # Limit size
+                                    criteria=[
+                                        EvaluationCriteria.SECURITY_COVERAGE,
+                                        EvaluationCriteria.CODE_QUALITY_COVERAGE,
+                                        EvaluationCriteria.ACTIONABILITY,
+                                        EvaluationCriteria.CLARITY,
+                                    ],
+                                    metadata={
+                                        "mr_id": str(mr_iid),
+                                        "project_id": str(project_id),
+                                        "source_branch": source_branch,
+                                    }
+                                )
+
+                                evaluation_score = eval_result["average_score"]
+                                print(f"[+] Evaluation score: {evaluation_score}/5")
+
+                                # Format evaluation for display
+                                evaluation_section = evaluator.format_evaluation_markdown(eval_result)
+
+                                # --- 🧠 SELF-IMPROVEMENT ---
+                                if ENABLE_SELF_IMPROVEMENT and evaluation_score < 3.5:
+                                    print("[*] Low score detected - checking for improvements...")
+                                    try:
+                                        manager = get_prompt_manager()
+                                        if manager:
+                                            # Get recent evaluations for analysis
+                                            recent_evals = [eval_result]  # Would accumulate in production
+                                            improvement = await analyze_and_improve(
+                                                recent_evaluations=recent_evals,
+                                                prompt_name="senior_pr_reviewer",
+                                            )
+                                            if improvement.get("suggestions"):
+                                                print(f"[+] Improvement suggestions: {len(improvement['suggestions'])}")
+                                    except Exception as si_err:
+                                        print(f"[⚠️] Self-improvement check failed: {si_err}")
+
+                            else:
+                                print("[ℹ️] Evaluations disabled - skipping LLM-as-a-Judge")
+
+                        except Exception as eval_err:
+                            print(f"[⚠️] Evaluation failed (continuing anyway): {eval_err}")
+                            logger.warning(f"Evaluation error: {eval_err}")
+
+                    # End of code_review.gatekeeper span - evaluation attributes are set on this span
 
                     # --- 🔍 POST-REVIEW VALIDATION ---
                     print("[*] Running post-review validation to catch issues outside changed code...")
@@ -758,77 +949,119 @@ This may take 30-60 seconds depending on the size of the changes.
                             print(f"[⚠️] Could not set commit status: {status_err}")
 
                     # --- 🤖 AUTO-FIX FEATURE: Atomic Hunk-Level Patches ---
-                    print("[*] Checking if issues can be auto-fixed via atomic patches...")
-
-                    # Parse the diff into atomic patches for granular fixes
-                    print("[*] Parsing diff into atomic hunk-level patches...")
-                    patch_parser = AtomicPatchParser(context_lines=3)
-                    atomic_patches = patch_parser.parse_unified_diff(raw_diff_content)
-
-                    print(f"[+] Parsed {len(atomic_patches)} atomic patches with "
-                          f"{sum(len(p.hunks) for p in atomic_patches)} total hunks")
-
-                    fix_prompt = (
-                        f"Review this software engineering audit report:\n\n{audit_report}\n\n"
-                        f"ANALYZE THESE ATOMIC PATCHES FOR FIXABLE ISSUES:\n\n"
-                        f"{create_patch_summary(atomic_patches)}\n\n"
-                        "TASK: Determine if the identified problems can be resolved automatically at the HUNK level.\n\n"
-                        "FIXABLE ISSUES INCLUDE (but are not limited to):\n"
-                        "- Hardcoded secrets, API keys, passwords, tokens -> Extract to environment variables\n"
-                        "- Hardcoded configuration values -> Extract to environment variables\n"
-                        "- Insecure default values -> Replace with secure defaults or env vars\n"
-                        "- SQL injection vulnerabilities -> Use parameterized queries\n"
-                        "- Missing input validation -> Add validation logic\n"
-                        "- Insecure cryptographic algorithms -> Use secure alternatives\n"
-                        "- Sensitive data in logs -> Remove or sanitize\n\n"
-                        "For each fixable issue, provide:\n"
-                        "- hunk_id: The ID of the hunk to fix (from the patch summary above)\n"
-                        "- issue: Brief description of the problem\n"
-                        "- original_lines: The EXACT lines from the hunk that need to be fixed (preserve formatting)\n"
-                        "- fixed_lines: The corrected replacement lines\n"
-                        "- extracted_env_vars: If secrets/configs are extracted, map them as {\"VAR_NAME\": \"value\"}\n\n"
-                        "IMPORTANT RULES:\n"
-                        "1. Use the EXACT hunk_id from the patch summary above\n"
-                        "2. original_lines must match the hunk content exactly\n"
-                        "3. For hardcoded values, extract to environment variables using format: process.env.VAR_NAME (JavaScript) or os.getenv('VAR_NAME') (Python)\n"
-                        "4. If no issues are fixable, return {\"fixable\": false, \"fixes\": []}\n\n"
-                        "Respond ONLY with valid JSON in this exact format:\n"
-                        '{"fixable": true/false, "fixes": [{"hunk_id": "id", "issue": "description", "original_lines": ["line1", "line2"], "fixed_lines": ["line1_fixed", "line2_fixed"], "extracted_env_vars": {"KEY": "value"}}]}'
-                    )
-
-                    # Using JSON output mode (Developer API compatible)
-                    print("[DEBUG] Preparing to call Gemini for fix analysis...")
-                    print(f"[DEBUG] Fix prompt length: {len(fix_prompt)} chars")
-
-                    fix_analysis = await asyncio.wait_for(
-                        asyncio.to_thread(
-                            ai_client.models.generate_content,
-                            model='gemini-3.5-flash',
-                            contents=fix_prompt,
-                            config=types.GenerateContentConfig(
-                                system_instruction="You are a strict automated code repair system. Output only valid JSON with no markdown formatting.",
-                                temperature=0.1,
-                                response_mime_type="application/json"
-                            )
-                        ),
-                        timeout=60.0  # 60 second timeout for fix analysis
-                    )
-
-                    print("[DEBUG] Waiting for fix analysis response (60s timeout)...")
-
                     try:
-                        # Clean up the response - remove markdown code blocks if present
-                        response_text = fix_analysis.text.strip()
-                        print(f"[DEBUG] Fix analysis response: {response_text[:500]}")
+                        print("[*] Checking if issues can be auto-fixed via atomic patches...")
 
-                        if response_text.startswith("```"):
-                            response_text = response_text.split("```")[1]
-                            if response_text.startswith("json"):
-                                response_text = response_text[4:]
-                        response_text = response_text.strip()
+                        # Create a span for auto-fix generation - evaluation attributes will be set HERE
+                        with tracer.start_as_current_span(
+                            "auto_fix_generation.gatekeeper",
+                            attributes={
+                                "operation": "auto_fix_generation",
+                                "mr_id": str(mr_iid),
+                                "project_id": str(project_id),
+                            }
+                        ):
+                            # Parse the diff into atomic patches for granular fixes
+                            print("[*] Parsing diff into atomic hunk-level patches...")
+                            patch_parser = AtomicPatchParser(context_lines=3)
+                            atomic_patches = patch_parser.parse_unified_diff(raw_diff_content)
 
-                        fix_data = json.loads(response_text)
-                        print(f"[DEBUG] Parsed fix_data: fixable={fix_data.get('fixable')}, fixes count={len(fix_data.get('fixes', []))}")
+                            print(f"[+] Parsed {len(atomic_patches)} atomic patches with "
+                                  f"{sum(len(p.hunks) for p in atomic_patches)} total hunks")
+
+                            fix_prompt = (
+                                f"Review this software engineering audit report:\n\n{audit_report}\n\n"
+                                f"ANALYZE THESE ATOMIC PATCHES FOR FIXABLE ISSUES:\n\n"
+                                f"{create_patch_summary(atomic_patches)}\n\n"
+                                "TASK: Determine if the identified problems can be resolved automatically at the HUNK level.\n\n"
+                                "FIXABLE ISSUES INCLUDE (but are not limited to):\n"
+                                "- Hardcoded secrets, API keys, passwords, tokens -> Extract to environment variables\n"
+                                "- Hardcoded configuration values -> Extract to environment variables\n"
+                                "- Insecure default values -> Replace with secure defaults or env vars\n"
+                                "- SQL injection vulnerabilities -> Use parameterized queries\n"
+                                "- Missing input validation -> Add validation logic\n"
+                                "- Insecure cryptographic algorithms -> Use secure alternatives\n"
+                                "- Sensitive data in logs -> Remove or sanitize\n\n"
+                                "For each fixable issue, provide:\n"
+                                "- hunk_id: The ID of the hunk to fix (from the patch summary above)\n"
+                                "- issue: Brief description of the problem\n"
+                                "- original_lines: The EXACT lines from the hunk that need to be fixed (preserve formatting)\n"
+                                "- fixed_lines: The corrected replacement lines\n"
+                                "- extracted_env_vars: If secrets/configs are extracted, map them as {\"VAR_NAME\": \"value\"}\n\n"
+                                "IMPORTANT RULES:\n"
+                                "1. Use the EXACT hunk_id from the patch summary above\n"
+                                "2. original_lines must match the hunk content exactly\n"
+                                "3. For hardcoded values, extract to environment variables using format: process.env.VAR_NAME (JavaScript) or os.getenv('VAR_NAME') (Python)\n"
+                                "4. If no issues are fixable, return {\"fixable\": false, \"fixes\": []}\n\n"
+                                "Respond ONLY with valid JSON in this exact format:\n"
+                                '{"fixable": true/false, "fixes": [{"hunk_id": "id", "issue": "description", "original_lines": ["line1", "line2"], "fixed_lines": ["line1_fixed", "line2_fixed"], "extracted_env_vars": {"KEY": "value"}}]}'
+                            )
+
+                            # Using native Gemini client (auto-traced by Arize if configured)
+                            print("[DEBUG] Preparing to call Gemini for fix analysis...")
+                            print(f"[DEBUG] Fix prompt length: {len(fix_prompt)} chars")
+
+                            response = await asyncio.wait_for(
+                                asyncio.to_thread(
+                                    ai_client.models.generate_content,
+                                    model='gemini-3.5-flash',
+                                    contents=fix_prompt,
+                                    config=types.GenerateContentConfig(
+                                        system_instruction="You are a strict automated code repair system. Output only valid JSON with no markdown formatting.",
+                                        temperature=0.1,
+                                    )
+                                ),
+                                timeout=60.0  # 60 second timeout for fix analysis
+                            )
+
+                            # Parse JSON from response
+                            response_text = response.text.strip()
+                            # Remove markdown code blocks if present
+                            if response_text.startswith("```json"):
+                                response_text = response_text[7:]
+                            if response_text.startswith("```"):
+                                response_text = response_text[3:]
+                            if response_text.endswith("```"):
+                                response_text = response_text[:-3]
+                            response_text = response_text.strip()
+                            fix_data = json.loads(response_text)
+
+                            print("[DEBUG] Fix analysis response received successfully")
+                            print(f"[DEBUG] Parsed fix_data: fixable={fix_data.get('fixable')}, fixes count={len(fix_data.get('fixes', []))}")
+
+                            # --- 📊 EVALUATE AUTO-FIX QUALITY ---
+                            # Run evaluation INSIDE the auto_fix span so attributes are set here
+                            try:
+                                if ENABLE_EVALUATIONS and fix_data.get("fixes"):
+                                    print("[*] Step 4.6: Running LLM-as-a-Judge evaluation on auto-fixes...")
+                                    print("[ℹ️] Auto-fix evaluation attributes will be set on this span (auto_fix_generation.gatekeeper)")
+
+                                    evaluator = get_evaluator()
+                                    fix_eval_result = await evaluator.evaluate_auto_fix(
+                                        fixes=str(fix_data),  # Convert to string for evaluation
+                                        review=audit_report[:5000],
+                                        criteria=[
+                                            EvaluationCriteria.FIX_CORRECTNESS,
+                                            EvaluationCriteria.FIX_SAFETY,
+                                            EvaluationCriteria.FIX_COMPLETENESS,
+                                        ],
+                                        metadata={
+                                            "mr_id": str(mr_iid),
+                                            "project_id": str(project_id),
+                                            "fixes_count": str(len(fix_data.get("fixes", []))),
+                                        }
+                                    )
+
+                                    print(f"[+] Auto-fix evaluation score: {fix_eval_result['average_score']}/5")
+
+                                    # Only proceed with fixes if they pass quality threshold
+                                    if fix_eval_result['average_score'] < 3.0:
+                                        print(f"[⚠️] Auto-fix quality too low ({fix_eval_result['average_score']}/5) - skipping fix application")
+                                        fix_data["fixable"] = False
+                                        fix_data["fixes"] = []
+                            except Exception as fix_eval_err:
+                                print(f"[⚠️] Auto-fix evaluation failed (continuing anyway): {fix_eval_err}")
+                                logger.warning(f"Auto-fix evaluation error: {fix_eval_err}")
 
                         if fix_data.get("fixable") and fix_data.get("fixes"):
                             print(f"[🔧] Found {len(fix_data['fixes'])} fixable hunks! Creating atomic patch branch...")
@@ -903,9 +1136,9 @@ This may take 30-60 seconds depending on the size of the changes.
                                 fixes_applied.append(f"- ✅ **{file_path}:{original_hunk.old_start}**: {fix_description}")
                                 print(f"[+] Queued atomic fix for {file_path} hunk {hunk_id}")
 
-                            # Apply all fixes file by file using atomic patch application
-                            print(f"[*] Applying {len(modified_files)} file(s) with atomic hunk fixes...")
-
+                                # Apply all fixes file by file using atomic patch application
+                                print(f"[*] Applying {len(modified_files)} file(s) with atomic hunk fixes...")
+    
                             for file_path, file_fixes in modified_files.items():
                                 try:
                                     # Get the original file content from the source branch
@@ -920,24 +1153,24 @@ This may take 30-60 seconds depending on the size of the changes.
                                                 "ref": source_branch
                                             }
                                         )
-
+    
                                         # Decode file content (GitLab returns base64)
                                         import base64
-
+    
                                         print(f"[DEBUG] Raw file_result type: {type(file_result)}")
                                         print(f"[DEBUG] Raw file_result.content type: {type(file_result.content)}")
                                         if hasattr(file_result.content, '__iter__') and len(file_result.content) > 0:
                                             print(f"[DEBUG] First content item type: {type(file_result.content[0])}")
                                             if hasattr(file_result.content[0], 'text'):
                                                 print(f"[DEBUG] First 200 chars of raw text: {repr(file_result.content[0].text[:200])}")
-
+    
                                         if hasattr(file_result.content[0], 'text'):
                                             file_content_json = json.loads(file_result.content[0].text)
                                             content = file_content_json.get('content', '')
                                             encoding = file_content_json.get('encoding', 'utf8')
-
+    
                                             print(f"[DEBUG] File encoding: {encoding}, content length: {len(content)}")
-
+    
                                             # Only decode if the encoding is base64
                                             if encoding == 'base64':
                                                 content_b64 = content
@@ -945,10 +1178,10 @@ This may take 30-60 seconds depending on the size of the changes.
                                                 padding_needed = (4 - len(content_b64) % 4) % 4
                                                 if padding_needed:
                                                     content_b64 += '=' * padding_needed
-
+    
                                                 # Handle URL-safe base64 encoding
                                                 content_b64 = content_b64.replace('-', '+').replace('_', '/')
-
+    
                                                 # Decode base64
                                                 try:
                                                     decoded_bytes = base64.b64decode(content_b64)
@@ -960,28 +1193,28 @@ This may take 30-60 seconds depending on the size of the changes.
                                                 file_content = content
                                         else:
                                             file_content = str(file_result.content)
-
+    
                                         print(f"[DEBUG] Fetched existing file content: {len(file_content)} chars")
                                     except Exception as fetch_err:
                                         # File doesn't exist (new file) - start with empty content
                                         print(f"[ℹ️] New file detected ({file_path}), starting with empty content")
                                         file_content = ""
-
+    
                                     # Normalize line endings to LF and split into lines
                                     # Remove trailing carriage returns that can cause issues
                                     file_content = file_content.replace('\r\n', '\n').replace('\r', '\n')
-
+    
                                     # Apply atomic fixes line by line
                                     # For new files, start with empty lines list
                                     file_lines = file_content.split('\n') if file_content else []
-
+    
                                     # Sort fixes by line number in reverse order to maintain line positions
                                     file_fixes.sort(key=lambda x: x['old_start'], reverse=True)
-
+    
                                     for fix_data in file_fixes:
                                         original_lines = fix_data['original_lines']
                                         fixed_lines = fix_data['fixed_lines']
-
+    
                                         # For new files (where file_lines was empty before fetching),
                                         # we need to find and replace the lines by content, not position
                                         if not original_lines:
@@ -992,13 +1225,13 @@ This may take 30-60 seconds depending on the size of the changes.
                                             # Search for the original lines in the file by content
                                             # This handles cases where line positions may have shifted
                                             found_index = -1
-
+    
                                             # Try to find the exact sequence of lines
                                             for i in range(len(file_lines) - len(original_lines) + 1):
                                                 if file_lines[i:i + len(original_lines)] == original_lines:
                                                     found_index = i
                                                     break
-
+    
                                             if found_index == -1:
                                                 # Try a more flexible search - check if lines exist (ignoring trailing whitespace)
                                                 for i in range(len(file_lines) - len(original_lines) + 1):
@@ -1012,29 +1245,29 @@ This may take 30-60 seconds depending on the size of the changes.
                                                     if match:
                                                         found_index = i
                                                         break
-
+    
                                             if found_index == -1:
                                                 print(f"[⚠️] Could not find matching lines for {file_path}, skipping atomic fix")
                                                 print(f"[DEBUG] Looking for: {original_lines}")
                                                 continue
-
+    
                                             # Apply the fix at the found position
                                             file_lines[found_index:found_index + len(original_lines)] = fixed_lines
                                             print(f"[+] Applied atomic fix to {file_path}:{found_index + 1}")
-
+    
                                     # Write the modified file
                                     # Remove trailing empty line if present (from split)
                                     if file_lines and file_lines[-1] == '':
                                         file_lines = file_lines[:-1]
-
+    
                                     new_content = '\n'.join(file_lines)
                                     # Ensure file ends with newline (standard practice)
                                     if not new_content.endswith('\n'):
                                         new_content += '\n'
-
+    
                                     print(f"[DEBUG] Sending {len(new_content)} bytes to GitLab for {file_path}")
                                     print(f"[DEBUG] Content preview: {repr(new_content[:200])}")
-
+    
                                     await gitlab_session.call_tool(
                                         name="create_or_update_file",
                                         arguments={
@@ -1046,10 +1279,10 @@ This may take 30-60 seconds depending on the size of the changes.
                                         }
                                     )
                                     print(f"[+] Committed atomic fixes to {file_path}")
-
+    
                                 except Exception as file_err:
                                     print(f"[x] Failed to apply atomic fixes to {file_path}: {file_err}")
-
+    
                             # Create or update .env file with extracted secrets
                             if all_env_vars:
                                 print(f"[🔐] Creating .env file with {len(all_env_vars)} extracted environment variables...")
@@ -1057,7 +1290,7 @@ This may take 30-60 seconds depending on the size of the changes.
                                 env_content += "# These values were extracted from hardcoded secrets in the codebase\n\n"
                                 for key, value in all_env_vars.items():
                                     env_content += f"{key}={value}\n"
-
+    
                                 try:
                                     await gitlab_session.call_tool(
                                         name="create_or_update_file",
@@ -1071,7 +1304,7 @@ This may take 30-60 seconds depending on the size of the changes.
                                     )
                                     fixes_applied.append(f"- 🔐 **.env**: Created with {len(all_env_vars)} environment variable(s)")
                                     print(f"[+] Created .env file with environment variables")
-
+    
                                     # Also ensure .env is in .gitignore
                                     print(f"[*] Ensuring .env is in .gitignore...")
                                     try:
@@ -1087,7 +1320,7 @@ This may take 30-60 seconds depending on the size of the changes.
                                         current_gitignore = str(gitignore_result.content)
                                     except Exception:
                                         current_gitignore = ""
-
+    
                                     if ".env" not in current_gitignore:
                                         updated_gitignore = current_gitignore.rstrip() + "\n\n# Gatekeeper: Ignore environment files\n.env\n.env.local\n.env.*\n"
                                         await gitlab_session.call_tool(
@@ -1104,17 +1337,17 @@ This may take 30-60 seconds depending on the size of the changes.
                                         print(f"[+] Added .env to .gitignore")
                                     else:
                                         print(f"[ℹ️] .env already in .gitignore")
-
+    
                                 except Exception as env_err:
                                     print(f"[x] Failed to create .env file: {env_err}")
-
+    
                             if fixes_applied:
                                 formatted_fixes_list = "\n".join(fixes_applied)
-                                
+    
                                 print(f"[*] Creating MR with auto-fixes...")
                                 fix_mr_title = f"🔧 Gatekeeper Auto-Fix for MR !{mr_iid}"
                                 fix_mr_description = f"### 🛡️ Gatekeeper Auto-Fix\n\nThis MR was automatically created by **The Gatekeeper** to resolve auditing issues found in MR !{mr_iid}.\n\n**Original MR:** {mr_title}\n**Source Branch:** {source_branch}\n\n**Remediations Applied:**\n{formatted_fixes_list}\n\n---\n*This patch was generated autonomously by the Gatekeeper Schema Enforced Remediation Core.*"
-
+    
                                 await gitlab_session.call_tool(
                                     name="create_merge_request",
                                     arguments={
@@ -1126,20 +1359,20 @@ This may take 30-60 seconds depending on the size of the changes.
                                     }
                                 )
                                 print("[+] Auto-fix MR created!")
-
+    
                                 original_mr_comment = f"### 🤖 Gatekeeper Auto-Fix Created\n\nI found functional remediation paths for the issues flagged during my audit. A separate layout patch has been opened against your branch.\n\n**Target Branch:** `{fix_branch_name}`\n\n**Remediations Applied:**\n{formatted_fixes_list}\n\nPlease merge the tracking correction PR if the structural alterations match your specification layout."
-                                
+    
                                 await gitlab_session.call_tool(
                                     name="create_merge_request_note",
-                                    arguments={
-                                        "project_id": str(project_id),
-                                        "merge_request_iid": int(mr_iid),
-                                        "body": original_mr_comment
-                                    }
+                                arguments={
+                                    "project_id": str(project_id),
+                                    "merge_request_iid": int(mr_iid),
+                                    "body": original_mr_comment
+                                }
                                 )
                                 print("[+] Notified original MR about auto-fix!")
-                        else:
-                            print("[ℹ️] Issues found but require manual review or are not auto-fixable.")
+                            else:
+                                print("[ℹ️] Issues found but require manual review or are not auto-fixable.")
 
                     except asyncio.TimeoutError:
                         print("[⏱️] Fix analysis timed out after 60 seconds - skipping auto-fix")
@@ -1157,16 +1390,16 @@ This may take 30-60 seconds depending on the size of the changes.
                         try:
                             await gitlab_session.call_tool(
                                 name="create_commit_status",
-                                arguments={
-                                    "project_id": str(project_id),
-                                    "sha": commit_sha,
-                                    "state": "failed",
-                                    "name": "gatekeeper/security-review",
-                                    "description": f"❌ Gatekeeper review failed: {str(e)[:100]}"
-                                }
+                            arguments={
+                                "project_id": str(project_id),
+                                "sha": commit_sha,
+                                "state": "failed",
+                                "name": "gatekeeper/security-review",
+                                "description": f"❌ Gatekeeper review failed: {str(e)[:100]}"
+                            }
                             )
                             print("[+] Status set to FAILED")
                         except Exception as status_err:
                             print(f"[x] Failed to set error status: {status_err}")
-                        
+
     return {"status": "event_processed"}
