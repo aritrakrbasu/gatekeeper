@@ -1,0 +1,16 @@
+{
+  "name": "gatekeeper",
+  "version": "1.0.0",
+  "description": "Gatekeeper GitLab Merge Request Orchestrator",
+  "main": "main.py",
+  "scripts": {
+    "setup-python": "pip install -r requirements.txt",
+    "setup-npm": "npm install --cache ./npm-cache",
+    "start": "uvicorn main:app --host 0.0.0.0 --port 8000"
+  },
+  "devDependencies": {
+    "@zereight/mcp-gitlab": "^2.1.16",
+    "gitnexus": "^1.6.5",
+    "mongodb-mcp-server": "^1.11.0"
+  }
+}

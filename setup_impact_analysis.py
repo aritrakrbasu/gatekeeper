@@ -88,10 +88,20 @@ def check_nexus_installation():
     """Check if gitnexus is installed and working."""
     print("\n[*] Checking gitnexus installation...")
 
+    # Determine path to local binary
+    root_dir = Path(__file__).parent
+    local_bin = root_dir / "node_modules" / ".bin"
+    if platform.system() == "Windows":
+        local_gitnexus = local_bin / "gitnexus.cmd"
+        cmd = str(local_gitnexus) if local_gitnexus.exists() else "gitnexus.cmd"
+    else:
+        local_gitnexus = local_bin / "gitnexus"
+        cmd = str(local_gitnexus) if local_gitnexus.exists() else "gitnexus"
+
     try:
         # Try running gitnexus --version
         result = subprocess.run(
-            ['gitnexus', '--version'],
+            [cmd, '--version'],
             capture_output=True,
             text=True,
             timeout=5

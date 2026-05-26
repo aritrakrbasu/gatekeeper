@@ -139,12 +139,14 @@ class RepositoryManager:
 
     async def clone_repository(self, project_id: str, gitlab_url: str, private_token: Optional[str] = None, gitlab_session=None) -> Path:
         """
-        Clone a repository from GitLab using MCP (avoids git credential popups).
+        Clone a repository from GitLab.
+        If gitlab_session is available, downloads files via GitLab MCP.
+        Otherwise, falls back to standard git clone.
 
         Args:
             project_id: GitLab project ID
             gitlab_url: GitLab repository URL
-            private_token: Optional GitLab personal access token (for backwards compat)
+            private_token: Optional GitLab personal access token
             gitlab_session: Active GitLab MCP session for downloading files
 
         Returns:
@@ -152,11 +154,39 @@ class RepositoryManager:
         """
         local_path = self.get_local_path(project_id)
 
+        # Fallback to standard git clone if no GitLab MCP session is provided
+        if gitlab_session is None:
+            print(f"[*] Cloning repository {project_id} via git clone...")
+            clone_url = gitlab_url
+            if private_token:
+                if gitlab_url.startswith("https://"):
+                    clone_url = gitlab_url.replace("https://", f"https://oauth2:{private_token}@")
+            
+            try:
+                if local_path.exists():
+                    import shutil
+                    shutil.rmtree(local_path)
+                
+                await asyncio.to_thread(
+                    subprocess.run,
+                    ["git", "clone", clone_url, str(local_path)],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=300
+                )
+                print(f"[✅] Repository {project_id} cloned successfully via git clone")
+                return local_path
+            except subprocess.CalledProcessError as e:
+                print(f"[❌] Failed to clone via git clone: {e.stderr}")
+                raise Exception(f"Git clone failed: {e.stderr}")
+            except Exception as e:
+                print(f"[❌] Failed to clone via git clone: {e}")
+                raise
+
         print(f"[*] Downloading repository {project_id} files via GitLab MCP...")
 
         try:
-            if gitlab_session is None:
-                raise Exception("GitLab MCP session required for clone")
 
             # Create the directory structure
             local_path.mkdir(parents=True, exist_ok=True)
@@ -322,11 +352,22 @@ class RepositoryManager:
         print(f"[*] Indexing repository {project_id} with GitNexus...")
         print("[ℹ️] This may take 1-5 minutes depending on repository size...")
 
+        # Determine path to local binary
+        root_dir = Path(__file__).parent
+        local_bin = root_dir / "node_modules" / ".bin"
+        import platform
+        if platform.system() == "Windows":
+            local_gitnexus = local_bin / "gitnexus.cmd"
+            cmd = str(local_gitnexus) if local_gitnexus.exists() else "gitnexus.cmd"
+        else:
+            local_gitnexus = local_bin / "gitnexus"
+            cmd = str(local_gitnexus) if local_gitnexus.exists() else "gitnexus"
+
         try:
             # Run gitnexus analyze
             result = await asyncio.to_thread(
                 subprocess.run,
-                ["gitnexus", "analyze"],
+                [cmd, "analyze"],
                 capture_output=True,
                 text=True,
                 timeout=600,  # 10 minutes timeout for large repos

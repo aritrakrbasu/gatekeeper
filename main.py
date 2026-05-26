@@ -32,10 +32,14 @@ from impact_analysis import (
 from repo_manager import get_repo_manager
 
 # Detect the correct GitNexus command for the platform
+root_dir = Path(__file__).parent
+local_bin = root_dir / "node_modules" / ".bin"
 if platform.system() == "Windows":
-    GITNEXUS_CMD = "gitnexus.cmd"
+    local_gitnexus = local_bin / "gitnexus.cmd"
+    GITNEXUS_CMD = str(local_gitnexus) if local_gitnexus.exists() else "gitnexus.cmd"
 else:
-    GITNEXUS_CMD = "gitnexus"
+    local_gitnexus = local_bin / "gitnexus"
+    GITNEXUS_CMD = str(local_gitnexus) if local_gitnexus.exists() else "gitnexus"
 
 load_dotenv()
 
@@ -67,18 +71,52 @@ async def boot_mcp_bridge():
     """Spins up and maintains persistent stdio pipes to MongoDB, GitLab, and GitNexus MCP servers"""
     global mongo_session, gitlab_session, nexus_session, mcp_ready
 
+    # Detect platform and configure paths dynamically
+    is_windows = platform.system() == "Windows"
+    
+    # 1. Determine Node and NPX executables
+    if is_windows:
+        node_cmd = r"C:\Program Files\nodejs\node.exe" if Path(r"C:\Program Files\nodejs\node.exe").exists() else "node"
+        npx_cmd = "npx.cmd"
+    else:
+        node_cmd = "node"
+        npx_cmd = "npx"
+
+    # 2. Determine paths to MongoDB and GitLab MCP servers
+    root_dir = Path(__file__).parent
+    
+    # MongoDB MCP Server path
+    local_mongo = root_dir / "node_modules" / "mongodb-mcp-server" / "dist" / "esm" / "index.js"
+    if local_mongo.exists():
+        mongo_js_path = str(local_mongo.resolve())
+        print(f"[+] Found local MongoDB MCP: {mongo_js_path}")
+    else:
+        # Fallback to Windows global path
+        mongo_js_path = r"C:\Users\BCSKOL36\AppData\Roaming\npm\node_modules\mongodb-mcp-server\dist\esm\index.js"
+        print(f"[ℹ️] Local MongoDB MCP not found. Using fallback path: {mongo_js_path}")
+
+    # GitLab MCP Server path
+    local_gitlab = root_dir / "node_modules" / "@zereight" / "mcp-gitlab" / "build" / "index.js"
+    if local_gitlab.exists():
+        gitlab_js_path = str(local_gitlab.resolve())
+        print(f"[+] Found local GitLab MCP: {gitlab_js_path}")
+    else:
+        # Fallback to Windows global path
+        gitlab_js_path = r"C:\Users\BCSKOL36\AppData\Roaming\npm\node_modules\@zereight\mcp-gitlab\build\index.js"
+        print(f"[ℹ️] Local GitLab MCP not found. Using fallback path: {gitlab_js_path}")
+
     # 1. MongoDB Server Parameters (Direct Binary Mapping)
     mongo_params = StdioServerParameters(
-        command=r"C:\Program Files\nodejs\node.exe",
-        args=[r"C:\Users\BCSKOL36\AppData\Roaming\npm\node_modules\mongodb-mcp-server\dist\esm\index.js"],
+        command=node_cmd,
+        args=[mongo_js_path],
         env={**os.environ}
     )
 
     # 2. GitLab MCP Server Parameters (Direct Binary Mapping supporting PAT auth)
     gitlab_token = os.getenv("GITLAB_PERSONAL_ACCESS_TOKEN", "")
     gitlab_params = StdioServerParameters(
-        command=r"C:\Program Files\nodejs\node.exe",
-        args=[r"C:\Users\BCSKOL36\AppData\Roaming\npm\node_modules\@zereight\mcp-gitlab\build\index.js"],
+        command=node_cmd,
+        args=[gitlab_js_path],
         env={
             **os.environ,
             "GITLAB_PERSONAL_ACCESS_TOKEN": gitlab_token,
@@ -88,7 +126,7 @@ async def boot_mcp_bridge():
 
     # 3. GitNexus MCP Server Parameters (Code Intelligence & Impact Analysis)
     nexus_params = StdioServerParameters(
-        command=r"C:\Program Files\nodejs\node.exe",
+        command=npx_cmd,
         args=["-y", "gitnexus@latest", "mcp"],
         env={**os.environ}
     )

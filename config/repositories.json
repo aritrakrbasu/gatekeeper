@@ -5,5 +5,12 @@
     "branch": "main",
     "private_token": null,
     "auto_update": true
+  },
+  "rapid-agents-test": {
+    "project_id": "rapid-agents-test",
+    "gitlab_url": "https://gitlab.com/Swapnendu003/rapid-agents-test",
+    "branch": "main",
+    "private_token": null,
+    "auto_update": true
   }
 }
