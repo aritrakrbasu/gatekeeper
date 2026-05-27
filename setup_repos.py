@@ -51,10 +51,18 @@ async def cmd_add(args):
 
     print_header("Adding Repository")
 
-    project_id = args.project_id or input("GitLab Project ID: ").strip()
-    gitlab_url = args.url or input("GitLab Repository URL: ").strip()
+    project_id = args.project_id
+    gitlab_url = args.url
     branch = args.branch or "main"
-    private_token = args.token or input("Private Token (optional, press Enter to skip): ").strip() or None
+    private_token = args.token
+
+    # Only prompt for input if arguments were not provided via CLI
+    if not project_id:
+        project_id = input("GitLab Project ID: ").strip()
+    if not gitlab_url:
+        gitlab_url = input("GitLab Repository URL: ").strip()
+    if not args.token and not args.project_id:
+        private_token = input("Private Token (optional, press Enter to skip): ").strip() or None
 
     if not project_id or not gitlab_url:
         print("[❌] Project ID and URL are required")
@@ -62,8 +70,12 @@ async def cmd_add(args):
 
     manager.add_repository(project_id, gitlab_url, branch, private_token)
 
-    # Ask if user wants to clone and index now
-    if args.index or input("\nClone and index now? (y/N): ").strip().lower() == 'y':
+    # Ask if user wants to clone and index now (only if not specified in CLI)
+    should_index = args.index
+    if not should_index and not args.project_id:
+        should_index = input("\nClone and index now? (y/N): ").strip().lower() == 'y'
+
+    if should_index:
         print("\n[*] Cloning and indexing repository...")
         result = await manager.ensure_repository_ready(project_id, gitlab_url, private_token)
         if result:

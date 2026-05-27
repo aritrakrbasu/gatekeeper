@@ -1,314 +1,131 @@
-# Repository Management Quick Start Guide
+# Developer Setup Guide (Cross-Platform)
 
-## Overview
+Welcome to **The Gatekeeper**! This orchestrator integrates MongoDB, GitLab, and GitNexus to automatically audit GitLab Merge Requests, run pre-review impact analysis, and open automated code remediation (auto-fix) PRs.
 
-The Gatekeeper now supports **GitNexus integration** with two modes of operation:
+Follow these steps to set up the codebase on macOS, Linux, or Windows.
 
-1. **Option 2 (Priority)**: Pre-indexed repositories - Fastest, recommended for frequently monitored repos
-2. **Option 1 (Fallback)**: Auto-index on webhook - Automatically clones and indexes when first MR arrives
+---
 
-## Quick Start
+## Prerequisites
+1. **Python 3.8+** (Python 3.13 is fully tested)
+2. **Node.js** and **npm** (v10+ / v20+)
+3. **Git** installed on your system
 
-### Step 1: Install GitNexus
+---
 
-```bash
-npm install -g gitnexus
-```
+## Step 1: Python Environment Setup
 
-### Step 2: Pre-Index Your Repositories (Option 2)
-
-**Interactive Mode:**
-```bash
-python setup_repos.py
-```
-
-**Direct Mode:**
-```bash
-# Add a repository
-python setup_repos.py add my-project https://gitlab.com/your-org/your-project
-
-# Pre-index all configured repositories
-python setup_repos.py index
-
-# Check status
-python setup_repos.py status
-```
-
-### Step 3: Start Gatekeeper
-
-```bash
-python main.py
-```
-
-Gatekeeper will now:
-1. ✅ Check for pre-indexed repositories first (fast)
-2. ✅ Fall back to auto-index if not found (automatic)
-
-## How It Works
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    GitLab Remote Repository                 │
-│  MR Opened → Webhook → Gatekeeper                          │
-└─────────────────────────────────────────────────────────────┘
-                          ↓
-┌─────────────────────────────────────────────────────────────┐
-│                  Gatekeeper (Local)                         │
-│                                                             │
-│  1. Receive webhook                                        │
-│     ↓                                                       │
-│  2. Check if repository is pre-indexed                      │
-│     ├─ Yes → Use immediately (fast!)                       │
-│     └─ No → Auto-clone and index (Option 1 fallback)       │
-│     ↓                                                       │
-│  3. Run analysis with GitNexus context                     │
-│  4. Post review to MR                                      │
-│                                                             │
-│  Local Storage:                                             │
-│  workspace/projects/                                        │
-│  ├── project_123/        ← Cloned repository                │
-│  │   └── .gitnexus/      ← GitNexus knowledge graph        │
-│  └── project_456/                                         │
-│      └── .gitnexus/                                        │
-└─────────────────────────────────────────────────────────────┘
-```
-
-## Repository Management Commands
-
-### Add a Repository
-
-```bash
-# Interactive
-python setup_repos.py add
-
-# Direct
-python setup_repos.py add <repo-id> <gitlab-url> [--branch main] [--token TOKEN]
-
-# Example
-python setup_repos.py add backend-api https://gitlab.com/company/backend-api
-
-# With private token
-python setup_repos.py add private-repo https://gitlab.com/company/private-repo --token glpat_xxx
-```
-
-### List All Repositories
-
-```bash
-python setup_repos.py list
-```
-
-Output:
-```
-Repository ID               Project ID   Cloned   Indexed
------------------------------------------------------------------
-backend-api                 12345678     ✅       ✅
-frontend-app                87654321     ✅       ❌
-```
-
-### Pre-Index All Repositories
-
-```bash
-python setup_repos.py index
-```
-
-This will:
-- Clone any repositories that aren't already cloned
-- Run `gitnexus analyze` on each repository
-- Take 1-5 minutes per repository (depending on size)
-
-### Check Status
-
-```bash
-# All repositories
-python setup_repos.py status
-
-# Specific repository
-python setup_repos.py status backend-api
-```
-
-### Remove a Repository
-
-```bash
-python setup_repos.py remove backend-api
-```
-
-## Configuration File
-
-Repositories are stored in `config/repositories.json`:
-
-```json
-{
-  "backend-api": {
-    "project_id": "12345678",
-    "gitlab_url": "https://gitlab.com/company/backend-api",
-    "branch": "main",
-    "private_token": null,
-    "auto_update": true
-  }
-}
-```
-
-You can edit this file directly or use the CLI commands.
-
-## Workflow Examples
-
-### Example 1: First Time Setup
-
-```bash
-# 1. Add your repositories
-python setup_repos.py add backend https://gitlab.com/company/backend
-python setup_repos.py add frontend https://gitlab.com/company/frontend
-
-# 2. Pre-index them (do this overnight for large repos)
-python setup_repos.py index
-
-# 3. Start Gatekeeper
-python main.py
-```
-
-### Example 2: Add New Repository to Running System
-
-```bash
-# Add and index immediately
-python setup_repos.py add new-service https://gitlab.com/company/new-service --index
-
-# Gatekeeper will automatically use it on next webhook
-```
-
-### Example 3: Update Existing Repositories
-
-Repositories are automatically updated when `auto_update: true` (default).
-
-To manually update:
-```bash
-cd workspace/projects/project_123
-git fetch origin
-git reset --hard origin/main
-gitnexus analyze --force
-```
-
-## Troubleshooting
-
-### Repository Not Found
-
-**Problem**: `Repository {project_id} not found`
-
-**Solution**: Add the repository first:
-```bash
-python setup_repos.py add <id> <url>
-python setup_repos.py index
-```
-
-### GitNexus Not Found
-
-**Problem**: `GitNexus not found - skipping indexing`
-
-**Solution**: Install GitNexus:
-```bash
-npm install -g gitnexus
-```
-
-### Clone Failed (Private Repository)
-
-**Problem**: `Authentication failed`
-
-**Solution**: Add a private access token:
-```bash
-python setup_repos.py add <id> <url> --token glpat_your_token
-```
-
-### Index Taking Too Long
-
-**Problem**: Large repository taking 10+ minutes
-
-**Solution**: Use `--skip-embeddings` for faster indexing:
-```bash
-cd workspace/projects/project_123
-gitnexus analyze --skip-embeddings
-```
-
-### Out of Disk Space
-
-**Problem**: Repositories taking too much space
-
-**Solution**:
-```bash
-# Remove specific repository
-python setup_repos.py remove <id> --force
-
-# Or clean workspace
-rm -rf workspace/projects/*
-```
-
-## Best Practices
-
-1. **Pre-Index Frequently Monitored Repositories**
-   - Run `python setup_repos.py index` for your main repositories
-   - Schedule this to run overnight for large codebases
-
-2. **Use Descriptive Repository IDs**
-   - Good: `backend-api`, `frontend-app`, `data-pipeline`
-   - Bad: `repo1`, `repo2`, `test`
-
-3. **Keep Repositories Updated**
-   - Repositories with `auto_update: true` update automatically
-   - Run `gitnexus analyze` after major changes
-
-4. **Monitor Disk Space**
-   - Check workspace size: `du -sh workspace/projects/`
-   - Remove unused repositories: `python setup_repos.py remove <id> --force`
-
-5. **Use Environment Variables for Tokens**
+1. **Create a virtual environment:**
    ```bash
-   export GITLAB_PERSONAL_ACCESS_TOKEN=glpat_your_token
+   python3 -m venv venv
+   ```
+2. **Activate the virtual environment:**
+   * **macOS/Linux:**
+     ```bash
+     source venv/bin/activate
+     ```
+   * **Windows:**
+     ```cmd
+     venv\Scripts\activate.bat
+     ```
+3. **Install dependencies:**
+   ```bash
+   pip install -r requirements.txt
    ```
 
-## Integration with Gatekeeper
+---
 
-When a webhook arrives, Gatekeeper:
+## Step 2: Node.js (MCP) Packages Setup
 
-1. Checks if repository is pre-indexed in `workspace/projects/`
-2. If found → Uses immediately (Option 2)
-3. If not found → Automatically clones and indexes (Option 1)
-4. Passes repository path to GitNexus for impact analysis
-5. Continues with normal review pipeline
+The Gatekeeper uses MCP (Model Context Protocol) servers to communicate with GitLab, MongoDB, and GitNexus. These packages are installed locally in the project to support execution without requiring global node root permissions.
 
-The impact analysis will include:
-- Blast radius analysis (what depends on changed code)
-- Process tracing (execution flows)
-- Symbol context (incoming/outgoing references)
+1. **Install Node dependencies:**
+   * If you encounter permissions errors (`EACCES` or `EPERM`) during global installations or default npm installations, use the local cache flag to bypass global directory write locks:
+     ```bash
+     npm install --save-dev --cache ./npm-cache
+     ```
+   * *Note: This installs `mongodb-mcp-server`, `@zereight/mcp-gitlab`, and `gitnexus` directly into your local `node_modules` directory.*
 
-## API Usage
+---
 
-For programmatic access:
+## Step 3: Configure Environment Variables
 
-```python
-from repo_manager import get_repo_manager
+Create or update the `.env` file in the root directory:
 
-manager = get_repo_manager()
+```env
+PORT=8000
+GEMINI_API_KEY=AIzaSy...your_gemini_api_key...
+MDB_MCP_CONNECTION_STRING=mongodb+srv://...your_mongodb_uri...
 
-# Add a repository
-manager.add_repository(
-    repo_id="my-service",
-    gitlab_url="https://gitlab.com/company/my-service"
-)
-
-# Ensure repository is ready
-local_path = await manager.ensure_repository_ready(
-    project_id="12345678",
-    gitlab_url="https://gitlab.com/company/my-service"
-)
-
-# Check status
-status = manager.get_status()
-print(status)
+# IMPORTANT: The GitLab Token must be valid, active, and have the `api` scope.
+# Expired or unauthorized tokens will cause GitLab API calls to return 404 (Project Not Found).
+GITLAB_PERSONAL_ACCESS_TOKEN=glpat-your_personal_access_token_here
 ```
 
-## Next Steps
+---
 
-1. Install GitNexus: `npm install -g gitnexus`
-2. Add your repositories: `python setup_repos.py add`
-3. Pre-index: `python setup_repos.py index`
-4. Start Gatekeeper: `python main.py`
+## Step 4: Verify the Setup
 
-Your Gatekeeper is now ready for enhanced impact analysis! 🚀
+1. **Verify Impact Analysis tools & GitNexus:**
+   ```bash
+   python setup_impact_analysis.py
+   ```
+   *Expected Output:*
+   ```text
+   ============================================================
+   Setup Summary
+   ============================================================
+   [✅] Basic setup complete!
+   [✅] GitNexus integration available via MCP
+   [✅] Impact analysis features are ready to use!
+   ```
+
+2. **Verify Repository configurations:**
+   Check the status of monitored repositories:
+   ```bash
+   python setup_repos.py status
+   ```
+
+---
+
+## Step 5: Monitoring repositories (Adding and Indexing)
+
+To add a GitLab repository for Gatekeeper to monitor, run:
+```bash
+# Add and pre-index the repository
+python setup_repos.py add <project_id_or_descriptive_name> <gitlab_url> --index
+```
+*Example:*
+```bash
+python setup_repos.py add rapid-agents-test https://gitlab.com/Swapnendu003/rapid-agents-test --index
+```
+
+---
+
+## Step 6: Start Gatekeeper
+
+Once configured, launch the FastAPI server:
+
+```bash
+python -m uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+---
+
+## How to Test Your Integration
+
+To test that webhooks are processed correctly:
+1. Open a tunnel to your local server (since GitLab.com needs to send POST requests to a public address):
+   * **Pinggy (Fastest, zero install):**
+     ```bash
+     ssh -R 80:localhost:8000 free.pinggy.io
+     ```
+   * **Ngrok:**
+     ```bash
+     ngrok http 8000
+     ```
+2. Set up the webhook URL in your GitLab Repository under **Settings** ➡️ **Webhooks**:
+   * URL: `https://your-public-tunnel-domain.link/webhooks/gitlab`
+   * Trigger: Select **Merge request events** (uncheck Push events).
+3. Push a branch introducing a test vulnerability (e.g. hardcoded secrets or raw credential logging) and open a **Merge Request**.
+4. Check the MR to view Gatekeeper's comments and check your terminal logs to observe the automated remediation branches!
