@@ -193,37 +193,45 @@ class RepositoryManager:
 
             # Get repository files using GitLab MCP
             print(f"[*] Fetching repository tree...")
-            tree_result = await gitlab_session.call_tool(
-                name="list_repository_files",
-                arguments={
-                    "project_id": str(project_id),
-                    "path": "",
-                    "ref": "main"
-                }
-            )
-
-            # Parse the tree result
+            
             files_to_download = []
-            if hasattr(tree_result, 'content') and tree_result.content:
-                import json
+            page_token = None
+            import json
+
+            while True:
+                arguments = {
+                    "project_id": str(project_id),
+                    "recursive": True,
+                }
+                if page_token:
+                    arguments["page_token"] = page_token
+                    arguments["pagination"] = "keyset"
+
+                tree_result = await gitlab_session.call_tool(
+                    name="get_repository_tree",
+                    arguments=arguments
+                )
+
+                if not (hasattr(tree_result, 'content') and tree_result.content):
+                    break
+
                 tree_data = json.loads(tree_result.content[0].text)
+                
+                items = tree_data
+                next_token = None
+                if isinstance(tree_data, dict):
+                    items = tree_data.get("items", [])
+                    next_token = tree_data.get("next_page_token")
 
-                # Recursively collect all files
-                async def collect_files(path=""):
-                    result = await gitlab_session.call_tool(
-                        name="list_repository_files",
-                        arguments={"project_id": str(project_id), "path": path, "ref": "main"}
-                    )
-                    if hasattr(result, 'content') and result.content:
-                        data = json.loads(result.content[0].text)
-                        if isinstance(data, list):
-                            for item in data:
-                                if item.get("type") == "blob":
-                                    files_to_download.append(item["path"])
-                                elif item.get("type") == "tree":
-                                    await collect_files(item["path"])
+                if isinstance(items, list):
+                    for item in items:
+                        if item.get("type") == "blob":
+                            files_to_download.append(item["path"])
 
-                await collect_files()
+                if next_token:
+                    page_token = next_token
+                else:
+                    break
 
             print(f"[*] Found {len(files_to_download)} files to download")
 
@@ -234,11 +242,10 @@ class RepositoryManager:
 
                 try:
                     file_result = await gitlab_session.call_tool(
-                        name="get_file",
+                        name="get_file_contents",
                         arguments={
                             "project_id": str(project_id),
                             "file_path": file_path,
-                            "ref": "main"
                         }
                     )
 

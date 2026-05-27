@@ -2,13 +2,57 @@ import os
 import asyncio
 import json
 from pathlib import Path
+from typing import Optional
 from google import genai
 from google.genai import types
+from google.genai.errors import APIError
 
 # Initialize official Gemini AI Client
 ai_client = genai.Client()
 
 PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
+
+
+async def call_gemini_with_retry(func, *args, max_retries: int = 5, initial_backoff: float = 1.0, **kwargs):
+    """Calls Gemini API function with exponential backoff on transient errors (503, 429, etc.)."""
+    backoff = initial_backoff
+    for attempt in range(1, max_retries + 1):
+        try:
+            return await asyncio.to_thread(func, *args, **kwargs)
+        except APIError as e:
+            code = getattr(e, "code", None)
+            message = str(e)
+            is_transient = (
+                code in (429, 503) or
+                "503" in message or
+                "429" in message or
+                "UNAVAILABLE" in message or
+                "resource exhausted" in message.lower() or
+                "high demand" in message.lower()
+            )
+            if is_transient and attempt < max_retries:
+                print(f"[⚠️] Gemini API transient error ({code or 'unknown'}): {e}. Retrying attempt {attempt}/{max_retries} in {backoff:.2f}s...")
+                await asyncio.sleep(backoff)
+                backoff *= 2.0
+            else:
+                print(f"[❌] Gemini API non-transient or final attempt error: {e}")
+                raise
+        except Exception as e:
+            message = str(e)
+            is_transient_msg = (
+                "503" in message or
+                "429" in message or
+                "UNAVAILABLE" in message or
+                "resource exhausted" in message.lower() or
+                "high demand" in message.lower()
+            )
+            if is_transient_msg and attempt < max_retries:
+                print(f"[⚠️] Gemini API unexpected transient error: {e}. Retrying attempt {attempt}/{max_retries} in {backoff:.2f}s...")
+                await asyncio.sleep(backoff)
+                backoff *= 2.0
+            else:
+                print(f"[❌] Gemini API error: {e}")
+                raise
 
 
 def load_prompt(prompt_name: str) -> str:
@@ -32,7 +76,7 @@ async def run_gemini_review(raw_diff_content: str, impact_context: str) -> str:
 {impact_context}
 """
 
-    response = await asyncio.to_thread(
+    response = await call_gemini_with_retry(
         ai_client.models.generate_content,
         model='gemini-3.5-flash',
         contents=review_prompt,
@@ -44,13 +88,25 @@ async def run_gemini_review(raw_diff_content: str, impact_context: str) -> str:
     return response.text
 
 
-async def run_gemini_fix_analysis(audit_report: str, patch_summary: str) -> dict:
+async def run_gemini_fix_analysis(audit_report: str, patch_summary: str, schema_context: Optional[str] = None) -> dict:
     """Invokes Gemini with structured JSON output to analyze and remediation patch hunks."""
+    schema_prefix = ""
+    if schema_context:
+        schema_prefix = (
+            f"\n\n## Current Database Schema State (for fix reference)\n"
+            f"Use this schema information to ensure your fix suggestions do not:\n"
+            f"- Add fields that already exist with a different type\n"
+            f"- Reference collection names that do not exist\n"
+            f"- Suggest schema changes inconsistent with the current structure\n"
+            f"{schema_context}\n"
+        )
+
     fix_prompt = (
         f"Review this software engineering audit report:\n\n{audit_report}\n\n"
         f"ANALYZE THESE ATOMIC PATCHES FOR FIXABLE ISSUES:\n\n"
         f"{patch_summary}\n\n"
-        "TASK: Determine if the identified problems can be resolved automatically at the HUNK level.\n\n"
+        f"{schema_prefix}"
+        f"TASK: Determine if the identified problems can be resolved automatically at the HUNK level.\n\n"
         "FIXABLE ISSUES INCLUDE (but are not limited to):\n"
         "- Hardcoded secrets, API keys, passwords, tokens -> Extract to environment variables\n"
         "- Hardcoded configuration values -> Extract to environment variables\n"
@@ -74,7 +130,7 @@ async def run_gemini_fix_analysis(audit_report: str, patch_summary: str) -> dict
         '{"fixable": true/false, "fixes": [{"hunk_id": "id", "issue": "description", "original_lines": ["line1", "line2"], "fixed_lines": ["line1_fixed", "line2_fixed"], "extracted_env_vars": {"KEY": "value"}}]}'
     )
 
-    fix_analysis = await asyncio.to_thread(
+    fix_analysis = await call_gemini_with_retry(
         ai_client.models.generate_content,
         model='gemini-3.5-flash',
         contents=fix_prompt,

@@ -12,5 +12,12 @@
     "branch": "main",
     "private_token": null,
     "auto_update": true
+  },
+  "82576405": {
+    "project_id": "82576405",
+    "gitlab_url": "https://gitlab.com/Swapnendu003/rapid-agents-test.git",
+    "branch": "main",
+    "private_token": null,
+    "auto_update": true
   }
 }

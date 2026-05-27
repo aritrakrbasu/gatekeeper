@@ -297,6 +297,73 @@ This may take 30-60 seconds depending on the size of the changes.
                 print(f"[⚠️] Impact analysis failed (continuing anyway): {impact_err}")
                 impact_context = ""
 
+            # --- 🔍 SCHEMA INSPECTION SERVICE (Step 3.5) ---
+            print("[*] Step 3.5: Checking for backend-touching changes and database schema inspection...")
+            schema_report = None
+            schema_markdown = None
+            try:
+                from services.schema_inspection_service import run_schema_inspection, format_schema_report_to_markdown
+                schema_report = await run_schema_inspection(raw_diff_content, mcp_service.mongo_session, project_id=project_id)
+                if schema_report:
+                    print(f"[+] Schema inspection complete. Found {len(schema_report.collections)} collections. Confidence: {schema_report.confidence}")
+                    
+                    # 1. Format and attach schema_report summary to raw_diff_content passed to run_gemini_review
+                    schema_markdown = format_schema_report_to_markdown(schema_report)
+                    if schema_markdown:
+                        raw_diff_content += f"\n\n{schema_markdown}"
+                        
+                    # 2. Log schema_report to MongoDB collection "schema_snapshots"
+                    if mcp_service.mongo_session:
+                        delta_list = []
+                        if schema_report.delta:
+                            for change in schema_report.delta.changes:
+                                delta_list.append({
+                                    "collection": change.collection,
+                                    "change_type": change.change_type,
+                                    "field_name": change.field_name,
+                                    "old_value": change.old_value,
+                                    "new_value": change.new_value
+                                })
+                        else:
+                            delta_list = None
+                            
+                        schema_dict = {
+                            "inspected_at": schema_report.inspected_at.isoformat() if schema_report.inspected_at else None,
+                            "triggered_by_files": schema_report.triggered_by_files,
+                            "triggered_by_content": schema_report.triggered_by_content,
+                            "confidence": schema_report.confidence,
+                            "scoped": schema_report.scoped,
+                            "skipped_reason": schema_report.skipped_reason,
+                            "delta": delta_list,
+                            "collections": [
+                                {
+                                    "name": col.name,
+                                    "fields": col.fields,
+                                    "indexes": col.indexes,
+                                    "sample_document_keys": col.sample_document_keys
+                                } for col in schema_report.collections
+                            ]
+                        }
+                        
+                        from datetime import datetime, timezone
+                        await mcp_service.mongo_session.call_tool(
+                            name="insert-many",
+                            arguments={
+                                "database": "gatekeeper_dev",
+                                "collection": "schema_snapshots",
+                                "documents": [{
+                                    "mr_id": mr_iid,
+                                    "project_id": project_id,
+                                    "branch_name": source_branch,
+                                    "report": schema_dict,
+                                    "timestamp": datetime.now(timezone.utc).isoformat()
+                                }]
+                            }
+                        )
+                        print("[+] Schema snapshot logged to MongoDB collection: schema_snapshots")
+            except Exception as schema_err:
+                print(f"[⚠️] Schema inspection failed (continuing anyway): {schema_err}")
+
             # --- 🧠 THE GEMINI COGNITIVE CORE ENGINE ---
             print("[*] Step 4: Shipping code diff to Gemini Pro Core for automated security review...")
             
@@ -409,7 +476,7 @@ This may take 30-60 seconds depending on the size of the changes.
 
                 print("[DEBUG] Requesting fix analysis from Gemini...")
                 fix_data = await asyncio.wait_for(
-                    run_gemini_fix_analysis(audit_report, patch_summary),
+                    run_gemini_fix_analysis(audit_report, patch_summary, schema_context=schema_markdown),
                     timeout=60.0
                 )
 
