@@ -770,7 +770,7 @@ This may take 30-60 seconds depending on the size of the changes.
                         # Use native Gemini client (auto-traced by Arize if configured)
                         response = await asyncio.to_thread(
                             ai_client.models.generate_content,
-                            model='gemini-3.1-flash-lite',
+                            model='gemini-3-flash-preview',
                             contents=review_prompt,
                             config=types.GenerateContentConfig(
                                 system_instruction=system_instruction,
@@ -1011,7 +1011,7 @@ This may take 30-60 seconds depending on the size of the changes.
                             response = await asyncio.wait_for(
                                 asyncio.to_thread(
                                     ai_client.models.generate_content,
-                                    model='gemini-3.1-flash-lite',
+                                    model='gemini-3-flash-preview',
                                     contents=fix_prompt,
                                     config=types.GenerateContentConfig(
                                         system_instruction="You are a strict automated code repair system. Output only valid JSON with no markdown formatting.",

@@ -75,7 +75,7 @@ class PhoenixSDKEvaluator:
     - Native export to Phoenix Evaluations tab
 
     Example:
-        evaluator = PhoenixSDKEvaluator(model="gemini-3.1-flash-lite")
+        evaluator = PhoenixSDKEvaluator(model="gemini-3-flash-preview")
         result = await evaluator.evaluate_review_async(
             diff="+ const API_KEY = '123'",
             review="Found hardcoded secret",
@@ -331,7 +331,7 @@ Evaluate whether the fixes comprehensively address all identified issues.
 
     def __init__(
         self,
-        model: str = "gemini-3.1-flash-lite",
+        model: str = "gemini-3-flash-preview",
         concurrency: int = 4,
         max_retries: int = 3,
     ):
@@ -339,7 +339,7 @@ Evaluate whether the fixes comprehensively address all identified issues.
         Initialize the Phoenix SDK evaluator.
 
         Args:
-            model: The Gemini model to use as judge (default: gemini-3.1-flash-lite)
+            model: The Gemini model to use as judge (default: gemini-3-flash-preview)
             concurrency: Maximum concurrent evaluation requests (default: 4)
             max_retries: Maximum retries for failed evaluations (default: 3)
         """
@@ -964,7 +964,7 @@ def get_phoenix_sdk_evaluator() -> PhoenixSDKEvaluator:
 
     if _phoenix_sdk_evaluator is None:
         # Get configuration from environment
-        model = os.getenv("JUDGE_MODEL", "gemini-3.1-flash-lite")
+        model = os.getenv("JUDGE_MODEL", "gemini-3-flash-preview")
         concurrency = int(os.getenv("PHOENIX_EVAL_CONCURRENCY", "4"))
         max_retries = int(os.getenv("PHOENIX_EVAL_MAX_RETRIES", "3"))
 

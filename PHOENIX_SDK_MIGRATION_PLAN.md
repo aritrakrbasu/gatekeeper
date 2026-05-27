@@ -46,7 +46,7 @@ class PhoenixSDKEvaluator:
     """
     def __init__(
         self,
-        model: str = "gemini-3.1-flash-lite",
+        model: str = "gemini-3-flash-preview",
         concurrency: int = 4,
         max_retries: int = 3
     ):

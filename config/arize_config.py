@@ -26,6 +26,7 @@ API_KEY = os.getenv("ARIZE_API_KEY", "")
 PHOENIX_MODE = os.getenv("PHOENIX_MODE", "cloud")  # 'cloud' or 'self-hosted'
 PHOENIX_API_KEY = os.getenv("PHOENIX_API_KEY", "")
 PHOENIX_BASE_URL = os.getenv("PHOENIX_BASE_URL", "https://app.phoenix.arize.com")
+PHOENIX_PROJECT_NAME = os.getenv("PHOENIX_PROJECT_NAME", "gatekeeper")
 
 # Configure Phoenix environment variables for SDK
 # These are read by the Phoenix SDK for evaluation export
@@ -263,6 +264,11 @@ def get_phoenix_mode() -> str:
 def get_phoenix_api_key() -> str:
     """Get the Phoenix API key for authentication."""
     return PHOENIX_API_KEY
+
+
+def get_phoenix_project_name() -> str:
+    """Get the Phoenix project name for evaluation grouping."""
+    return PHOENIX_PROJECT_NAME
 
 
 def shutdown():

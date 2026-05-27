@@ -69,9 +69,9 @@ class PhoenixEvalExporter:
         """
         Export all pending evaluations to Phoenix/Arize Evaluations tab.
 
-        This uses the appropriate method based on Phoenix deployment mode:
-        - Arize Cloud: Uses Arize SDK's evaluation export
-        - Self-hosted Phoenix: Uses Phoenix SDK's log_evaluations
+        This uses Phoenix Client's log_span_annotations API, which works for
+        both Arize Cloud and self-hosted Phoenix deployments. Evaluations are
+        sent as "annotations" which appear in the Evaluations tab.
 
         Returns:
             True if export was successful, False otherwise
@@ -82,16 +82,11 @@ class PhoenixEvalExporter:
 
         try:
             from config.arize_config import (
-                is_arize_initialized,
                 is_phoenix_configured,
-                get_phoenix_mode,
-                get_phoenix_endpoint,
-                get_phoenix_api_key,
-                SPACE_ID,
-                API_KEY,
             )
 
-            phoenix_mode = get_phoenix_mode()
+            if not is_phoenix_configured():
+                logger.warning("[⚠️] Phoenix not configured - evaluations will only be in span attributes")
 
             # Get current span ID for linking
             from opentelemetry import trace
@@ -135,15 +130,9 @@ class PhoenixEvalExporter:
                     df = pd.DataFrame(rows)
 
                     if not df.empty:
-                        # Choose export method based on mode
-                        if phoenix_mode == "cloud" and SPACE_ID and API_KEY:
-                            # Use Arize Cloud export
-                            success = await self._export_via_arize_cloud(
-                                eval_name, df, SPACE_ID, API_KEY
-                            )
-                        else:
-                            # Use Phoenix SDK export
-                            success = await self._export_via_phoenix_sdk(eval_name, df)
+                        # Use unified Phoenix Client approach for both cloud and self-hosted
+                        # Phoenix Client handles both modes via log_span_annotations
+                        success = await self._export_via_phoenix_client_annotations(eval_name, df)
 
                         if success:
                             exported_count += len(df)
@@ -194,96 +183,76 @@ class PhoenixEvalExporter:
             logger.warning(f"[⚠️] Phoenix SDK export failed: {e}")
             return False
 
-    async def _export_via_arize_cloud(
+    async def _export_via_phoenix_client_annotations(
         self,
         eval_name: str,
         dataframe: pd.DataFrame,
-        space_id: str,
-        api_key: str,
     ) -> bool:
         """
-        Export evaluations to Arize Cloud.
+        Export evaluations using Phoenix Client's log_span_annotations.
 
-        For Arize Cloud, we need to use the Arize SDK or direct API calls.
-        This implementation uses the direct Arize evaluation API.
+        This creates formal evaluation records (called "annotations" in Phoenix/Arize)
+        that appear in the Evaluations tab of the Arize Cloud UI.
 
         Args:
             eval_name: Name of the evaluation
             dataframe: DataFrame with evaluation data
-            space_id: Arize space ID
-            api_key: Arize API key
 
         Returns:
             True if successful, False otherwise
         """
         try:
-            import httpx
+            from phoenix.client import Client
 
-            # Arize Cloud API endpoint for evaluations
-            base_url = os.getenv("PHOENIX_BASE_URL", "https://app.phoenix.arize.com").rstrip("/")
+            # Get Phoenix configuration
+            base_url = os.getenv("PHOENIX_BASE_URL", "https://app.phoenix.arize.com")
+            api_key = os.getenv("PHOENIX_API_KEY")
 
-            # Try multiple possible endpoints for Arize Cloud
-            endpoints = [
-                f"{base_url}/v1/spaces/{space_id}/evaluations",
-                f"{base_url}/api/v1/spaces/{space_id}/evaluations",
-            ]
+            # Create Phoenix Client
+            client = Client(base_url=base_url, api_key=api_key)
 
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-            }
-
-            # Prepare evaluation data
-            eval_records = []
+            # Build annotation data for Phoenix/Arize
+            annotations = []
             for _, row in dataframe.iterrows():
-                record = {
-                    "span_id": row.get("span_id", ""),
-                    "score": float(row.get("score", 0)),
+                span_id = row.get("span_id", "")
+                score = float(row.get("score", 0))
+
+                annotation_data = {
+                    "span_id": span_id,
+                    "name": eval_name,
+                    "annotator_kind": "CODE",  # Programmatic LLM-as-a-Judge evaluations
+                    "result": {
+                        "score": score,
+                    }
                 }
+
+                # Add optional fields
                 if "label" in row and pd.notna(row["label"]):
-                    record["label"] = str(row["label"])
+                    annotation_data["result"]["label"] = str(row["label"])
+
                 if "explanation" in row and pd.notna(row["explanation"]):
-                    record["explanation"] = str(row["explanation"])[:5000]
-                eval_records.append(record)
+                    annotation_data["result"]["explanation"] = str(row["explanation"])[:5000]
 
-            payload = {
-                "eval_name": eval_name,
-                "evaluations": eval_records,
-            }
+                annotations.append(annotation_data)
 
-            # Try each endpoint
-            for endpoint in endpoints:
-                try:
-                    async with httpx.AsyncClient(timeout=30.0) as client:
-                        response = await client.post(
-                            endpoint,
-                            json=payload,
-                            headers=headers,
-                        )
+            # Use Phoenix Client's log_span_annotations method
+            # This works for both Arize Cloud and self-hosted Phoenix
+            client.spans.log_span_annotations(
+                span_annotations=annotations,
+                sync=False  # Async processing is fine for evaluations
+            )
 
-                        if response.status_code in (200, 201, 202):
-                            logger.info(f"[✅] Exported to Arize Cloud via {endpoint}")
-                            return True
-                        else:
-                            logger.debug(
-                                f"[DEBUG] Endpoint {endpoint} returned {response.status_code}: "
-                                f"{response.text[:200]}"
-                            )
+            logger.info(f"[✅] Exported {len(annotations)} '{eval_name}' annotations to Phoenix/Arize")
+            return True
 
-                except httpx.ConnectError:
-                    logger.debug(f"[DEBUG] Connection error to {endpoint}")
-                    continue
-                except Exception as e:
-                    logger.debug(f"[DEBUG] Error calling {endpoint}: {e}")
-                    continue
-
-            # If API endpoints fail, try using the Phoenix SDK with environment config
-            logger.info("[*] API endpoints failed, trying Phoenix SDK with Arize config...")
+        except ImportError:
+            logger.warning("[⚠️] Phoenix Client not available - falling back to SDK")
             return await self._export_via_phoenix_sdk(eval_name, dataframe)
-
         except Exception as e:
-            logger.warning(f"[⚠️] Arize Cloud export failed: {e}")
-            # Fallback to SDK
+            logger.warning(f"[⚠️] Phoenix Client export failed: {e}")
+            import traceback
+            logger.debug(f"[DEBUG] Annotation export error: {traceback.format_exc()[:500]}")
+            # Fallback to SDK method
             return await self._export_via_phoenix_sdk(eval_name, dataframe)
 
     def flush(self) -> bool:

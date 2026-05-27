@@ -51,7 +51,7 @@ PHOENIX_BASE_URL=https://app.phoenix.arize.com
 # Feature Flags
 ENABLE_EVALUATIONS=true
 ENABLE_SELF_IMPROVEMENT=true
-JUDGE_MODEL=gemini-3.1-flash-lite
+JUDGE_MODEL=gemini-3-flash-preview
 ```
 
 **Getting Your Keys:**
@@ -84,7 +84,7 @@ The `ObservableGeminiClient` wraps all Gemini AI calls with automatic logging:
 # Old way (no observability)
 response = await asyncio.to_thread(
     ai_client.models.generate_content,
-    model='gemini-3.1-flash-lite',
+    model='gemini-3-flash-preview',
     contents=prompt,
     config=types.GenerateContentConfig(...)
 )

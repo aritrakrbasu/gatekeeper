@@ -143,7 +143,7 @@ curl https://app.phoenix.arize.com/health
 
    ```bash
    ENABLE_EVALUATIONS=true
-   JUDGE_MODEL=gemini-3.1-flash-lite
+   JUDGE_MODEL=gemini-3-flash-preview
    ```
 
 2. **Create a test file with a vulnerable code snippet:**
@@ -557,7 +557,7 @@ PHOENIX_BASE_URL=https://app.phoenix.arize.com
 ```bash
 # Add to .env
 ENABLE_EVALUATIONS=true
-JUDGE_MODEL=gemini-3.1-flash-lite
+JUDGE_MODEL=gemini-3-flash-preview
 ```
 
 ### Issue: "Self-improvement disabled"

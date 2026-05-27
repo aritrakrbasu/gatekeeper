@@ -80,7 +80,8 @@ class PhoenixEvaluationExporter:
         Export evaluations via Phoenix Cloud REST API.
 
         This uses the Phoenix Cloud API to send evaluations that will appear
-        in the Evaluations tab.
+        in the Evaluations tab. For Arize Cloud, we use the project-scoped
+        span_annotations endpoint.
 
         Args:
             eval_name: Name of the evaluation
@@ -93,27 +94,38 @@ class PhoenixEvaluationExporter:
             PHOENIX_API_KEY,
             get_phoenix_endpoint,
             get_phoenix_mode,
+            get_phoenix_project_name,
         )
 
         phoenix_mode = get_phoenix_mode()
+        project_name = get_phoenix_project_name()
 
         # For Phoenix Cloud, use the correct API endpoint
         base_url = get_phoenix_endpoint().rstrip("/")
 
-        # Phoenix Cloud API endpoints
-        if phoenix_mode == "cloud":
-            # Phoenix Cloud uses different endpoints
-            # Try multiple possible endpoints
-            endpoints = [
-                f"{base_url}/v1/span_evaluations",
-                f"{base_url}/api/v1/span_evaluations",
-                f"{base_url}/api/v2/span_evaluations",
-            ]
-        else:
-            # Self-hosted Phoenix
-            endpoints = [
-                f"{base_url}/api/v1/span_evaluations",
-            ]
+        # Prepare the evaluation data in the format expected by Phoenix/Arize
+        annotations = []
+        for _, row in dataframe.iterrows():
+            span_id = row.get("span_id", "")
+            score = float(row.get("score", 0))
+
+            annotation_data = {
+                "span_id": span_id,
+                "name": eval_name,
+                "annotator_kind": "CODE",  # Programmatic LLM-as-a-Judge evaluations
+                "result": {
+                    "score": score,
+                }
+            }
+
+            # Add optional fields
+            if "label" in row and pd.notna(row["label"]):
+                annotation_data["result"]["label"] = str(row["label"])
+
+            if "explanation" in row and pd.notna(row["explanation"]):
+                annotation_data["result"]["explanation"] = str(row["explanation"])[:5000]
+
+            annotations.append(annotation_data)
 
         headers = {
             "Content-Type": "application/json",
@@ -123,10 +135,23 @@ class PhoenixEvaluationExporter:
         if PHOENIX_API_KEY:
             headers["Authorization"] = f"Bearer {PHOENIX_API_KEY}"
 
+        # Phoenix Cloud API endpoints
+        if phoenix_mode == "cloud":
+            # For Arize Cloud, use the project-scoped span_annotations endpoint
+            # This is the key fix - evaluations must be sent to the specific project
+            endpoints = [
+                f"{base_url}/v1/projects/{project_name}/span_annotations",
+                f"{base_url}/v1/span_annotations",  # Fallback to global endpoint
+            ]
+        else:
+            # Self-hosted Phoenix
+            endpoints = [
+                f"{base_url}/v1/span_annotations",
+            ]
+
         # Prepare the evaluation data
         eval_data = {
-            "name": eval_name,
-            "evaluations": dataframe.to_dict(orient="records"),
+            "data": annotations,  # Phoenix expects the data array at the root
         }
 
         # Try each endpoint
@@ -142,7 +167,7 @@ class PhoenixEvaluationExporter:
                     )
 
                     if response.status_code in (200, 201, 202):
-                        logger.info(f"[✅] Successfully exported to {endpoint}")
+                        logger.info(f"[✅] Successfully exported {len(annotations)} '{eval_name}' evaluations to Arize Cloud project '{project_name}'")
                         return True
                     else:
                         logger.debug(f"[DEBUG] Endpoint {endpoint} returned {response.status_code}: {response.text[:200]}")

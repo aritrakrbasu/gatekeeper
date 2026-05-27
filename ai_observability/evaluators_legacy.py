@@ -232,7 +232,7 @@ Return only the number, nothing else.
 
     def __init__(
         self,
-        judge_model: str = "gemini-3.1-flash-lite",
+        judge_model: str = "gemini-3-flash-preview",
         phoenix_client=None,
     ):
         """
@@ -816,7 +816,7 @@ def get_evaluator() -> ReviewQualityEvaluator:
     global _evaluator
 
     if _evaluator is None:
-        judge_model = os.getenv("JUDGE_MODEL", "gemini-3.1-flash-lite")
+        judge_model = os.getenv("JUDGE_MODEL", "gemini-3-flash-preview")
         _evaluator = ReviewQualityEvaluator(judge_model=judge_model)
 
     return _evaluator

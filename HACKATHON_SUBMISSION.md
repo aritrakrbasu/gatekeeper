@@ -211,7 +211,7 @@ PHOENIX_BASE_URL=https://app.phoenix.arize.com
 # Features
 ENABLE_EVALUATIONS=true
 ENABLE_SELF_IMPROVEMENT=true
-JUDGE_MODEL=gemini-3.1-flash-lite
+JUDGE_MODEL=gemini-3-flash-preview
 ```
 
 ---

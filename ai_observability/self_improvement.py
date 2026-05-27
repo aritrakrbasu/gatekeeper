@@ -291,7 +291,7 @@ Modifications:
 Return only the modified prompt, nothing else."""
 
             response = client.models.generate_content(
-                model="gemini-3.1-flash-lite",
+                model="gemini-3-flash-preview",
                 contents=modification_prompt,
                 config=types.GenerateContentConfig(temperature=0.1),
             )
