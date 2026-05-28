@@ -17,7 +17,7 @@ from impact_analysis import (
 from repo_manager import get_repo_manager
 
 # Service Imports
-from services import mcp_service
+from services import mcp_service, repository_service
 from services.gemini_service import run_gemini_review, run_gemini_fix_analysis
 from services.remediation_service import apply_auto_fixes
 
@@ -48,8 +48,68 @@ async def orchestrate_review(payload: dict) -> dict:
 
     mr_title = object_attrs.get("title")
     source_branch = object_attrs.get("source_branch")
+    target_branch = object_attrs.get("target_branch", "main")
     project_id = payload.get("project", {}).get("id")
     mr_iid = object_attrs.get("iid")
+    mr_internal_id = object_attrs.get("id")
+    author = payload.get("user", {}).get("username", "unknown")
+    web_url = object_attrs.get("url", "")
+    created_at = object_attrs.get("created_at", "")
+    updated_at = object_attrs.get("updated_at", "")
+    description = object_attrs.get("description", "")
+
+    # Extract changes statistics from webhook payload
+    # GitLab MR hook provides this in object_attributes.stats
+    stats = object_attrs.get("stats", {})
+    additions = stats.get("additions", 0)
+    deletions = stats.get("deletions", 0)
+    files_changed = stats.get("total", 0)  # 'total' is the key for total files changed in GitLab
+
+    print(f"[INFO] MR changes: +{additions} -{deletions} ({files_changed} files)")
+
+    # Ensure consistent types for database queries
+    mr_iid_int = int(mr_iid) if mr_iid else 0
+    project_id_str = str(project_id)
+
+    # Store MR in MongoDB for frontend retrieval
+    try:
+        mr_data = {
+            "gitlab_mr_id": mr_iid_int,
+            "gitlab_mr_internal_id": mr_internal_id,
+            "repository_id": project_id_str,
+            "repository_name": payload.get("project", {}).get("path_with_namespace", ""),
+            "title": mr_title,
+            "description": description,
+            "author": author,
+            "source_branch": source_branch,
+            "target_branch": target_branch,
+            "status": "open",
+            "web_url": web_url,
+            "created_at": created_at,
+            "updated_at": updated_at,
+            "changes": {
+                "additions": additions,
+                "deletions": deletions,
+                "files_changed": files_changed
+            },
+            "analysis_status": "pending",
+            "is_auto_fix": False,
+            "auto_fix_for": None,
+            "auto_fix_mrs": [],
+        }
+
+        print(f"[DEBUG] Storing MR: gitlab_mr_id={mr_iid_int} (type: {type(mr_iid_int).__name__}), repository_id={project_id_str} (type: {type(project_id_str).__name__})")
+
+        action = object_attrs.get("action")
+        if action == "open":
+            print(f"[INFO] New MR opened: {mr_title}")
+
+        await repository_service.store_mr_in_mongodb(mr_data)
+        print(f"[✅] MR {mr_iid} stored in MongoDB with changes data")
+
+    except Exception as e:
+        print(f"[⚠️] Failed to store MR in MongoDB: {e}")
+        # Continue with review even if storage fails
 
     # Get commit SHA for status updates
     commit_sha = (
@@ -413,6 +473,53 @@ This may take 30-60 seconds depending on the size of the changes.
 
 ---
 *✅ Review completed at {time.strftime('%Y-%m-%d %H:%M:%S UTC')}*"""
+
+            # 3.5 Update MongoDB with AI analysis results
+            try:
+                # Extract issues from audit_report for frontend display
+                ai_issues = []
+                lines = audit_report.split('\n')
+                for line in lines:
+                    line = line.strip()
+                    # Look for lines with issue indicators
+                    if any(marker in line for marker in ['❌', '⚠️', '🔴', '🟠', '**ERROR**', '**WARNING**', '**Issue**']):
+                        # Clean up the line for display
+                        clean_line = line
+                        # Remove markdown formatting
+                        for marker in ['❌', '⚠️', '🔴', '🟠', '**', '*', '`']:
+                            clean_line = clean_line.replace(marker, '').strip()
+                        if clean_line and len(clean_line) > 5:  # Only meaningful lines
+                            ai_issues.append(clean_line[:200])  # Limit length
+
+                # Calculate health score based on issues found
+                health_score = 100
+                error_count = audit_report.count('❌') + audit_report.count('ERROR')
+                warning_count = audit_report.count('⚠️') + audit_report.count('WARNING')
+
+                if error_count > 0:
+                    health_score -= min(error_count * 20, 60)
+                if warning_count > 0:
+                    health_score -= min(warning_count * 5, 30)
+
+                health_score = max(health_score, 0)
+
+                # Store the full audit report as the summary
+                update_data = {
+                    "ai_summary": audit_report,
+                    "ai_issues": ai_issues[:10],  # Store first 10 issues
+                    "health_score": health_score,
+                    "analysis_status": "completed",
+                    "reviewed_at": time.strftime('%Y-%m-%dT%H:%M:%SZ')
+                }
+
+                await repository_service.update_mr_analysis(
+                    repo_id=str(project_id),
+                    mr_iid=mr_iid,
+                    analysis_data=update_data
+                )
+                print(f"[✅] Updated MR {mr_iid} in MongoDB with AI analysis")
+            except Exception as update_err:
+                print(f"[⚠️] Failed to update MongoDB with AI analysis: {update_err}")
 
             if loading_note_id:
                 try:

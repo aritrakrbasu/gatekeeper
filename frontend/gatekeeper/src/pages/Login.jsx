@@ -1,6 +1,23 @@
-import React from "react";
+import React, { useState } from "react";
+import { useAuth } from "../contexts/AuthContext";
 
 const GatekeeperEnterpriseLogin = () => {
+  const { login } = useAuth();
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  const handleGitLabLogin = async () => {
+    try {
+      setIsLoading(true);
+      setError(null);
+      await login();
+    } catch (err) {
+      console.error("Login failed:", err);
+      setError("Failed to initiate authentication. Please try again.");
+      setIsLoading(false);
+    }
+  };
+
   return (
     <div className="flex min-h-screen bg-white font-sans text-slate-900">
       {/* Left Panel - Brand & Value Prop */}
@@ -61,21 +78,38 @@ const GatekeeperEnterpriseLogin = () => {
             </p>
           </div>
 
+          {/* Error Message */}
+          {error && (
+            <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg">
+              <p className="text-sm text-red-600">{error}</p>
+            </div>
+          )}
+
           {/* Upgraded Action Section */}
           <div className="space-y-4">
             <button
-              onClick={() => console.log("Initiate GitLab OAuth")}
-              className="w-full flex items-center justify-center gap-3 bg-[#FC6D26] hover:bg-[#E24329] text-white font-semibold py-3.5 px-4 rounded-lg transition-all duration-200 transform hover:-translate-y-[1px] shadow-[0_4px_14px_0_rgba(252,109,38,0.39)] hover:shadow-[0_6px_20px_rgba(252,109,38,0.23)] focus:outline-none focus:ring-2 focus:ring-[#FC6D26] focus:ring-offset-2"
+              onClick={handleGitLabLogin}
+              disabled={isLoading}
+              className="w-full flex items-center justify-center gap-3 bg-[#FC6D26] hover:bg-[#E24329] text-white font-semibold py-3.5 px-4 rounded-lg transition-all duration-200 transform hover:-translate-y-[1px] shadow-[0_4px_14px_0_rgba(252,109,38,0.39)] hover:shadow-[0_6px_20px_rgba(252,109,38,0.23)] focus:outline-none focus:ring-2 focus:ring-[#FC6D26] focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none disabled:shadow-none"
             >
-              {/* GitLab SVG Icon (Changed to white for contrast) */}
-              <svg
-                className="w-5 h-5 text-white"
-                viewBox="0 0 24 24"
-                fill="currentColor"
-              >
-                <path d="M23.955 13.587l-1.342-4.135-2.664-8.189c-.135-.423-.73-.423-.867 0L16.418 9.45H7.582L4.919 1.263c-.137-.423-.733-.423-.868 0L1.387 9.452.045 13.587c-.121.374.016.786.335 1.018l11.62 8.442 11.62-8.442c.319-.232.456-.644.335-1.018z" />
-              </svg>
-              Continue with GitLab
+              {isLoading ? (
+                <>
+                  <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                  Connecting...
+                </>
+              ) : (
+                <>
+                  {/* GitLab SVG Icon (Changed to white for contrast) */}
+                  <svg
+                    className="w-5 h-5 text-white"
+                    viewBox="0 0 24 24"
+                    fill="currentColor"
+                  >
+                    <path d="M23.955 13.587l-1.342-4.135-2.664-8.189c-.135-.423-.73-.423-.867 0L16.418 9.45H7.582L4.919 1.263c-.137-.423-.733-.423-.868 0L1.387 9.452.045 13.587c-.121.374.016.786.335 1.018l11.62 8.442 11.62-8.442c.319-.232.456-.644.335-1.018z" />
+                  </svg>
+                  Continue with GitLab
+                </>
+              )}
             </button>
           </div>
 

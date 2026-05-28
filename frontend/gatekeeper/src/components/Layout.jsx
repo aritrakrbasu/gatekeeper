@@ -1,6 +1,9 @@
 import { Outlet, NavLink } from "react-router-dom";
+import { useAuth } from "../contexts/AuthContext";
 
 const Layout = () => {
+  const { user, logout } = useAuth();
+
   const navLinkClass = ({ isActive }) =>
     `flex items-center gap-3 px-4 py-3 font-medium rounded-2xl transition-all ${
       isActive
@@ -19,6 +22,14 @@ const Layout = () => {
     `p-2 rounded-full transition-all ${
       isActive ? "bg-[#FC6D26]/10" : ""
     }`;
+
+  // Get user avatar URL or use dicebear fallback
+  const userAvatar = user?.avatar_url || `https://api.dicebear.com/7.x/notionists/svg?seed=${user?.username || "User"}`;
+  const userName = user?.name || user?.username || "User";
+
+  const handleLogout = () => {
+    logout();
+  };
 
   return (
     <div className="relative h-screen bg-[#F2F4F7] font-sans text-slate-900 overflow-hidden selection:bg-[#FC6D26] selection:text-white">
@@ -132,19 +143,25 @@ const Layout = () => {
 
         {/* User Profile */}
         <div className="p-5 mt-auto">
-          <div className="flex items-center gap-3 p-3 bg-white/40 border border-white/60 rounded-2xl hover:bg-white/60 cursor-pointer transition-all shadow-sm">
+          <div
+            className="flex items-center gap-3 p-3 bg-white/40 border border-white/60 rounded-2xl hover:bg-white/60 cursor-pointer transition-all shadow-sm group"
+            onClick={handleLogout}
+            title="Click to logout"
+          >
             <div className="w-10 h-10 rounded-xl bg-slate-200 overflow-hidden shrink-0">
               <img
-                src="https://api.dicebear.com/7.x/notionists/svg?seed=Felix"
-                alt="User"
+                src={userAvatar}
+                alt={userName}
                 className="w-full h-full object-cover"
               />
             </div>
             <div className="flex-1 min-w-0">
               <p className="text-sm font-semibold text-slate-900 truncate">
-                John Doe
+                {userName}
               </p>
-              <p className="text-xs text-slate-500 truncate">Free Plan</p>
+              <p className="text-xs text-slate-500 truncate group-hover:text-red-500 transition-colors">
+                Click to logout
+              </p>
             </div>
           </div>
         </div>
@@ -162,10 +179,14 @@ const Layout = () => {
             Gatekeeper
           </span>
         </div>
-        <div className="w-8 h-8 rounded-full bg-slate-200 border-2 border-white shadow-sm overflow-hidden">
+        <div
+          className="w-8 h-8 rounded-full bg-slate-200 border-2 border-white shadow-sm overflow-hidden"
+          onClick={handleLogout}
+          title="Click to logout"
+        >
           <img
-            src="https://api.dicebear.com/7.x/notionists/svg?seed=Felix"
-            alt="User"
+            src={userAvatar}
+            alt={userName}
             className="w-full h-full object-cover"
           />
         </div>

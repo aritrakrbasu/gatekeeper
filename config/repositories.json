@@ -19,5 +19,12 @@
     "branch": "main",
     "private_token": null,
     "auto_update": true
+  },
+  "82484562": {
+    "project_id": "82484562",
+    "gitlab_url": "https://gitlab.com/gatekeeper-group1/gatekeeper-project.git",
+    "branch": "main",
+    "private_token": null,
+    "auto_update": true
   }
 }

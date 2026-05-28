@@ -30,7 +30,7 @@ async def boot_mcp_bridge():
 
     # Detect platform and configure paths dynamically
     is_windows = platform.system() == "Windows"
-    
+
     # 1. Determine Node and NPX executables
     if is_windows:
         node_cmd = r"C:\Program Files\nodejs\node.exe" if Path(r"C:\Program Files\nodejs\node.exe").exists() else "node"
@@ -39,9 +39,12 @@ async def boot_mcp_bridge():
         node_cmd = "node"
         npx_cmd = "npx"
 
+    print(f"[DEBUG] Using node_cmd: {node_cmd}")
+    print(f"[DEBUG] Platform: {platform.system()}")
+
     # 2. Determine paths to MongoDB and GitLab MCP servers
     root_dir = Path(__file__).parent.parent
-    
+
     # MongoDB MCP Server path
     local_mongo = root_dir / "node_modules" / "mongodb-mcp-server" / "dist" / "esm" / "index.js"
     if local_mongo.exists():
@@ -52,6 +55,12 @@ async def boot_mcp_bridge():
         mongo_js_path = r"C:\Users\BCSKOL36\AppData\Roaming\npm\node_modules\mongodb-mcp-server\dist\esm\index.js"
         print(f"[ℹ️] Local MongoDB MCP not found. Using fallback path: {mongo_js_path}")
 
+        # Verify fallback path exists
+        if not Path(mongo_js_path).exists():
+            print(f"[❌] MongoDB MCP not found at fallback path: {mongo_js_path}")
+            print(f"[ℹ️] Install with: npm install -g mongodb-mcp-server")
+            print(f"[ℹ️] Or install locally: npm install mongodb-mcp-server")
+
     # GitLab MCP Server path
     local_gitlab = root_dir / "node_modules" / "@zereight" / "mcp-gitlab" / "build" / "index.js"
     if local_gitlab.exists():
@@ -61,6 +70,20 @@ async def boot_mcp_bridge():
         # Fallback to Windows global path
         gitlab_js_path = r"C:\Users\BCSKOL36\AppData\Roaming\npm\node_modules\@zereight\mcp-gitlab\build\index.js"
         print(f"[ℹ️] Local GitLab MCP not found. Using fallback path: {gitlab_js_path}")
+
+        # Verify fallback path exists
+        if not Path(gitlab_js_path).exists():
+            print(f"[❌] GitLab MCP not found at fallback path: {gitlab_js_path}")
+            print(f"[ℹ️] Install with: npm install -g @zereight/mcp-gitlab")
+            print(f"[ℹ️] Or install locally: npm install @zereight/mcp-gitlab")
+
+    # Check MongoDB connection string configuration
+    mongo_connection_string = os.getenv("MDB_MCP_CONNECTION_STRING", "")
+    if not mongo_connection_string:
+        print("[⚠️] MDB_MCP_CONNECTION_STRING not set - MongoDB storage will not work")
+        print("[ℹ️] Set MDB_MCP_CONNECTION_STRING in .env file to enable MongoDB storage")
+    else:
+        print(f"[✅] MDB_MCP_CONNECTION_STRING found: {mongo_connection_string[:20]}...{mongo_connection_string[-10:]}")
 
     # 1. MongoDB Server Parameters (Direct Binary Mapping)
     mongo_params = StdioServerParameters(
@@ -148,8 +171,23 @@ async def boot_mcp_bridge():
                                     print("[*] Initializing MongoDB MCP session...")
                                     await asyncio.wait_for(m_sess.initialize(), timeout=10.0)
                                     print("[✅] MongoDB MCP initialized")
+
+                                    # Verify MongoDB connection by listing tools
+                                    try:
+                                        mongo_tools = await m_sess.list_tools()
+                                        print(f"[✅] MongoDB tools available: {[t.name for t in mongo_tools.tools[:3]]}")
+                                    except Exception as tool_err:
+                                        print(f"[⚠️] Could not list MongoDB tools: {tool_err}")
+
                                 except asyncio.TimeoutError:
                                     print("[⚠️] MongoDB MCP initialization timed out")
+                                    print("[ℹ️] This may indicate MDB_MCP_CONNECTION_STRING is not set or invalid")
+                                    raise
+                                except Exception as mongo_init_err:
+                                    print(f"[❌] MongoDB MCP initialization failed: {mongo_init_err}")
+                                    print(f"[ℹ️] Error type: {type(mongo_init_err).__name__}")
+                                    import traceback
+                                    traceback.print_exc()
                                     raise
 
                                 try:
@@ -225,9 +263,12 @@ async def boot_mcp_bridge():
                     except Exception as nexus_err:
                         print(f"[⚠️] GitNexus connection failed: {nexus_err}")
                         print("[ℹ️] Continuing with MongoDB and GitLab only...")
+                        print("[DEBUG] Setting nexus_ok=False to trigger fallback path")
+                        nexus_ok = False  # Set to False so fallback path will execute
 
                 # If GitNexus is not available, continue with just MongoDB and GitLab
                 if not nexus_ok:
+                    print("[DEBUG] Entering fallback path (MongoDB + GitLab only)")
                     async with ClientSession(m_read, m_write, client_info=Implementation(name="gk-db", version="1.0.0")) as m_sess, \
                                ClientSession(g_read, g_write, client_info=Implementation(name="gk-git", version="1.0.0")) as g_sess:
 
@@ -238,8 +279,23 @@ async def boot_mcp_bridge():
                             print("[*] Initializing MongoDB MCP session...")
                             await asyncio.wait_for(m_sess.initialize(), timeout=10.0)
                             print("[✅] MongoDB MCP initialized")
+
+                            # Verify MongoDB connection by listing tools
+                            try:
+                                mongo_tools = await m_sess.list_tools()
+                                print(f"[✅] MongoDB tools available: {[t.name for t in mongo_tools.tools[:3]]}")
+                            except Exception as tool_err:
+                                print(f"[⚠️] Could not list MongoDB tools: {tool_err}")
+
                         except asyncio.TimeoutError:
                             print("[⚠️] MongoDB MCP initialization timed out")
+                            print("[ℹ️] This may indicate MDB_MCP_CONNECTION_STRING is not set or invalid")
+                            raise
+                        except Exception as mongo_init_err:
+                            print(f"[❌] MongoDB MCP initialization failed: {mongo_init_err}")
+                            print(f"[ℹ️] Error type: {type(mongo_init_err).__name__}")
+                            import traceback
+                            traceback.print_exc()
                             raise
 
                         try:

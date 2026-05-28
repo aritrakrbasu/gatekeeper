@@ -1,14 +1,46 @@
 import os
 import asyncio
+from typing import Optional
 from fastapi import FastAPI, Request, Header, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
 load_dotenv()
 
 # Import Gatekeeper Services
-from services import mcp_service, review_service
+from services import mcp_service, review_service, auth_service, repository_service, mongo_client
+from api_models import (
+    OAuthCallbackRequest, TokenResponse, UserResponse,
+    VerifyTokenRequest, VerifyTokenResponse, LogoutResponse,
+    RepositoryResponse, MergeRequestResponse
+)
 
 app = FastAPI(title="The Gatekeeper Gemini Orchestrator")
+
+# ============================================================================
+# CORS Configuration
+# ============================================================================
+
+# Get allowed origins from environment or use localhost defaults
+frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+allowed_origins = [
+    frontend_url,
+    "http://localhost:3000",
+    "http://localhost:5173",  # Vite default
+    "http://localhost:5174",  # Alternative Vite port
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:5174",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["*"],
+)
 
 
 @app.on_event("startup")
@@ -46,18 +78,22 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown_event():
     """Clean up resources on shutdown."""
-    global phoenix_bridge
-
     print("[*] Shutting down Gatekeeper service...")
 
-    # Close Phoenix MCP bridge
-    if phoenix_bridge:
-        try:
+    # Close MongoDB connection
+    try:
+        await mongo_client.close_mongo_connection()
+    except Exception as e:
+        print(f"[⚠️] Error closing MongoDB connection: {e}")
+
+    # Close Phoenix MCP bridge (if initialized)
+    try:
+        if 'phoenix_bridge' in globals() and phoenix_bridge:
             await close_phoenix_bridge()
             phoenix_bridge = None
             print("[✅] Phoenix MCP bridge closed")
-        except Exception as e:
-            print(f"[⚠️] Error closing Phoenix bridge: {e}")
+    except Exception as e:
+        print(f"[⚠️] Error closing Phoenix bridge: {e}")
 
     # Shutdown Arize tracer provider
     try:
@@ -74,7 +110,7 @@ async def shutdown_event():
 async def health_check():
     """Health check endpoint to verify MCP bridge status."""
     phoenix_connected = False
-    if phoenix_bridge:
+    if 'phoenix_bridge' in globals() and phoenix_bridge:
         phoenix_connected = phoenix_bridge.is_connected()
 
     return {
@@ -84,6 +120,19 @@ async def health_check():
         "gitlab_connected": mcp_service.gitlab_session is not None,
         "nexus_connected": mcp_service.nexus_session is not None
     }
+
+
+@app.get("/api/debug/mongodb")
+async def test_mongodb_connection():
+    """Test MongoDB connection and return detailed status."""
+    print("[DEBUG] Testing MongoDB connection...")
+    print(f"[DEBUG] MCP ready: {mcp_service.mcp_ready}")
+    print(f"[DEBUG] MongoDB session: {mcp_service.mongo_session}")
+    print(f"[DEBUG] GitLab session: {mcp_service.gitlab_session}")
+
+    result = await repository_service.test_mongodb_connection()
+    print(f"[DEBUG] MongoDB test result: {result}")
+    return result
 
 
 @app.post("/webhooks/gitlab")
@@ -105,3 +154,305 @@ async def gitlab_webhook(request: Request, x_gitlab_event: str = Header(None)):
         return await review_service.orchestrate_review(payload)
 
     return {"status": "event_ignored", "event": x_gitlab_event}
+
+
+# ============================================================================
+# Authentication Endpoints
+# ============================================================================
+
+@app.get("/api/auth/config")
+async def get_auth_config():
+    """Get OAuth configuration status."""
+    return {
+        "gitlab_oauth_enabled": auth_service.is_configured(),
+        "gitlab_base_url": os.getenv("GITLAB_BASE_URL", "https://gitlab.com")
+    }
+
+
+@app.post("/api/auth/gitlab")
+async def initiate_gitlab_oauth():
+    """Initiate GitLab OAuth flow."""
+    try:
+        result = auth_service.initiate_gitlab_oauth()
+        return result
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        print(f"[ERROR] Failed to initiate OAuth: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/auth/gitlab/callback")
+async def gitlab_oauth_callback(code: str, state: str):
+    """Handle GitLab OAuth callback."""
+    try:
+        result = await auth_service.handle_oauth_callback(code, state)
+        return TokenResponse(**result)
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        print(f"[ERROR] OAuth callback failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/auth/verify", response_model=VerifyTokenResponse)
+async def verify_token(request: VerifyTokenRequest):
+    """Verify a JWT access token."""
+    try:
+        user_info = auth_service.verify_token(request.token)
+        return VerifyTokenResponse(
+            valid=True,
+            user=UserResponse(**user_info),
+            message="Token is valid"
+        )
+    except HTTPException as e:
+        return VerifyTokenResponse(
+            valid=False,
+            message=str(e.detail)
+        )
+
+
+@app.post("/api/auth/logout", response_model=LogoutResponse)
+async def logout(request: VerifyTokenRequest):
+    """Logout user and invalidate session."""
+    result = auth_service.logout_user(request.token)
+    return LogoutResponse(**result)
+
+
+# ============================================================================
+# Repository Endpoints
+# ============================================================================
+
+@app.get("/api/repositories", response_model=list[RepositoryResponse])
+async def get_repositories(limit: Optional[int] = None, authorization: str = Header(None)):
+    """Get all connected repositories."""
+    try:
+        # Extract user from token if available
+        user_id = None
+        if authorization:
+            token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+            try:
+                user_info = auth_service.verify_token(token)
+                user_id = user_info.get("id")
+            except:
+                pass  # Token invalid, continue without user context
+
+        repos = await repository_service.get_all_repositories(user_id=user_id, limit=limit)
+        return repos
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch repositories: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Specific routes must come BEFORE parameterized routes
+@app.get("/api/repositories/search")
+async def search_repositories(q: str = ""):
+    """Search repositories by name or description."""
+    try:
+        if not q:
+            return []
+        results = repository_service.search_repositories(q)
+        return results
+    except Exception as e:
+        print(f"[ERROR] Failed to search repositories: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/repositories/available")
+async def get_available_repositories(
+    q: str = "",
+    authorization: str = Header(None)
+):
+    """Get user's GitLab repositories that are not yet connected."""
+    try:
+        # Extract user from token
+        if not authorization:
+            raise HTTPException(status_code=401, detail="Authorization required")
+
+        token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+        user_info = auth_service.verify_token(token)
+        user_id = user_info.get("id")
+
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        repos = await repository_service.get_available_gitlab_repositories(user_id, q)
+        return repos
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch available repositories: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/repositories/import")
+async def import_repository(request: dict, authorization: str = Header(None)):
+    """Import a new GitLab repository."""
+    try:
+        gitlab_path = request.get("gitlab_path")
+        if not gitlab_path:
+            raise HTTPException(status_code=400, detail="Missing gitlab_path")
+
+        # Extract user from token
+        user_id = None
+        if authorization:
+            token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+            try:
+                user_info = auth_service.verify_token(token)
+                user_id = user_info.get("id")
+            except:
+                pass
+
+        result = await repository_service.import_repository(gitlab_path, user_id)
+        return result
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        print(f"[ERROR] Failed to import repository: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Parameterized routes must come AFTER specific routes
+@app.get("/api/repositories/{repo_id}")
+async def get_repository_details(repo_id: str, authorization: str = Header(None)):
+    """Get detailed information about a specific repository."""
+    try:
+        # Extract user from token (optional for repo details)
+        user_id = None
+        if authorization:
+            token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+            try:
+                user_info = auth_service.verify_token(token)
+                user_id = user_info.get("id")
+            except:
+                pass  # Token invalid, continue without user context
+
+        repo = await repository_service.get_repository(repo_id)
+        return repo
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch repository details: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/repositories/{repo_id}/mrs")
+async def get_repository_merge_requests(
+    repo_id: str,
+    limit: int = 50,
+    authorization: str = Header(None)
+):
+    """Get merge requests for a repository from MongoDB."""
+    try:
+        # Extract user from token (optional)
+        user_id = None
+        if authorization:
+            token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+            try:
+                user_info = auth_service.verify_token(token)
+                user_id = user_info.get("id")
+            except:
+                pass
+
+        mrs = await repository_service.get_repository_mrs_from_db(repo_id, limit)
+        return mrs
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch repository MRs: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/repositories/{repo_id}/policies")
+async def get_repository_policies(repo_id: str, authorization: str = Header(None)):
+    """Get active policies for a repository."""
+    try:
+        policies = repository_service.get_repository_policies(repo_id)
+        return policies
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch repository policies: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/repositories/{repo_id}/feedback")
+async def submit_mr_feedback(
+    repo_id: str,
+    request: dict,
+    authorization: str = Header(None)
+):
+    """Submit feedback on AI analysis for a merge request."""
+    try:
+        if not authorization:
+            raise HTTPException(status_code=401, detail="Authorization required")
+
+        token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+        user_info = auth_service.verify_token(token)
+        user_id = user_info.get("id")
+
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        mr_id = request.get("mr_id")
+        vote = request.get("vote")
+        comment = request.get("comment", "")
+
+        if not mr_id or not vote:
+            raise HTTPException(status_code=400, detail="Missing mr_id or vote")
+
+        result = await repository_service.submit_mr_feedback(repo_id, mr_id, vote, comment, user_id)
+        return result
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        print(f"[ERROR] Failed to submit feedback: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/repositories/{repo_id}/connect")
+async def connect_repository(repo_id: str, authorization: str = Header(None)):
+    """Connect a GitLab repository."""
+    try:
+        # Extract user from token
+        if not authorization:
+            raise HTTPException(status_code=401, detail="Authorization required")
+
+        token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+        user_info = auth_service.verify_token(token)
+        user_id = user_info.get("id")
+
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        result = await repository_service.connect_repository(user_id, repo_id)
+        return result
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        print(f"[ERROR] Failed to connect repository: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/repositories/{repo_id}/disconnect")
+async def disconnect_repository(repo_id: str, authorization: str = Header(None)):
+    """Disconnect a repository."""
+    try:
+        # Extract user from token
+        if not authorization:
+            raise HTTPException(status_code=401, detail="Authorization required")
+
+        token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+        user_info = auth_service.verify_token(token)
+        user_id = user_info.get("id")
+
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        result = await repository_service.disconnect_repository(user_id, repo_id)
+        return result
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        print(f"[ERROR] Failed to disconnect repository: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

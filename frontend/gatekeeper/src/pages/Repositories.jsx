@@ -1,68 +1,105 @@
-import React, { useState } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import { Link } from "react-router-dom";
+import { useRepositories, useConnectRepository } from "../services/queries";
+import ConnectRepositoryModal from "../components/ConnectRepositoryModal";
+
+// Vector Analysis Bar Component
+const VectorAnalysisBar = ({ label, value, getProgressWidth, isNegative }) => {
+  const width = getProgressWidth(value);
+  const isBad = isNegative(value);
+
+  return (
+    <>
+      <div className="flex justify-between items-center text-sm">
+        <span className="text-slate-300">{label}</span>
+        <span className={`font-medium ${isBad ? "text-rose-400" : "text-emerald-400"}`}>
+          {value}
+        </span>
+      </div>
+      <div className="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden">
+        <div
+          className={`h-full rounded-full transition-all duration-500 ease-out ${isBad ? "bg-rose-500" : "bg-emerald-500"}`}
+          style={{ width: `${width}%` }}
+        />
+      </div>
+    </>
+  );
+};
 
 const Repositories = () => {
   const [searchQuery, setSearchQuery] = useState("");
+  const [showConnectModal, setShowConnectModal] = useState(false);
 
-  // Enhanced repository data with advanced analytical sections
-  const repositories = [
-    {
-      id: 1,
-      name: "backend-api",
-      visibility: "Private",
-      lastSync: "2m ago",
-      status: "Healthy",
-      executiveSummary:
-        "Core architecture remains highly stable. Recent merge requests have successfully resolved memory leak issues in the worker nodes without introducing new technical debt.",
-      vectorAnalysis: {
-        security: "+2.4%",
-        performance: "+5.1%",
-        complexity: "-1.2%",
-      },
-    },
-    {
-      id: 2,
-      name: "frontend-web",
-      visibility: "Private",
-      lastSync: "15m ago",
-      status: "Warning",
-      executiveSummary:
-        "Test coverage has dropped slightly below the 90% threshold in the last 3 MRs. Dependency scan flagged 2 moderate vulnerabilities in the package.json.",
-      vectorAnalysis: {
-        security: "-4.0%",
-        performance: "+1.0%",
-        complexity: "+3.5%",
-      },
-    },
-    {
-      id: 3,
-      name: "billing-service",
-      visibility: "Private",
-      lastSync: "1h ago",
-      status: "Healthy",
-      executiveSummary:
-        "Zero critical issues detected. Webhook payload validation optimizations have improved overall response times. MR velocity is up 15% this week.",
-      vectorAnalysis: {
-        security: "0.0%",
-        performance: "+8.2%",
-        complexity: "-0.5%",
-      },
-    },
-    {
-      id: 4,
-      name: "data-pipeline",
-      visibility: "Internal",
-      lastSync: "3h ago",
-      status: "Healthy",
-      executiveSummary:
-        "Batch processing logic reviewed and approved. No anomalies detected in the latest index migrations.",
-      vectorAnalysis: {
-        security: "+1.1%",
-        performance: "+2.0%",
-        complexity: "0.0%",
-      },
-    },
-  ];
+  // Helper function to parse percentage string and get numeric value
+  const parsePercentage = (percentStr) => {
+    if (!percentStr) return 0;
+    // Remove % sign, +, - and convert to number
+    const num = parseFloat(percentStr.replace(/[+%]/g, ''));
+    return isNaN(num) ? 0 : Math.abs(num);
+  };
+
+  // Helper function to check if percentage is negative (bad)
+  const isNegative = (percentStr) => {
+    if (!percentStr) return false;
+    return percentStr.startsWith('-');
+  };
+
+  // Helper function to calculate progress bar width (0-100%)
+  const getProgressWidth = (percentStr) => {
+    const value = parsePercentage(percentStr);
+    // Cap at 100% and ensure minimum visibility
+    return Math.min(Math.max(value, 5), 100);
+  };
+
+  // Use React Query hook for fetching repositories with caching
+  const { data: repositories = [], isLoading, error, refetch } = useRepositories();
+
+  // Use React Query mutation for connecting repositories
+  const connectMutation = useConnectRepository();
+
+  // Filter repositories based on search query (computed with useMemo for performance)
+  const filteredRepositories = useMemo(() => {
+    if (!searchQuery) {
+      return repositories;
+    }
+    const query = searchQuery.toLowerCase();
+    return repositories.filter((repo) =>
+      repo.name.toLowerCase().includes(query) ||
+      repo.full_name?.toLowerCase().includes(query)
+    );
+  }, [searchQuery, repositories]);
+
+  // Handle repository connection with automatic refresh via React Query
+  const handleConnectRepository = async (repo) => {
+    try {
+      await connectMutation.mutateAsync(repo.id);
+      // React Query automatically invalidates and refetches the repositories list
+    } catch (err) {
+      console.error("Failed to connect repository:", err);
+      throw err;
+    }
+  };
+
+
+  // Format last sync time
+  const formatLastSync = (isoString) => {
+    if (!isoString) return "Unknown";
+    const date = new Date(isoString);
+    const now = new Date();
+    const diffMs = now - date;
+    const diffMins = Math.floor(diffMs / 60000);
+    const diffHours = Math.floor(diffMs / 3600000);
+    const diffDays = Math.floor(diffMs / 86400000);
+
+    if (diffMins < 60) return `${diffMins}m ago`;
+    if (diffHours < 24) return `${diffHours}h ago`;
+    return `${diffDays}d ago`;
+  };
+
+  // Format visibility
+  const formatVisibility = (visibility) => {
+    return visibility?.charAt(0).toUpperCase() + visibility?.slice(1) || "Private";
+  };
 
   return (
     <div className="max-w-6xl mx-auto px-4 md:px-8">
@@ -101,7 +138,10 @@ const Repositories = () => {
               onChange={(e) => setSearchQuery(e.target.value)}
             />
           </div>
-          <button className="bg-slate-900 hover:bg-slate-800 text-white font-medium py-2.5 px-5 rounded-2xl transition-all shadow-md flex items-center gap-2 text-sm shrink-0">
+          <button
+            onClick={() => setShowConnectModal(true)}
+            className="bg-slate-900 hover:bg-slate-800 text-white font-medium py-2.5 px-5 rounded-2xl transition-all shadow-md flex items-center gap-2 text-sm shrink-0"
+          >
             <svg
               className="w-4 h-4 text-[#FC6D26]"
               viewBox="0 0 24 24"
@@ -114,9 +154,61 @@ const Repositories = () => {
         </div>
       </div>
 
+      {/* Loading State */}
+      {isLoading && (
+        <div className="flex items-center justify-center py-20">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-[#FC6D26]"></div>
+        </div>
+      )}
+
+      {/* Error State */}
+      {error && (
+        <div className="bg-red-50 border border-red-200 rounded-2xl p-6 mb-6">
+          <div className="flex items-center gap-3">
+            <svg className="w-6 h-6 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <div>
+              <p className="font-semibold text-red-800">Error loading repositories</p>
+              <p className="text-sm text-red-600">{error.message || "An error occurred"}</p>
+            </div>
+            <button
+              onClick={() => refetch()}
+              className="ml-auto px-4 py-2 bg-red-100 hover:bg-red-200 text-red-700 rounded-lg text-sm font-medium transition-colors"
+            >
+              Retry
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Empty State */}
+      {!isLoading && !error && filteredRepositories.length === 0 && (
+        <div className="text-center py-20">
+          <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-4">
+            <svg className="w-8 h-8 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
+            </svg>
+          </div>
+          <h3 className="text-lg font-semibold text-slate-900 mb-2">No repositories found</h3>
+          <p className="text-slate-500 mb-6">
+            {searchQuery ? "Try a different search term" : "Import your first repository to get started"}
+          </p>
+          {!searchQuery && (
+            <button
+              onClick={() => setShowConnectModal(true)}
+              className="bg-[#FC6D26] hover:bg-[#E24329] text-white font-medium py-2.5 px-5 rounded-2xl transition-all shadow-md"
+            >
+              Import Repository
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Repositories Grid */}
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-        {repositories.map((repo) => (
+      {!isLoading && !error && filteredRepositories.length > 0 && (
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+          {filteredRepositories.map((repo) => (
           <div
             key={repo.id}
             className="bg-white/70 backdrop-blur-xl rounded-[2rem] border border-white/80 shadow-sm p-6 hover:shadow-lg hover:shadow-slate-200/50 transition-all flex flex-col group"
@@ -137,20 +229,25 @@ const Repositories = () => {
                   <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
                     {repo.name}
                     <span className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-500 text-[10px] font-bold uppercase tracking-wider border border-slate-200">
-                      {repo.visibility}
+                      {formatVisibility(repo.visibility)}
                     </span>
                   </h3>
                   <p className="text-xs text-slate-400 mt-0.5">
-                    Last synced {repo.lastSync}
+                    Last synced {formatLastSync(repo.last_sync)}
                   </p>
                 </div>
               </div>
 
               {/* Status Indicator */}
-              {repo.status === "Healthy" ? (
+              {repo.status === "active" || repo.status === "Healthy" ? (
                 <span className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold bg-emerald-50 text-emerald-700 border border-emerald-100">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>{" "}
                   Healthy
+                </span>
+              ) : repo.status === "syncing" ? (
+                <span className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold bg-blue-50 text-blue-700 border border-blue-100">
+                  <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse"></span>{" "}
+                  Syncing
                 </span>
               ) : (
                 <span className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold bg-amber-50 text-amber-700 border border-amber-100">
@@ -180,7 +277,7 @@ const Repositories = () => {
                   Executive Summary
                 </h4>
                 <p className="text-sm text-slate-600 leading-relaxed">
-                  {repo.executiveSummary}
+                  {repo.executive_summary || repo.executiveSummary || "No summary available."}
                 </p>
               </div>
 
@@ -213,33 +310,29 @@ const Repositories = () => {
                 </h4>
 
                 <div className="space-y-3 relative z-10">
-                  <div className="flex justify-between items-center text-sm">
-                    <span className="text-slate-300">Security Stance</span>
-                    <span
-                      className={`font-medium ${repo.vectorAnalysis.security.startsWith("-") ? "text-rose-400" : "text-emerald-400"}`}
-                    >
-                      {repo.vectorAnalysis.security}
-                    </span>
-                  </div>
-                  <div className="w-full bg-slate-800 h-1 rounded-full overflow-hidden">
-                    <div
-                      className={`h-full rounded-full ${repo.vectorAnalysis.security.startsWith("-") ? "bg-rose-500 w-1/3" : "bg-emerald-500 w-4/5"}`}
-                    ></div>
-                  </div>
-
-                  <div className="flex justify-between items-center text-sm pt-1">
-                    <span className="text-slate-300">Code Complexity</span>
-                    <span
-                      className={`font-medium ${repo.vectorAnalysis.complexity.startsWith("+") ? "text-rose-400" : "text-emerald-400"}`}
-                    >
-                      {repo.vectorAnalysis.complexity}
-                    </span>
-                  </div>
-                  <div className="w-full bg-slate-800 h-1 rounded-full overflow-hidden">
-                    <div
-                      className={`h-full rounded-full ${repo.vectorAnalysis.complexity.startsWith("+") ? "bg-rose-500 w-3/4" : "bg-emerald-500 w-1/4"}`}
-                    ></div>
-                  </div>
+                  {/* Security Stance */}
+                  <VectorAnalysisBar
+                    label="Security Stance"
+                    value={repo.vector_analysis?.security || repo.vectorAnalysis?.security || "0.0%"}
+                    getProgressWidth={getProgressWidth}
+                    isNegative={isNegative}
+                  />
+                  {/* Code Complexity */}
+                  <VectorAnalysisBar
+                    label="Code Complexity"
+                    value={repo.vector_analysis?.complexity || repo.vectorAnalysis?.complexity || "0.0%"}
+                    getProgressWidth={getProgressWidth}
+                    isNegative={isNegative}
+                  />
+                  {/* Performance (if available) */}
+                  {(repo.vector_analysis?.performance || repo.vectorAnalysis?.performance) && (
+                    <VectorAnalysisBar
+                      label="Performance"
+                      value={repo.vector_analysis?.performance || repo.vectorAnalysis?.performance}
+                      getProgressWidth={getProgressWidth}
+                      isNegative={isNegative}
+                    />
+                  )}
                 </div>
               </div>
             </div>
@@ -290,7 +383,15 @@ const Repositories = () => {
             </div>
           </div>
         ))}
-      </div>
+        </div>
+      )}
+
+      {/* Connect Repository Modal */}
+      <ConnectRepositoryModal
+        isOpen={showConnectModal}
+        onClose={() => setShowConnectModal(false)}
+        onConnect={handleConnectRepository}
+      />
     </div>
   );
 };
