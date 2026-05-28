@@ -12,7 +12,8 @@ from services import mcp_service, review_service, auth_service, repository_servi
 from api_models import (
     OAuthCallbackRequest, TokenResponse, UserResponse,
     VerifyTokenRequest, VerifyTokenResponse, LogoutResponse,
-    RepositoryResponse, MergeRequestResponse
+    RepositoryResponse, MergeRequestResponse, ScanRepositoryResponse,
+    OnboardRepositoryRequest
 )
 
 app = FastAPI(title="The Gatekeeper Gemini Orchestrator")
@@ -407,6 +408,52 @@ async def submit_mr_feedback(
         raise e
     except Exception as e:
         print(f"[ERROR] Failed to submit feedback: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/repositories/{repo_id}/scan", response_model=ScanRepositoryResponse)
+async def scan_repo_credentials(repo_id: str, authorization: str = Header(None)):
+    """Scans the repository's configuration files for MongoDB and Fivetran credentials."""
+    try:
+        if not authorization:
+            raise HTTPException(status_code=401, detail="Authorization required")
+
+        token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+        user_info = auth_service.verify_token(token)
+        user_id = user_info.get("id")
+
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        result = await repository_service.scan_repository(user_id, repo_id)
+        return result
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        print(f"[ERROR] Failed to scan repository: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/repositories/{repo_id}/onboard")
+async def onboard_repo(repo_id: str, request: OnboardRepositoryRequest, authorization: str = Header(None)):
+    """Saves repository connection details and connects it."""
+    try:
+        if not authorization:
+            raise HTTPException(status_code=401, detail="Authorization required")
+
+        token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+        user_info = auth_service.verify_token(token)
+        user_id = user_info.get("id")
+
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        result = await repository_service.onboard_repository(user_id, repo_id, request.dict())
+        return result
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        print(f"[ERROR] Failed to onboard repository: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

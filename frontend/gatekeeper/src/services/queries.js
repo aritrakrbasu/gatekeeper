@@ -160,6 +160,31 @@ export function useImportRepository() {
 }
 
 /**
+ * Scan repository mutation
+ */
+export function useScanRepository() {
+  return useMutation({
+    mutationFn: (repoId) => api.scanRepository(repoId),
+  });
+}
+
+/**
+ * Onboard repository mutation
+ */
+export function useOnboardRepository() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({ repoId, data }) => api.onboardRepository(repoId, data),
+    onSuccess: () => {
+      // Invalidate repositories list
+      queryClient.invalidateQueries({ queryKey: queryKeys.repositories.lists() });
+      queryClient.invalidateQueries({ queryKey: queryKeys.repositories.all });
+    },
+  });
+}
+
+/**
  * Connect repository mutation
  */
 export function useConnectRepository() {

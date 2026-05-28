@@ -382,27 +382,91 @@ def extract_collections_from_diff(diff_text: str) -> List[str]:
     return sorted(list(collections))
 
 
-async def run_schema_inspection(diff_text: str, mongo_session, project_id: Optional[Any] = None) -> Optional[SchemaInspectionReport]:
+async def _get_target_mongodb_uri(project_id: str) -> Tuple[Optional[str], Optional[str], bool]:
+    """
+    Fetches and decrypts the target MongoDB URI and Fivetran secrets for a repository.
+    Returns (mongodb_uri, db_name, is_encrypted)
+    """
+    if not project_id:
+        return None, None, False
+
+    try:
+        from services import mongo_client
+        # Query connected_repositories for the project_id (which is a string)
+        repo = await mongo_client.find_one(
+            collection_name="connected_repositories",
+            filter={"id": str(project_id)}
+        )
+        if not repo:
+            # Try to match numeric project_id if it's passed as int or string
+            repo = await mongo_client.find_one(
+                collection_name="connected_repositories",
+                filter={"id": project_id}
+            )
+
+        if repo and "mongodb_uri" in repo and repo["mongodb_uri"]:
+            uri = repo["mongodb_uri"]
+            is_encrypted = repo.get("credentials_encrypted", False)
+
+            if is_encrypted:
+                from services.encryption_service import decrypt_value
+                uri = decrypt_value(uri)
+
+            import urllib.parse
+            parsed = urllib.parse.urlparse(uri)
+            db_name = parsed.path.split("?")[0].lstrip("/") or "gatekeeper_target"
+            return uri, db_name, is_encrypted
+    except Exception as e:
+        print(f"[⚠️] Failed to fetch target database credentials for project {project_id}: {e}")
+
+    return None, None, False
+
+
+def infer_mongo_type(val) -> str:
+    if val is None:
+        return "null"
+    t_name = type(val).__name__
+    if t_name == "ObjectId":
+        return "objectId"
+    if t_name == "str":
+        return "string"
+    if t_name == "int":
+        return "number"
+    if t_name == "float":
+        return "number"
+    if t_name == "bool":
+        return "boolean"
+    if t_name == "dict":
+        return "object"
+    if t_name == "list":
+        return "array"
+    if t_name == "datetime":
+        return "date"
+    return t_name
+
+
+async def run_schema_inspection(diff_text: str, mongo_session=None, project_id: Optional[Any] = None) -> Optional[SchemaInspectionReport]:
     """
     Performs database schema discovery and computes changes compared to previous state.
-    
+    Uses dynamic direct Motor client to connect to the target database.
+
     Args:
         diff_text: The Git Merge Request diff text.
-        mongo_session: The active MongoDB MCP ClientSession.
+        mongo_session: Deprecated/unused (for backward compatibility).
         project_id: The project identifier from the GitLab webhook payload (optional).
-        
+
     Returns:
         SchemaInspectionReport if a backend change was matched and inspected, else None.
     """
     is_backend_change, suspicious_files, triggered_by_content, confidence = detect_backend_change(diff_text)
     if not is_backend_change:
         return None
-        
+
     print(f"[+] Backend change detected (Confidence: {confidence})")
     print(f"[+] Files: {suspicious_files}")
     if triggered_by_content:
         print(f"[+] Content lines: {triggered_by_content}")
-        
+
     # Gating Logic (LOW confidence checks skip MCP calls entirely)
     if confidence == "LOW":
         return SchemaInspectionReport(
@@ -411,139 +475,109 @@ async def run_schema_inspection(diff_text: str, mongo_session, project_id: Optio
             triggered_by_content=triggered_by_content,
             confidence=confidence,
             scoped=False,
-            skipped_reason="Low confidence backend change — MCP calls skipped",
+            skipped_reason="Low confidence backend change — target DB queries skipped",
             collections=[],
             delta=None
         )
-        
-    if not mongo_session:
-        print("[⚠️] MongoDB MCP session unavailable; skipping schema inspection.")
-        return SchemaInspectionReport(
-            inspected_at=datetime.now(timezone.utc),
-            triggered_by_files=suspicious_files,
-            triggered_by_content=triggered_by_content,
-            confidence=confidence,
-            scoped=False,
-            skipped_reason="MongoDB MCP session unavailable",
-            collections=[],
-            delta=None
-        )
-        
+
     try:
-        db_name = await get_target_database(mongo_session)
-        print(f"[*] Querying schema information for database: {db_name}")
-        
-        # 1. Extract collection names directly from the diff (decoupled/no list-collections needed)
-        extracted_collections = extract_collections_from_diff(diff_text)
-        print(f"[+] Extracted collections from diff: {extracted_collections}")
-        
-        target_collections = extracted_collections
-        scoped = True
-                
-        # 3. Query details for target collections
+        # 1. Retrieve dynamic credentials for project
+        uri, db_name, is_encrypted = await _get_target_mongodb_uri(project_id)
+
+        if not uri:
+            print(f"[⚠️] No target database URI configured for project {project_id}; skipping target schema inspection.")
+            return SchemaInspectionReport(
+                inspected_at=datetime.now(timezone.utc),
+                triggered_by_files=suspicious_files,
+                triggered_by_content=triggered_by_content,
+                confidence=confidence,
+                scoped=False,
+                skipped_reason="No target MongoDB URI onboarded",
+                collections=[],
+                delta=None
+            )
+
+        print(f"[*] Decoupled: connecting to target database '{db_name}' directly...")
+        from motor.motor_asyncio import AsyncIOMotorClient
+        client = AsyncIOMotorClient(uri, serverSelectionTimeoutMS=5000)
+        db = client[db_name]
+
+        # 2. Retrieve collection names directly from the target database
+        try:
+            db_collections = await db.list_collection_names()
+            # Filter out system collections
+            target_collections = [col for col in db_collections if not col.startswith("system.")]
+            print(f"[+] Retrieved target collections from database: {target_collections}")
+            scoped = False
+        except Exception as list_err:
+            print(f"[⚠️] Failed to list collections from database: {list_err}")
+            # Fall back to extracted collections from diff
+            extracted_collections = extract_collections_from_diff(diff_text)
+            print(f"[+] Falling back to extracted collections from diff: {extracted_collections}")
+            target_collections = extracted_collections
+            scoped = True
+
+        # 3. Query details for target collections directly from target database
         collection_schemas = []
         for col_name in target_collections:
             fields = {}
             indexes = []
             sample_keys = []
-            
+
             # Query schema
             try:
-                schema_res = await mongo_session.call_tool(
-                    name="collection-schema",
-                    arguments={"database": db_name, "collection": col_name}
-                )
-                parsed_schema = parse_mcp_json_response(schema_res)
-                raw_schema = {}
-                if parsed_schema:
-                    if isinstance(parsed_schema, dict) and "schema" in parsed_schema:
-                        raw_schema = parsed_schema["schema"]
-                    elif isinstance(parsed_schema, dict):
-                        raw_schema = parsed_schema
-                        
-                for k, v in raw_schema.items():
-                    if isinstance(v, dict) and "type" in v:
-                        fields[k] = str(v["type"])
-                    elif isinstance(v, list):
-                        fields[k] = f"Array[{','.join(map(str, v))}]"
-                    else:
-                        fields[k] = str(v)
-                        
-                sample_keys = [k for k in raw_schema.keys() if "." not in k]
+                # Query up to 5 documents to infer schema
+                cursor = db[col_name].find().limit(5)
+                sample_docs = await cursor.to_list(length=5)
+
+                for doc in sample_docs:
+                    for k, v in doc.items():
+                        if k not in fields:
+                            fields[k] = infer_mongo_type(v)
+                            sample_keys.append(k)
             except Exception as e:
-                print(f"[⚠️] collection-schema failed for '{col_name}': {e}")
-                
+                print(f"[⚠️] Failed to query schema/sample documents for '{col_name}': {e}")
+
             # Query indexes
             try:
-                idx_res = await mongo_session.call_tool(
-                    name="collection-indexes",
-                    arguments={"database": db_name, "collection": col_name}
-                )
-                parsed_idx = parse_mcp_json_response(idx_res)
-                classic_list = []
-                search_list = []
-                
-                if parsed_idx and isinstance(parsed_idx, dict):
-                    classic_list = parsed_idx.get("classicIndexes", [])
-                    search_list = parsed_idx.get("searchIndexes", [])
-                else:
-                    if hasattr(idx_res, "content") and idx_res.content:
-                        for block in idx_res.content:
-                            text = getattr(block, "text", None)
-                            if not text and isinstance(block, dict):
-                                text = block.get("text")
-                            if text:
-                                matches = re.findall(r'<untrusted-user-data-[^>]+>\s*(.*?)\s*</untrusted-user-data-[^>]+>', text, re.DOTALL)
-                                for match in matches:
-                                    try:
-                                        data = json.loads(match)
-                                        if isinstance(data, list):
-                                            if not classic_list:
-                                                classic_list = data
-                                            else:
-                                                search_list = data
-                                    except Exception:
-                                        pass
-                                        
-                for idx in classic_list:
-                    if isinstance(idx, dict) and "name" in idx:
-                        indexes.append(idx["name"])
-                for idx in search_list:
-                    if isinstance(idx, dict) and "name" in idx:
-                        indexes.append(idx["name"])
+                idx_info = await db[col_name].index_information()
+                for idx_name in idx_info.keys():
+                    indexes.append(idx_name)
             except Exception as e:
-                print(f"[⚠️] collection-indexes failed for '{col_name}': {e}")
-                
+                print(f"[⚠️] Failed to query indexes for '{col_name}': {e}")
+
             collection_schemas.append(CollectionSchema(
                 name=col_name,
                 fields=fields,
                 indexes=indexes,
                 sample_document_keys=sample_keys
             ))
-            
+
+        # Close direct client connection
+        client.close()
+
         # 4. Schema Delta Comparison
         delta = None
         if project_id:
             try:
                 print(f"[*] Fetching previous snapshot from schema_snapshots collection for project: {project_id}...")
-                prev_res = await mongo_session.call_tool(
-                    name="find",
-                    arguments={
-                        "database": "gatekeeper_dev",
-                        "collection": "schema_snapshots",
-                        "filter": {"project_id": project_id},
-                        "sort": {"timestamp": -1},
-                        "limit": 1
-                    }
+                from services import mongo_client
+                prev_docs = await mongo_client.find(
+                    collection_name="schema_snapshots",
+                    filter={"project_id": str(project_id)},
+                    limit=1,
+                    sort=[("timestamp", -1)]
                 )
-                parsed_prev = parse_mcp_json_response(prev_res)
-                prev_docs = []
-                if parsed_prev:
-                    if isinstance(parsed_prev, list):
-                        prev_docs = parsed_prev
-                    elif isinstance(parsed_prev, dict) and "documents" in parsed_prev:
-                        prev_docs = parsed_prev["documents"]
-                        
+
+                # Check with raw project_id (sometimes passed as int)
+                if not prev_docs:
+                    prev_docs = await mongo_client.find(
+                        collection_name="schema_snapshots",
+                        filter={"project_id": project_id},
+                        limit=1,
+                        sort=[("timestamp", -1)]
+                    )
+
                 if prev_docs and len(prev_docs) > 0:
                     last_snapshot = prev_docs[0]
                     prev_report = last_snapshot.get("report", {})
@@ -553,7 +587,7 @@ async def run_schema_inspection(diff_text: str, mongo_session, project_id: Optio
                     print("[ℹ️] No previous schema snapshot found for this project.")
             except Exception as delta_err:
                 print(f"[⚠️] Failed to compute schema delta: {delta_err}")
-                
+
         return SchemaInspectionReport(
             inspected_at=datetime.now(timezone.utc),
             triggered_by_files=suspicious_files,
@@ -573,6 +607,7 @@ async def run_schema_inspection(diff_text: str, mongo_session, project_id: Optio
             scoped=False,
             collections=[]
         )
+
 
 
 def format_schema_report_to_markdown(report: SchemaInspectionReport) -> str:

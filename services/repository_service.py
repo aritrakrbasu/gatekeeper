@@ -1396,3 +1396,268 @@ async def update_mr_analysis(
     except Exception as e:
         print(f"[ERROR] Failed to update MR analysis: {e}")
         return False
+
+
+def is_config_file(filepath: str) -> bool:
+    filename = os.path.basename(filepath).lower()
+    if filename.startswith(".env"):
+        return True
+    if filename in ["config.js", "config.py", "settings.py", "database.js", "database.py", "docker-compose.yml", "docker-compose.yaml"]:
+        return True
+    return False
+
+
+async def _get_file_content_from_gitlab(gitlab_session, project_id: str, file_path: str) -> str:
+    try:
+        file_result = await gitlab_session.call_tool(
+            name="get_file_contents",
+            arguments={
+                "project_id": str(project_id),
+                "file_path": file_path,
+            }
+        )
+        if hasattr(file_result, 'content') and file_result.content:
+            file_data = json.loads(file_result.content[0].text)
+            content = file_data.get("content", "")
+            if file_data.get("encoding") == "base64":
+                import base64
+                padding_needed = (4 - len(content) % 4) % 4
+                if padding_needed:
+                    content += '=' * padding_needed
+                content = content.replace('-', '+').replace('_', '/')
+                return base64.b64decode(content).decode('utf-8', errors='replace')
+            return content
+    except Exception as e:
+        print(f"[⚠️] Failed to fetch file content for {file_path}: {e}")
+    return ""
+
+
+import re
+
+# Regex patterns for matching credentials
+mongo_uri_pattern = re.compile(r'mongodb(?:\+srv)?://[^\s"\'`]+')
+fivetran_key_pattern = re.compile(r'(?:fivetran_api_key|fivetran_key|fivetran_api_user|fivetran_user)\s*[=:]\s*["\'`]?([a-zA-Z0-9_-]+)["\'`]?', re.IGNORECASE)
+fivetran_secret_pattern = re.compile(r'(?:fivetran_api_secret|fivetran_secret|fivetran_api_password|fivetran_password)\s*[=:]\s*["\'`]?([a-zA-Z0-9_-]+)["\'`]?', re.IGNORECASE)
+
+
+async def scan_repository(user_id: str, repo_id: str) -> Dict:
+    """
+    Scans the repository's files (e.g. .env, config.js, settings.py) for credentials.
+    """
+    # 1. Get gitlab_session
+    gitlab_session = mcp_service.gitlab_session
+    if not gitlab_session:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="GitLab MCP service is currently unavailable"
+        )
+
+    # 2. Get repository tree
+    files_to_scan = []
+    try:
+        page_token = None
+        while len(files_to_scan) < 50: # Limit to first 50 files/config files to avoid huge searches
+            arguments = {
+                "project_id": str(repo_id),
+                "recursive": True,
+            }
+            if page_token:
+                arguments["page_token"] = page_token
+                arguments["pagination"] = "keyset"
+
+            tree_result = await gitlab_session.call_tool(
+                name="get_repository_tree",
+                arguments=arguments
+            )
+
+            if not (hasattr(tree_result, 'content') and tree_result.content):
+                break
+
+            tree_data = json.loads(tree_result.content[0].text)
+            items = tree_data.get("items", []) if isinstance(tree_data, dict) else tree_data
+
+            next_token = None
+            if isinstance(tree_data, dict):
+                next_token = tree_data.get("next_page_token")
+
+            if isinstance(items, list):
+                for item in items:
+                    if item.get("type") == "blob":
+                        path = item.get("path", "")
+                        if is_config_file(path):
+                            files_to_scan.append(path)
+
+            if next_token:
+                page_token = next_token
+            else:
+                break
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch repository tree: {e}")
+        # If we failed to get tree, return empty results gracefully
+        return {
+            "mongodb_uri": None,
+            "fivetran_api_key": None,
+            "fivetran_api_secret": None,
+            "detected_in_files": []
+        }
+
+    # Limit scanning to at most 10 config files
+    files_to_scan = files_to_scan[:10]
+
+    detected_mongodb_uri = None
+    detected_fivetran_key = None
+    detected_fivetran_secret = None
+    detected_files = []
+
+    for file_path in files_to_scan:
+        content = await _get_file_content_from_gitlab(gitlab_session, repo_id, file_path)
+        if not content:
+            continue
+
+        file_matched = False
+
+        # 1. Match MongoDB URI
+        mongo_match = mongo_uri_pattern.search(content)
+        if mongo_match and not detected_mongodb_uri:
+            detected_mongodb_uri = mongo_match.group(0)
+            file_matched = True
+
+        # 2. Match Fivetran key
+        key_match = fivetran_key_pattern.search(content)
+        if key_match and not detected_fivetran_key:
+            detected_fivetran_key = key_match.group(1)
+            file_matched = True
+
+        # 3. Match Fivetran secret
+        secret_match = fivetran_secret_pattern.search(content)
+        if secret_match and not detected_fivetran_secret:
+            detected_fivetran_secret = secret_match.group(1)
+            file_matched = True
+
+        if file_matched:
+            detected_files.append(file_path)
+
+    return {
+        "mongodb_uri": detected_mongodb_uri,
+        "fivetran_api_key": detected_fivetran_key,
+        "fivetran_api_secret": detected_fivetran_secret,
+        "detected_in_files": detected_files
+    }
+
+
+async def onboard_repository(user_id: str, repo_id: str, data: Dict) -> Dict:
+    """
+    Onboards a repository by saving its configurations, optionally encrypting sensitive credentials.
+    """
+    # 1. Retrieve inputs
+    mongodb_uri = data.get("mongodb_uri")
+    fivetran_api_key = data.get("fivetran_api_key")
+    fivetran_api_secret = data.get("fivetran_api_secret")
+    encrypt_credentials = data.get("encrypt_credentials", True)
+
+    # 2. Perform encryption if requested
+    if encrypt_credentials:
+        from services.encryption_service import encrypt_value
+        if mongodb_uri:
+            mongodb_uri = encrypt_value(mongodb_uri)
+        if fivetran_api_key:
+            fivetran_api_key = encrypt_value(fivetran_api_key)
+        if fivetran_api_secret:
+            fivetran_api_secret = encrypt_value(fivetran_api_secret)
+
+    # 3. Get user's GitLab token
+    gitlab_token = None
+    user_session = auth_service.get_user_session(user_id)
+    if user_session:
+        gitlab_token = user_session.get("gitlab_access_token")
+    if not gitlab_token:
+        gitlab_token = GITLAB_PERSONAL_ACCESS_TOKEN
+
+    # 4. Fetch details from GitLab
+    headers = {"Authorization": f"Bearer {gitlab_token}"}
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{GITLAB_BASE_URL}/api/v4/projects/{repo_id}",
+                headers=headers,
+                timeout=30.0
+            )
+            response.raise_for_status()
+            project = response.json()
+    except Exception as e:
+        # Fallback project details if GitLab fetch fails
+        project = {
+            "id": repo_id,
+            "name": f"Project {repo_id}",
+            "path_with_namespace": f"imported/project_{repo_id}",
+            "visibility": "private",
+            "web_url": f"https://gitlab.com/imported/project_{repo_id}",
+            "description": "Onboarded project"
+        }
+
+    # 5. Create or update repository document
+    new_repo = {
+        "id": str(project.get("id", repo_id)),
+        "name": project.get("name", f"Project {repo_id}"),
+        "full_name": project.get("path_with_namespace", f"imported/project_{repo_id}"),
+        "visibility": _map_gitlab_visibility(project.get("visibility", "private")),
+        "url": project.get("web_url", ""),
+        "last_sync": datetime.now().isoformat() if MONGO_CONNECTION_STRING else datetime.now(),
+        "health_score": 100.0,
+        "status": RepositoryStatus.ACTIVE,
+        "description": project.get("description", ""),
+        "created_at": datetime.fromisoformat(project.get("created_at", datetime.now().isoformat()).replace("Z", "+00:00")) if "created_at" in project else datetime.now(),
+        "avatar_url": project.get("avatar_url"),
+        "executive_summary": "Repository onboarded successfully.",
+        "vector_analysis": {
+            "security": "100.0%",
+            "performance": "100.0%",
+            "complexity": "100.0%"
+        },
+        # Credential fields
+        "mongodb_uri": mongodb_uri,
+        "fivetran_api_key": fivetran_api_key,
+        "fivetran_api_secret": fivetran_api_secret,
+        "credentials_encrypted": encrypt_credentials,
+        "onboarded": True
+    }
+
+    # Check if document already exists
+    existing = await _find_repository(user_id, str(repo_id))
+    if existing:
+        # Update existing repository record in MongoDB
+        if MONGO_CONNECTION_STRING:
+            # Add user_id and connection timestamp
+            new_repo["user_id"] = user_id
+            new_repo["connected_at"] = existing.get("connected_at", datetime.now().isoformat())
+
+            # Use direct update_one on mongo_client
+            # We serialize date objects if any
+            if isinstance(new_repo["created_at"], datetime):
+                new_repo["created_at"] = new_repo["created_at"].isoformat()
+            if isinstance(new_repo["last_sync"], datetime):
+                new_repo["last_sync"] = new_repo["last_sync"].isoformat()
+
+            await mongo_client.update_one(
+                collection_name=REPOS_COLLECTION,
+                filter={"user_id": user_id, "id": str(repo_id)},
+                update={"$set": new_repo}
+            )
+            print(f"[✅] Onboarded/Updated repository {new_repo['name']} in MongoDB")
+    else:
+        # Save new repository in memory and db
+        _repositories[new_repo["id"]] = new_repo
+        _merge_requests[new_repo["id"]] = []
+        _policies[new_repo["id"]] = []
+        await _store_repository(user_id, new_repo)
+
+    return {
+        "id": new_repo["id"],
+        "name": new_repo["name"],
+        "full_name": new_repo["full_name"],
+        "url": new_repo["url"],
+        "status": _get_enum_value(new_repo["status"]),
+        "onboarded": True,
+        "message": "Repository onboarded and credentials saved successfully"
+    }
+

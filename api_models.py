@@ -321,3 +321,24 @@ class FeedbackResponse(BaseModel):
     """Feedback submission response."""
     message: str = "Feedback submitted successfully"
     id: str
+
+
+# ============================================================================
+# Onboarding & Scan Models
+# ============================================================================
+
+class ScanRepositoryResponse(BaseModel):
+    """Response from repository credentials scan."""
+    mongodb_uri: Optional[str] = None
+    fivetran_api_key: Optional[str] = None
+    fivetran_api_secret: Optional[str] = None
+    detected_in_files: List[str] = []
+
+
+class OnboardRepositoryRequest(BaseModel):
+    """Request to onboard a repository with connection credentials."""
+    mongodb_uri: Optional[str] = None
+    fivetran_api_key: Optional[str] = None
+    fivetran_api_secret: Optional[str] = None
+    encrypt_credentials: bool = True
+

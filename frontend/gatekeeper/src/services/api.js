@@ -8,7 +8,7 @@
 // In development with Vite proxy, use empty string for relative URLs
 // In production, use the full API URL
 const API_BASE_URL = import.meta.env.MODE === 'production'
-  ? import.meta.env.VITE_API_URL || "https://api.gatekeeper.com"
+  ? import.meta.env.VITE_API_URL || "http://localhost:8000"
   : "";
 
 /**
@@ -156,6 +156,23 @@ export const api = {
     const params = searchQuery ? `?q=${encodeURIComponent(searchQuery)}` : "";
     return apiRequest(`/api/repositories/available${params}`);
   },
+
+  /**
+   * Scan repository for credentials
+   */
+  scanRepository: (repoId) =>
+    apiRequest(`/api/repositories/${repoId}/scan`, {
+      method: "POST",
+    }),
+
+  /**
+   * Onboard repository and save credentials
+   */
+  onboardRepository: (repoId, data) =>
+    apiRequest(`/api/repositories/${repoId}/onboard`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
 
   /**
    * Connect a repository
