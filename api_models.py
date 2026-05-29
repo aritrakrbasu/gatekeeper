@@ -341,6 +341,8 @@ class OnboardRepositoryRequest(BaseModel):
     fivetran_api_key: Optional[str] = None
     fivetran_api_secret: Optional[str] = None
     encrypt_credentials: bool = True
+    monitored_branches: List[str] = Field(default_factory=list, description="Branches to monitor for webhook events")
+    branch_filter_enabled: bool = Field(default=False, description="Whether branch filtering is enabled")
 
 
 class UpdateRepositoryRequest(BaseModel):
@@ -358,4 +360,53 @@ class UpdateRepositoryResponse(BaseModel):
     fivetran_key_configured: bool
     fivetran_secret_configured: bool
     credentials_encrypted: bool
+
+
+# ============================================================================
+# Branch & Webhook Models
+# ============================================================================
+
+
+class BranchInfo(BaseModel):
+    """Information about a GitLab branch."""
+    name: str
+    commit_id: str = Field(..., alias="commit_id")
+    commit_short_id: str = Field(..., alias="short_id")
+    is_default: bool = Field(default=False, alias="default")
+    can_push: bool = False
+    web_url: Optional[str] = None
+    commit_title: Optional[str] = None
+
+    class Config:
+        populate_by_name = True
+
+
+class BranchListResponse(BaseModel):
+    """Response with branch list."""
+    branches: List[BranchInfo]
+    default_branch: str
+    total_count: int
+
+
+class UpdateBranchesRequest(BaseModel):
+    """Request to update monitored branches."""
+    monitored_branches: List[str] = Field(..., description="List of branch names to monitor")
+    branch_filter_enabled: bool = True
+
+
+class InstallWebhookRequest(BaseModel):
+    """Request to install webhook."""
+    monitored_branches: List[str] = Field(default_factory=list, description="Branches to monitor (empty = all)")
+    webhook_url: Optional[str] = Field(None, description="Custom webhook URL (uses default if not provided)")
+    branch_filter_enabled: bool = True
+
+
+class WebhookResponse(BaseModel):
+    """Webhook installation response."""
+    webhook_id: int
+    webhook_url: str
+    monitored_branches: List[str]
+    branch_filter_enabled: bool
+    message: str
+    project_id: str
 

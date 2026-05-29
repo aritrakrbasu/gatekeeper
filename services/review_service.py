@@ -64,6 +64,22 @@ async def orchestrate_review(payload: dict) -> dict:
     source_branch = object_attrs.get("source_branch")
     target_branch = object_attrs.get("target_branch", "main")
     project_id = payload.get("project", {}).get("id")
+
+    # Branch filtering: Check if this MR's source branch should be processed
+    try:
+        repo = await repository_service.get_repository(str(project_id))
+        monitored_branches = repo.get("monitored_branches", [])
+        branch_filter_enabled = repo.get("branch_filter_enabled", True)
+
+        # Skip processing if branch filter is enabled and this branch is not monitored
+        if branch_filter_enabled and monitored_branches and source_branch not in monitored_branches:
+            print(f"[ℹ] MR source branch '{source_branch}' not in monitored branches {monitored_branches} - skipping audit")
+            return {"status": "skipped_branch_filter", "source_branch": source_branch, "monitored_branches": monitored_branches}
+
+        print(f"[ℹ] Processing MR for branch '{source_branch}' (filter enabled: {branch_filter_enabled}, monitored: {monitored_branches if monitored_branches else 'all'})")
+    except Exception as filter_err:
+        print(f"[⚠️] Failed to check branch filter: {filter_err}")
+        # Continue processing if filter check fails
     mr_iid = object_attrs.get("iid")
     mr_internal_id = object_attrs.get("id")
     author = payload.get("user", {}).get("username", "unknown")

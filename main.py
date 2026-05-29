@@ -8,12 +8,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Import Gatekeeper Services
-from services import mcp_service, review_service, auth_service, repository_service, mongo_client
+from services import mcp_service, review_service, auth_service, repository_service, mongo_client, webhook_service
 from api_models import (
     OAuthCallbackRequest, TokenResponse, UserResponse,
     VerifyTokenRequest, VerifyTokenResponse, LogoutResponse,
     RepositoryResponse, MergeRequestResponse, ScanRepositoryResponse,
-    OnboardRepositoryRequest, UpdateRepositoryRequest, UpdateRepositoryResponse
+    OnboardRepositoryRequest, UpdateRepositoryRequest, UpdateRepositoryResponse,
+    BranchListResponse, UpdateBranchesRequest, InstallWebhookRequest, WebhookResponse
 )
 
 app = FastAPI(title="The Gatekeeper Gemini Orchestrator")
@@ -547,3 +548,218 @@ async def disconnect_repository(repo_id: str, authorization: str = Header(None))
     except Exception as e:
         print(f"[ERROR] Failed to disconnect repository: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Branch & Webhook Endpoints
+# ============================================================================
+
+
+@app.get("/api/repositories/{repo_id}/branches", response_model=BranchListResponse)
+async def get_repository_branches(
+    repo_id: str,
+    q: str = "",
+    authorization: str = Header(None)
+):
+    """Fetch all branches for a repository."""
+    try:
+        if not authorization:
+            raise HTTPException(status_code=401, detail="Authorization required")
+
+        token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+        user_info = auth_service.verify_token(token)
+        user_id = user_info.get("id")
+
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        branches = await repository_service.get_gitlab_branches(repo_id, user_id, q)
+
+        # Find default branch
+        default_branch = "main"
+        for branch in branches:
+            if branch.get("is_default"):
+                default_branch = branch["name"]
+                break
+
+        return BranchListResponse(
+            branches=branches,
+            default_branch=default_branch,
+            total_count=len(branches)
+        )
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch repository branches: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/api/repositories/{repo_id}/branches")
+async def update_monitored_branches(
+    repo_id: str,
+    request: UpdateBranchesRequest,
+    authorization: str = Header(None)
+):
+    """
+    Update the list of monitored branches for a repository.
+    Branch filtering is applied server-side during webhook processing.
+    """
+    try:
+        if not authorization:
+            raise HTTPException(status_code=401, detail="Authorization required")
+
+        token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+        user_info = auth_service.verify_token(token)
+        user_id = user_info.get("id")
+
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        # Update repository document with new monitored branches
+        if repository_service.MONGO_CONNECTION_STRING:
+            await repository_service.mongo_client.update_one(
+                collection_name=repository_service.REPOS_COLLECTION,
+                filter={"id": repo_id},
+                update={
+                    "$set": {
+                        "monitored_branches": request.monitored_branches,
+                        "branch_filter_enabled": request.branch_filter_enabled
+                    }
+                }
+            )
+            print(f"[✅] Updated monitored branches for repo {repo_id}: {request.monitored_branches if request.monitored_branches else 'All branches'}")
+
+            # Update webhook if exists (currently just updates DB, webhook doesn't support branch filtering at API level)
+            # The filtering is applied server-side in review_service.py
+
+            return {
+                "message": "Branch filter updated successfully",
+                "monitored_branches": request.monitored_branches,
+                "branch_filter_enabled": request.branch_filter_enabled
+            }
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail="MongoDB connection not available"
+            )
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        print(f"[ERROR] Failed to update monitored branches: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/repositories/{repo_id}/webhook", response_model=WebhookResponse)
+async def install_webhook(
+    repo_id: str,
+    request: InstallWebhookRequest,
+    authorization: str = Header(None)
+):
+    """
+    Install a GitLab webhook for the repository.
+    The webhook will send merge request events to Gatekeeper.
+    """
+    try:
+        if not authorization:
+            raise HTTPException(status_code=401, detail="Authorization required")
+
+        token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+        user_info = auth_service.verify_token(token)
+        user_id = user_info.get("id")
+
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        # Install webhook via GitLab API
+        result = await webhook_service.install_gitlab_webhook(
+            repo_id=repo_id,
+            user_id=user_id,
+            monitored_branches=request.monitored_branches,
+            custom_webhook_url=request.webhook_url
+        )
+
+        # Update repository document with webhook info
+        if repository_service.MONGO_CONNECTION_STRING:
+            await repository_service.mongo_client.update_one(
+                collection_name=repository_service.REPOS_COLLECTION,
+                filter={"id": repo_id},
+                update={
+                    "$set": {
+                        "webhook_installed": True,
+                        "webhook_id": result.get("webhook_id"),
+                        "monitored_branches": request.monitored_branches,
+                        "branch_filter_enabled": request.branch_filter_enabled
+                    }
+                }
+            )
+            print(f"[✅] Updated repo {repo_id} with webhook info")
+
+        return WebhookResponse(**result)
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        print(f"[ERROR] Failed to install webhook: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/repositories/{repo_id}/webhook")
+async def delete_webhook(
+    repo_id: str,
+    authorization: str = Header(None)
+):
+    """
+    Delete the GitLab webhook for a repository.
+    """
+    try:
+        if not authorization:
+            raise HTTPException(status_code=401, detail="Authorization required")
+
+        token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+        user_info = auth_service.verify_token(token)
+        user_id = user_info.get("id")
+
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        # Get webhook_id from repository
+        repo = await repository_service.get_repository(repo_id)
+        webhook_id = repo.get("webhook_id")
+
+        if not webhook_id:
+            raise HTTPException(
+                status_code=404,
+                detail="No webhook found for this repository"
+            )
+
+        # Delete webhook via GitLab API
+        result = await webhook_service.delete_gitlab_webhook(
+            repo_id=repo_id,
+            user_id=user_id,
+            webhook_id=webhook_id
+        )
+
+        # Update repository document
+        if repository_service.MONGO_CONNECTION_STRING:
+            await repository_service.mongo_client.update_one(
+                collection_name=repository_service.REPOS_COLLECTION,
+                filter={"id": repo_id},
+                update={
+                    "$set": {
+                        "webhook_installed": False,
+                        "webhook_id": None
+                    }
+                }
+            )
+            print(f"[✅] Removed webhook info from repo {repo_id}")
+
+        return result
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        print(f"[ERROR] Failed to delete webhook: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+

@@ -980,7 +980,12 @@ async def connect_repository(user_id: str, repo_id: str) -> Dict:
             "complexity": "0.0%"
         },
         "avg_review_time": 2.5,
-        "mrs_reviewed": 0
+        "mrs_reviewed": 0,
+        # Branch and webhook fields
+        "monitored_branches": [],
+        "branch_filter_enabled": False,
+        "webhook_installed": False,
+        "webhook_id": None
     }
 
     # Store in memory
@@ -1000,6 +1005,104 @@ async def connect_repository(user_id: str, repo_id: str) -> Dict:
         "status": new_repo["status"].value,
         "message": "Repository connected successfully"
     }
+
+
+async def get_gitlab_branches(repo_id: str, user_id: str, search_query: str = "") -> List[Dict]:
+    """
+    Fetch all branches for a GitLab repository.
+
+    Args:
+        repo_id: GitLab project ID
+        user_id: User ID for authentication
+        search_query: Optional search query to filter branches
+
+    Returns:
+        List of branches with name, commit info, and default status
+    """
+    # Get user's GitLab token
+    gitlab_token = None
+    user_session = auth_service.get_user_session(user_id)
+    if user_session:
+        gitlab_token = user_session.get("gitlab_access_token")
+
+    if not gitlab_token:
+        gitlab_token = GITLAB_PERSONAL_ACCESS_TOKEN
+
+    if not gitlab_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="No GitLab access token available. Please login or configure GITLAB_PERSONAL_ACCESS_TOKEN"
+        )
+
+    headers = {"Authorization": f"Bearer {gitlab_token}"}
+    params = {"per_page": 100}
+
+    if search_query:
+        params["search"] = search_query
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{GITLAB_BASE_URL}/api/v4/projects/{repo_id}/repository/branches",
+                headers=headers,
+                params=params,
+                timeout=30.0
+            )
+            response.raise_for_status()
+            branches_data = response.json()
+
+            # Format branches for response
+            branches = []
+            default_branch = None
+
+            for branch in branches_data:
+                branch_name = branch.get("name", "")
+                is_default = branch.get("default", False)
+
+                if is_default:
+                    default_branch = branch_name
+
+                commit_info = branch.get("commit", {})
+
+                branches.append({
+                    "name": branch_name,
+                    "commit_id": commit_info.get("id", ""),
+                    "short_id": commit_info.get("short_id", ""),
+                    "commit_title": commit_info.get("title", ""),
+                    "is_default": is_default,
+                    "can_push": branch.get("can_push", False),
+                    "web_url": branch.get("web_url", ""),
+                    "merged": branch.get("merged", False),
+                    "protected": branch.get("protected", False),
+                    "developers_can_push": branch.get("developers_can_push", False),
+                    "developers_can_merge": branch.get("developers_can_merge", False)
+                })
+
+            print(f"[INFO] Fetched {len(branches)} branches for repo {repo_id}")
+
+            return branches
+
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 401:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="GitLab token expired or invalid. Please login again."
+            )
+        elif e.response.status_code == 404:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Repository not found or you don't have access"
+            )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to fetch branches: {e.response.text}"
+        )
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch GitLab branches: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
 
 
 async def disconnect_repository(user_id: str, repo_id: str) -> Dict:
@@ -1806,7 +1909,12 @@ async def onboard_repository(user_id: str, repo_id: str, data: Dict) -> Dict:
         "credentials_encrypted": encrypt_credentials,
         "onboarded": True,
         "avg_review_time": 2.5,
-        "mrs_reviewed": 0
+        "mrs_reviewed": 0,
+        # Branch and webhook fields
+        "monitored_branches": data.get("monitored_branches", []),
+        "branch_filter_enabled": data.get("branch_filter_enabled", bool(data.get("monitored_branches", []))),
+        "webhook_installed": False,
+        "webhook_id": None
     }
 
     # Check if document already exists
