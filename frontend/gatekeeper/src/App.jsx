@@ -17,6 +17,7 @@ import Alerts from "./pages/Alerts";
 import Settings from "./pages/Settings";
 import Billing from "./pages/Billing";
 import Onboarding from "./components/Onboarding";
+import GatekeeperLanding from "./pages/GatekeeperLanding";
 
 function App() {
   return (
@@ -24,8 +25,9 @@ function App() {
       <AuthProvider>
         <Router>
           <Routes>
-            <Route path="/" element={<Navigate to="/login" replace />} />
+            <Route path="/" element={<GatekeeperLanding />} />
             <Route path="/login" element={<Login />} />
+
             <Route path="/auth/callback" element={<AuthCallback />} />
             <Route path="/onboarding" element={<Onboarding />} />
             <Route element={<Layout />}>
