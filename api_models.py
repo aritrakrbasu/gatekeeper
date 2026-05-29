@@ -342,3 +342,20 @@ class OnboardRepositoryRequest(BaseModel):
     fivetran_api_secret: Optional[str] = None
     encrypt_credentials: bool = True
 
+
+class UpdateRepositoryRequest(BaseModel):
+    """Request to update repository credentials."""
+    mongodb_uri: Optional[str] = None
+    fivetran_api_key: Optional[str] = None
+    fivetran_api_secret: Optional[str] = None
+    encrypt_credentials: bool = True
+
+
+class UpdateRepositoryResponse(BaseModel):
+    """Response after updating repository credentials."""
+    message: str
+    mongodb_uri_configured: bool
+    fivetran_key_configured: bool
+    fivetran_secret_configured: bool
+    credentials_encrypted: bool
+

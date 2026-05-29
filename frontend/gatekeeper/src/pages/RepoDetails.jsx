@@ -1,20 +1,28 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { Link, useParams } from "react-router-dom";
 import ReactMarkdown from "react-markdown";
 import {
   useRepository,
   useRepositoryMRs,
-  useRepositoryPolicies,
   useSubmitFeedback,
+  useMRProgressLogs,
+  useUpdateRepositoryCredentials,
 } from "../services/queries";
+import { formatLastSync } from "../utils/formatLastSync";
 
 const RepoDetails = () => {
   const { id } = useParams();
   const [selectedMR, setSelectedMR] = useState(null);
+  const [showLogs, setShowLogs] = useState(false);
   const [feedback, setFeedback] = useState({
     vote: null,
     text: "",
     submitted: false,
+  });
+  const [credentialModal, setCredentialModal] = useState({
+    isOpen: false,
+    field: null,
+    value: "",
   });
 
   // Fetch repository details
@@ -32,11 +40,11 @@ const RepoDetails = () => {
     isFetching,
   } = useRepositoryMRs(id);
 
-  // Fetch policies
-  const { data: activePolicies = [] } = useRepositoryPolicies(id);
-
   // Feedback mutation
   const feedbackMutation = useSubmitFeedback();
+
+  // Credentials update mutation
+  const credentialsMutation = useUpdateRepositoryCredentials();
 
   // Loading state
   if (repoLoading) {
@@ -95,16 +103,14 @@ const RepoDetails = () => {
 
   const repoMRsList = repoMRs || [];
 
-  // Map policies to expected format
-  const policiesList = activePolicies.map((policy) => ({
-    name: policy.name || policy,
-    active:
-      policy.enabled !== undefined
-        ? policy.enabled
-        : policy.active !== undefined
-          ? policy.active
-          : true,
-  }));
+  // Connection status from repo data (computed after repoData is available)
+  const connectionStatus = {
+    mongodb: !!repoData.mongodb_uri,
+    fivetran: !!(repoData.fivetran_api_key && repoData.fivetran_api_secret),
+    fivetranKey: !!repoData.fivetran_api_key,
+    fivetranSecret: !!repoData.fivetran_api_secret,
+    credentialsEncrypted: repoData.credentials_encrypted || false,
+  };
 
   const closeModal = () => {
     setSelectedMR(null);
@@ -132,6 +138,59 @@ const RepoDetails = () => {
 
   const handleSync = () => {
     refetch();
+  };
+
+  // Credential update handlers
+  const openCredentialModal = (field, currentValue) => {
+    if (field === "fivetranKey" || field === "fivetranSecret") {
+      // For Fivetran, open modal with both fields
+      setCredentialModal({
+        isOpen: true,
+        field: "fivetran",
+        value: {
+          apiKey: repoData.fivetran_api_key || "",
+          apiSecret: repoData.fivetran_api_secret || "",
+        },
+      });
+    } else {
+      setCredentialModal({
+        isOpen: true,
+        field,
+        value: currentValue || "",
+      });
+    }
+  };
+
+  const closeCredentialModal = () => {
+    setCredentialModal({
+      isOpen: false,
+      field: null,
+      value: "",
+    });
+  };
+
+  const submitCredentialUpdate = async () => {
+    try {
+      const data = {};
+      if (credentialModal.field === "mongodb") {
+        data.mongodb_uri = credentialModal.value;
+        // Preserve existing values
+        data.fivetran_api_key = repoData.fivetran_api_key || "";
+        data.fivetran_api_secret = repoData.fivetran_api_secret || "";
+      } else if (credentialModal.field === "fivetran") {
+        data.fivetran_api_key = credentialModal.value.apiKey;
+        data.fivetran_api_secret = credentialModal.value.apiSecret;
+        data.mongodb_uri = repoData.mongodb_uri || "";
+      }
+
+      await credentialsMutation.mutateAsync({
+        repoId: id,
+        data,
+      });
+      closeCredentialModal();
+    } catch (err) {
+      console.error("Failed to update credential:", err);
+    }
   };
 
   return (
@@ -186,7 +245,7 @@ const RepoDetails = () => {
                   <span className="w-2 h-2 rounded-full bg-emerald-500"></span>{" "}
                   Online
                 </span>
-                • Last synced {repoData.lastSync || "Unknown"}
+                • Last synced {formatLastSync(repo.last_sync)}
               </p>
             </div>
           </div>
@@ -305,15 +364,21 @@ const RepoDetails = () => {
                   const getStatusDisplay = (status) => {
                     switch (status) {
                       case "open":
+                        return "Open";
+                      case "reviewing":
                         return "Reviewing";
+                      case "reviewed":
+                        return "Reviewed";
                       case "merged":
-                        return "Approved";
+                        return "Merged";
                       case "closed":
                         return "Closed";
                       case "draft":
                         return "Draft";
+                      case "failed":
+                        return "Failed";
                       default:
-                        return "Reviewing";
+                        return "Open";
                     }
                   };
 
@@ -396,16 +461,28 @@ const RepoDetails = () => {
                       </div>
 
                       <div className="flex flex-row sm:flex-col items-center sm:items-end justify-between sm:justify-center gap-2 sm:gap-1.5 ml-14 sm:ml-0">
+                        {statusDisplay === "Open" && (
+                          <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide bg-slate-100/80 text-slate-700 border border-slate-200">
+                            <span className="w-1.5 h-1.5 rounded-full bg-slate-500"></span>{" "}
+                            Open
+                          </span>
+                        )}
                         {statusDisplay === "Reviewing" && (
                           <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide bg-blue-100/80 text-blue-700 border border-blue-200">
                             <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-ping"></span>{" "}
                             Reviewing
                           </span>
                         )}
-                        {statusDisplay === "Approved" && (
+                        {statusDisplay === "Reviewed" && (
                           <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide bg-emerald-100/80 text-emerald-700 border border-emerald-200">
                             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>{" "}
-                            Approved
+                            Reviewed
+                          </span>
+                        )}
+                        {statusDisplay === "Merged" && (
+                          <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide bg-purple-100/80 text-purple-700 border border-purple-200">
+                            <span className="w-1.5 h-1.5 rounded-full bg-purple-500"></span>{" "}
+                            Merged
                           </span>
                         )}
                         {statusDisplay === "Closed" && (
@@ -418,6 +495,12 @@ const RepoDetails = () => {
                           <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide bg-slate-100/80 text-slate-700 border border-slate-200">
                             <span className="w-1.5 h-1.5 rounded-full bg-slate-500"></span>{" "}
                             Draft
+                          </span>
+                        )}
+                        {statusDisplay === "Failed" && (
+                          <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide bg-rose-100/80 text-rose-700 border border-rose-200">
+                            <span className="w-1.5 h-1.5 rounded-full bg-rose-500"></span>{" "}
+                            Failed
                           </span>
                         )}
                         <span className="text-[11px] text-slate-400 font-medium whitespace-nowrap">
@@ -538,85 +621,183 @@ const RepoDetails = () => {
             </div>
           </div>
 
-          {/* Connected Active Review Policies List */}
+          {/* Active Policies - Connection Status */}
           <div className="bg-white/70 backdrop-blur-xl rounded-[2rem] border border-white/80 shadow-sm p-6 lg:p-8">
             <div className="flex justify-between items-center mb-5">
               <h3 className="text-lg font-bold text-slate-900">
                 Active Policies
               </h3>
-              <button className="text-slate-400 hover:text-slate-900 transition-colors">
-                <svg
-                  className="w-5 h-5"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                  stroke="currentColor"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth="2"
-                    d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"
-                  />
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth="2"
-                    d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
-                  />
-                </svg>
-              </button>
+              {connectionStatus.credentialsEncrypted && (
+                <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-100/80 text-emerald-700 border border-emerald-200">
+                  <svg
+                    className="w-3 h-3"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth="2"
+                      d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"
+                    />
+                  </svg>
+                  <span className="text-[10px] font-bold uppercase tracking-wide">
+                    Encrypted
+                  </span>
+                </div>
+              )}
             </div>
             <div className="space-y-3">
-              {policiesList.length === 0 ? (
-                <div className="text-center py-8">
-                  <p className="text-slate-500 text-sm">
-                    No policies configured
-                  </p>
+              {/* MongoDB Connection */}
+              <div className="flex items-start gap-3">
+                <div
+                  className={`mt-0.5 shrink-0 w-5 h-5 rounded flex items-center justify-center ${connectionStatus.mongodb ? "bg-emerald-100 text-emerald-600" : "bg-slate-100 text-slate-300"}`}
+                >
+                  {connectionStatus.mongodb ? (
+                    <svg
+                      className="w-3.5 h-3.5"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth="2.5"
+                        d="M5 13l4 4L19 7"
+                      />
+                    </svg>
+                  ) : (
+                    <svg
+                      className="w-3.5 h-3.5"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth="2"
+                        d="M18 12H6"
+                      />
+                    </svg>
+                  )}
                 </div>
-              ) : (
-                policiesList.map((policy, i) => (
-                  <div key={i} className="flex items-start gap-3">
-                    <div
-                      className={`mt-0.5 shrink-0 w-5 h-5 rounded flex items-center justify-center ${policy.active ? "bg-emerald-100 text-emerald-600" : "bg-slate-100 text-slate-300"}`}
+                <div className="flex-1">
+                  <span
+                    className={`text-sm ${connectionStatus.mongodb ? "text-slate-700 font-medium" : "text-slate-400"}`}
+                  >
+                    MongoDB Check
+                  </span>
+                  {connectionStatus.mongodb && (
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      Schema inspection enabled
+                    </p>
+                  )}
+                </div>
+                <button
+                  onClick={() =>
+                    openCredentialModal("mongodb", repoData.mongodb_uri)
+                  }
+                  className="text-slate-400 hover:text-[#FC6D26] transition-colors p-1 rounded hover:bg-slate-100"
+                  title="Update MongoDB URI"
+                >
+                  <svg
+                    className="w-4 h-4"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth="2"
+                      d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
+                    />
+                  </svg>
+                </button>
+              </div>
+
+              {/* Fivetran Integration */}
+              <div className="flex items-start gap-3">
+                <div
+                  className={`mt-0.5 shrink-0 w-5 h-5 rounded flex items-center justify-center ${connectionStatus.fivetran ? "bg-emerald-100 text-emerald-600" : "bg-slate-100 text-slate-300"}`}
+                >
+                  {connectionStatus.fivetran ? (
+                    <svg
+                      className="w-3.5 h-3.5"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
                     >
-                      {policy.active ? (
-                        <svg
-                          className="w-3.5 h-3.5"
-                          fill="none"
-                          viewBox="0 0 24 24"
-                          stroke="currentColor"
-                        >
-                          <path
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            strokeWidth="2.5"
-                            d="M5 13l4 4L19 7"
-                          />
-                        </svg>
-                      ) : (
-                        <svg
-                          className="w-3.5 h-3.5"
-                          fill="none"
-                          viewBox="0 0 24 24"
-                          stroke="currentColor"
-                        >
-                          <path
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            strokeWidth="2"
-                            d="M18 12H6"
-                          />
-                        </svg>
-                      )}
-                    </div>
-                    <span
-                      className={`text-sm ${policy.active ? "text-slate-700 font-medium" : "text-slate-400 line-through"}`}
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth="2.5"
+                        d="M5 13l4 4L19 7"
+                      />
+                    </svg>
+                  ) : (
+                    <svg
+                      className="w-3.5 h-3.5"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
                     >
-                      {policy.name}
-                    </span>
-                  </div>
-                ))
-              )}
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth="2"
+                        d="M18 12H6"
+                      />
+                    </svg>
+                  )}
+                </div>
+                <div className="flex-1">
+                  <span
+                    className={`text-sm ${connectionStatus.fivetran ? "text-slate-700 font-medium" : "text-slate-400"}`}
+                  >
+                    Fivetran Integration
+                  </span>
+                  {connectionStatus.fivetran ? (
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      Connected (API Key + Secret configured)
+                    </p>
+                  ) : connectionStatus.fivetranKey ||
+                    connectionStatus.fivetranSecret ? (
+                    <p className="text-xs text-amber-600 mt-0.5">
+                      Incomplete configuration
+                    </p>
+                  ) : null}
+                </div>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() =>
+                      openCredentialModal(
+                        "fivetranSecret",
+                        repoData.fivetran_api_secret,
+                      )
+                    }
+                    className="text-slate-400 hover:text-[#FC6D26] transition-colors p-1 rounded hover:bg-slate-100"
+                    title="Update Fivetran API Secret"
+                  >
+                    <svg
+                      className="w-4 h-4"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth="2"
+                        d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
+                      />
+                    </svg>
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -772,6 +953,21 @@ const RepoDetails = () => {
                   </span>
                 </div>
               </div>
+
+              {/* Progress Logs Section - Show for reviewing/reviewed MRs */}
+              {(selectedMR.status === "reviewing" ||
+                selectedMR.status === "reviewed" ||
+                selectedMR.status === "Reviewing" ||
+                selectedMR.status === "Reviewed") && (
+                <ProgressLogsViewer
+                  repoId={id}
+                  mrIid={selectedMR.iid || selectedMR.gitlab_mr_id}
+                  isReviewing={
+                    selectedMR.status === "reviewing" ||
+                    selectedMR.status === "Reviewing"
+                  }
+                />
+              )}
 
               {/* Gatekeeper AI Inside-Modal Analysis Feedback */}
               <div
@@ -1026,20 +1222,34 @@ const RepoDetails = () => {
 
             {/* Modal Footer */}
             <div className="px-6 py-4 border-t border-slate-100 bg-slate-50/50 flex items-center justify-between">
-              {selectedMR.status === "Approved" ? (
+              {selectedMR.status === "Approved" ||
+              selectedMR.status === "reviewed" ? (
                 <span className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold uppercase tracking-wide bg-emerald-100/80 text-emerald-700 border border-emerald-200">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>{" "}
                   Ready to Merge
                 </span>
-              ) : selectedMR.status === "Reviewing" ? (
+              ) : selectedMR.status === "Reviewing" ||
+                selectedMR.status === "reviewing" ? (
                 <span className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold uppercase tracking-wide bg-blue-100/80 text-blue-700 border border-blue-200">
                   <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse"></span>{" "}
                   Analyzing
                 </span>
-              ) : (
+              ) : selectedMR.status === "Failed" ||
+                selectedMR.status === "failed" ? (
                 <span className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold uppercase tracking-wide bg-rose-100/80 text-rose-700 border border-rose-200">
                   <span className="w-1.5 h-1.5 rounded-full bg-rose-500"></span>{" "}
-                  Action Required
+                  Analysis Failed
+                </span>
+              ) : selectedMR.status === "Merged" ||
+                selectedMR.status === "merged" ? (
+                <span className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold uppercase tracking-wide bg-purple-100/80 text-purple-700 border border-purple-200">
+                  <span className="w-1.5 h-1.5 rounded-full bg-purple-500"></span>{" "}
+                  Merged
+                </span>
+              ) : (
+                <span className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold uppercase tracking-wide bg-slate-100/80 text-slate-700 border border-slate-200">
+                  <span className="w-1.5 h-1.5 rounded-full bg-slate-500"></span>{" "}
+                  {selectedMR.status || "Open"}
                 </span>
               )}
 
@@ -1076,6 +1286,227 @@ const RepoDetails = () => {
           </div>
         </div>
       )}
+
+      {/* =========================================
+          CREDENTIAL UPDATE MODAL
+          ========================================= */}
+      {credentialModal.isOpen && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 sm:p-6">
+          <div
+            className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm transition-opacity"
+            onClick={closeCredentialModal}
+          ></div>
+
+          <div className="relative w-full max-w-md bg-white/95 backdrop-blur-2xl border border-white rounded-2xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+            {/* Modal Header */}
+            <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-white/50">
+              <h2 className="text-lg font-bold text-slate-900">
+                {credentialModal.field === "mongodb" && "Update MongoDB URI"}
+                {credentialModal.field === "fivetran" &&
+                  "Update Fivetran Credentials"}
+              </h2>
+              <button
+                onClick={closeCredentialModal}
+                className="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center text-slate-500 hover:bg-slate-200 hover:text-slate-900 transition-colors"
+              >
+                <svg
+                  className="w-4 h-4"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth="2"
+                    d="M6 18L18 6M6 6l12 12"
+                  />
+                </svg>
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-6">
+              {/* MongoDB - Single field */}
+              {credentialModal.field === "mongodb" && (
+                <>
+                  <label className="block text-sm font-medium text-slate-700 mb-2">
+                    MongoDB Connection URI
+                  </label>
+                  <input
+                    type="text"
+                    value={credentialModal.value}
+                    onChange={(e) =>
+                      setCredentialModal({
+                        ...credentialModal,
+                        value: e.target.value,
+                      })
+                    }
+                    className="w-full px-4 py-2.5 rounded-xl border border-slate-200 bg-white text-slate-900 placeholder-slate-400 focus:outline-none focus:border-[#FC6D26] focus:ring-1 focus:ring-[#FC6D26] transition-all"
+                    placeholder="mongodb://localhost:27017"
+                    autoFocus
+                  />
+                </>
+              )}
+
+              {/* Fivetran - Two fields */}
+              {credentialModal.field === "fivetran" && (
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-2">
+                      Fivetran API Key
+                    </label>
+                    <input
+                      type="password"
+                      value={credentialModal.value.apiKey}
+                      onChange={(e) =>
+                        setCredentialModal({
+                          ...credentialModal,
+                          value: {
+                            ...credentialModal.value,
+                            apiKey: e.target.value,
+                          },
+                        })
+                      }
+                      className="w-full px-4 py-2.5 rounded-xl border border-slate-200 bg-white text-slate-900 placeholder-slate-400 focus:outline-none focus:border-[#FC6D26] focus:ring-1 focus:ring-[#FC6D26] transition-all"
+                      placeholder="Enter your API key"
+                      autoFocus
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-2">
+                      Fivetran API Secret
+                    </label>
+                    <input
+                      type="password"
+                      value={credentialModal.value.apiSecret}
+                      onChange={(e) =>
+                        setCredentialModal({
+                          ...credentialModal,
+                          value: {
+                            ...credentialModal.value,
+                            apiSecret: e.target.value,
+                          },
+                        })
+                      }
+                      className="w-full px-4 py-2.5 rounded-xl border border-slate-200 bg-white text-slate-900 placeholder-slate-400 focus:outline-none focus:border-[#FC6D26] focus:ring-1 focus:ring-[#FC6D26] transition-all"
+                      placeholder="Enter your API secret"
+                    />
+                  </div>
+                </div>
+              )}
+              {connectionStatus.credentialsEncrypted && (
+                <p className="text-xs text-slate-500 mt-2 flex items-center gap-1">
+                  <svg
+                    className="w-3 h-3 text-emerald-500"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth="2"
+                      d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"
+                    />
+                  </svg>
+                  Credentials are encrypted at rest
+                </p>
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            <div className="px-6 py-4 border-t border-slate-100 bg-slate-50/50 flex items-center justify-end gap-3">
+              <button
+                onClick={closeCredentialModal}
+                className="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-900 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={submitCredentialUpdate}
+                disabled={
+                  credentialsMutation.isPending ||
+                  (credentialModal.field === "mongodb" &&
+                    !credentialModal.value.trim()) ||
+                  (credentialModal.field === "fivetran" &&
+                    (!credentialModal.value.apiKey.trim() ||
+                      !credentialModal.value.apiSecret.trim()))
+                }
+                className="bg-[#FC6D26] hover:bg-[#E24329] text-white font-medium py-2 px-5 rounded-xl transition-all shadow-md flex items-center gap-2 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {credentialsMutation.isPending ? (
+                  <>
+                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+                    Updating...
+                  </>
+                ) : (
+                  "Update"
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// Progress Logs Viewer Component
+const ProgressLogsViewer = ({ repoId, mrIid, isReviewing }) => {
+  const { data: logsData, isLoading } = useMRProgressLogs(repoId, mrIid, {
+    refetchInterval: isReviewing ? 2000 : false, // Poll every 2s when reviewing
+  });
+  const logs = logsData?.logs || [];
+
+  if (logs.length === 0 && !isLoading) {
+    return null;
+  }
+
+  return (
+    <div className="bg-slate-900 rounded-2xl border border-slate-800 overflow-hidden">
+      <div className="px-4 py-3 bg-slate-800/50 border-b border-slate-700/50 flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          {isReviewing && (
+            <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse"></span>
+          )}
+          <span className="text-xs font-bold uppercase tracking-wider text-slate-300">
+            Analysis Progress
+          </span>
+        </div>
+        {isReviewing && (
+          <span className="text-[10px] text-blue-400 font-medium">Live</span>
+        )}
+      </div>
+      <div className="p-4 max-h-48 overflow-y-auto space-y-2 font-mono text-xs">
+        {logs.map((log, idx) => (
+          <div key={idx} className="flex items-start gap-2">
+            <span className="text-slate-500 shrink-0">
+              {new Date(log.timestamp).toLocaleTimeString("en-US", {
+                hour: "2-digit",
+                minute: "2-digit",
+                second: "2-digit",
+              })}
+            </span>
+            <span
+              className={`flex-1 ${
+                log.status === "running"
+                  ? "text-blue-400"
+                  : log.status === "completed"
+                    ? "text-emerald-400"
+                    : log.status === "failed"
+                      ? "text-rose-400"
+                      : "text-slate-300"
+              }`}
+            >
+              {log.message}
+            </span>
+          </div>
+        ))}
+        {isLoading && (
+          <div className="text-slate-500 text-center py-2">Loading logs...</div>
+        )}
+      </div>
     </div>
   );
 };

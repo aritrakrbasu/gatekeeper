@@ -175,6 +175,15 @@ export const api = {
     }),
 
   /**
+   * Update repository credentials
+   */
+  updateRepositoryCredentials: (repoId, data) =>
+    apiRequest(`/api/repositories/${repoId}/credentials`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+
+  /**
    * Connect a repository
    */
   connectRepository: (repoId) =>
@@ -377,6 +386,12 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ mr_id: mrId, vote, comment }),
     }),
+
+  /**
+   * Get MR progress logs
+   */
+  getMRProgressLogs: (repoId, mrIid) =>
+    apiRequest(`/api/repositories/${repoId}/mrs/${mrIid}/progress`),
 };
 
 export default api;

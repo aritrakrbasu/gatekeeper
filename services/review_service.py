@@ -25,7 +25,7 @@ from services.remediation_service import apply_auto_fixes
 async def orchestrate_review(payload: dict) -> dict:
     """
     Orchestrates the entire webhook auditing pipeline.
-    
+
     1. Logs signature to MongoDB
     2. Clones/indexes repository
     3. Triggers pre-review impact analysis
@@ -40,6 +40,20 @@ async def orchestrate_review(payload: dict) -> dict:
     nexus_session = mcp_service.nexus_session
 
     object_attrs = payload.get("object_attributes", {})
+
+    # Helper function to add progress logs
+    async def add_log(step: str, message: str, status: str = "running"):
+        """Add a progress log entry to the MR document"""
+        try:
+            await repository_service.add_mr_progress_log(
+                repo_id=str(project_id),
+                mr_iid=int(mr_iid),
+                step=step,
+                message=message,
+                status=status
+            )
+        except Exception as log_err:
+            print(f"[⚠️] Failed to add progress log: {log_err}")
     state = object_attrs.get("state")
 
     if state != "opened":
@@ -65,6 +79,50 @@ async def orchestrate_review(payload: dict) -> dict:
     deletions = stats.get("deletions", 0)
     files_changed = stats.get("total", 0)  # 'total' is the key for total files changed in GitLab
 
+    # Debug: Log the stats extraction
+    print(f"[DEBUG] object_attrs keys: {list(object_attrs.keys())}")
+    print(f"[DEBUG] Stats from webhook: {stats}")
+    print(f"[DEBUG] Extracted - additions: {additions}, deletions: {deletions}, files_changed: {files_changed}")
+
+    # If stats are missing or all zeros, fetch from GitLab API
+    if not stats or (additions == 0 and deletions == 0 and files_changed == 0):
+        print("[INFO] Stats missing from webhook payload, fetching from GitLab API...")
+        try:
+            mr_details = await gitlab_session.call_tool(
+                name="get_merge_request",
+                arguments={
+                    "project_id": str(project_id),
+                    "merge_request_iid": int(mr_iid)
+                }
+            )
+            if hasattr(mr_details, 'content') and mr_details.content:
+                try:
+                    mr_data = json.loads(mr_details.content[0].text)
+                    print(f"[DEBUG] GitLab API response keys: {list(mr_data.keys())}")
+                    print(f"[DEBUG] Full MR data snippet: {str(mr_data)[:500]}...")
+
+                    # Try different possible locations for stats
+                    # GitLab API may provide stats in different fields
+                    if "diff_stats" in mr_data:
+                        diff_stats = mr_data.get("diff_stats", {})
+                        print(f"[DEBUG] diff_stats: {diff_stats}")
+                        additions = diff_stats.get("additions", 0)
+                        deletions = diff_stats.get("deletions", 0)
+                    else:
+                        print("[WARN] No diff_stats in API response")
+
+                    files_changed = mr_data.get("changed_files_count", 0)
+                    if files_changed == 0:
+                        # Try alternative field names
+                        files_changed = mr_data.get("changes_count", 0)
+
+                    print(f"[INFO] Fetched stats from GitLab API: +{additions} -{deletions} ({files_changed} files)")
+                except json.JSONDecodeError:
+                    print("[WARN] Could not parse MR details JSON")
+        except Exception as e:
+            print(f"[WARN] Failed to fetch stats from GitLab API: {e}")
+            print(f"[WARN] Using default values (all zeros) for changes statistics")
+
     print(f"[INFO] MR changes: +{additions} -{deletions} ({files_changed} files)")
 
     # Ensure consistent types for database queries
@@ -72,6 +130,7 @@ async def orchestrate_review(payload: dict) -> dict:
     project_id_str = str(project_id)
 
     # Store MR in MongoDB for frontend retrieval
+    analysis_start_time = time.time()  # Track when we received the MR
     try:
         mr_data = {
             "gitlab_mr_id": mr_iid_int,
@@ -96,6 +155,8 @@ async def orchestrate_review(payload: dict) -> dict:
             "is_auto_fix": False,
             "auto_fix_for": None,
             "auto_fix_mrs": [],
+            "progress_logs": [],  # Initialize empty progress logs
+            "analysis_started_at": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(analysis_start_time))
         }
 
         print(f"[DEBUG] Storing MR: gitlab_mr_id={mr_iid_int} (type: {type(mr_iid_int).__name__}), repository_id={project_id_str} (type: {type(project_id_str).__name__})")
@@ -105,6 +166,9 @@ async def orchestrate_review(payload: dict) -> dict:
             print(f"[INFO] New MR opened: {mr_title}")
 
         await repository_service.store_mr_in_mongodb(mr_data)
+
+        # Add initial log
+        await add_log("received", "Merge request received and queued for analysis", "completed")
         print(f"[✅] MR {mr_iid} stored in MongoDB with changes data")
 
     except Exception as e:
@@ -216,7 +280,22 @@ async def orchestrate_review(payload: dict) -> dict:
 
     # 3. Extract Comprehensive Diffs via GitLab MCP and Process using Gemini
     print("[*] ===== STARTING GATEKEEPER ANALYSIS PIPELINE =====")
+
+    # Update status to "reviewing"
+    try:
+        await repository_service.update_mr_analysis(
+            repo_id=str(project_id),
+            mr_iid=mr_iid_int,
+            analysis_data={"status": "reviewing", "analysis_status": "in_progress"}
+        )
+        await add_log("starting", "🚀 Starting Gatekeeper security analysis", "completed")
+        print(f"[✅] Updated MR {mr_iid} status to 'reviewing'")
+    except Exception as status_err:
+        print(f"[⚠️] Failed to update MR status to 'reviewing': {status_err}")
+
     print("[*] Step 1: Posting loading indicator to MR...")
+    await add_log("fetching", "📡 Fetching merge request details and code changes", "running")
+
     if gitlab_session:
         loading_note_id = None
         try:
@@ -293,11 +372,15 @@ This may take 30-60 seconds depending on the size of the changes.
 
             if raw_diff_content:
                 print(f"[DEBUG] Diff preview: {raw_diff_content[:500]}")
+                await add_log("diff_fetched", f"📥 Retrieved {len(raw_diff_content)} characters of code changes", "completed")
             else:
                 print("[⚠️] WARNING: Diff content is empty!")
+                await add_log("diff_fetched", "⚠️ No code changes found in this merge request", "completed")
 
             # --- 🎯 PRE-REVIEW IMPACT ANALYSIS ---
             print("[*] Step 3: Running pre-review impact analysis to identify affected code...")
+            await add_log("semantic_analysis", "🔍 Analyzing semantic changes and affected code areas", "running")
+
             impact_report = None
             impact_context = ""
 
@@ -316,6 +399,39 @@ This may take 30-60 seconds depending on the size of the changes.
                 changed_files = list(set(
                     hunk.file_path for patch in atomic_patches for hunk in patch.hunks
                 ))
+
+                # Calculate actual additions and deletions from the parsed diff
+                calculated_additions = 0
+                calculated_deletions = 0
+                for patch in atomic_patches:
+                    for hunk in patch.hunks:
+                        for line in hunk.lines:
+                            if line.startswith('+'):
+                                calculated_additions += 1
+                            elif line.startswith('-'):
+                                calculated_deletions += 1
+
+                calculated_files_changed = len(changed_files)
+
+                print(f"[ℹ️] Calculated changes from diff: +{calculated_additions} -{calculated_deletions} ({calculated_files_changed} files)")
+
+                # Update the MR in MongoDB with the calculated stats
+                if calculated_additions > 0 or calculated_deletions > 0 or calculated_files_changed > 0:
+                    try:
+                        await repository_service.update_mr_analysis(
+                            repo_id=str(project_id),
+                            mr_iid=mr_iid_int,
+                            analysis_data={
+                                "changes": {
+                                    "additions": calculated_additions,
+                                    "deletions": calculated_deletions,
+                                    "files_changed": calculated_files_changed
+                                }
+                            }
+                        )
+                        print(f"[✅] Updated MR {mr_iid} with calculated diff stats")
+                    except Exception as stats_err:
+                        print(f"[⚠️] Failed to update MR stats: {stats_err}")
 
                 print(f"[ℹ️] Identified {len(changed_files)} changed files for impact analysis")
 
@@ -359,6 +475,8 @@ This may take 30-60 seconds depending on the size of the changes.
 
             # --- 🔍 SCHEMA INSPECTION SERVICE (Step 3.5) ---
             print("[*] Step 3.5: Checking for backend-touching changes and database schema inspection...")
+            await add_log("schema_check", "🗄️ Checking for MongoDB schema changes", "running")
+
             schema_report = None
             schema_markdown = None
             try:
@@ -366,6 +484,9 @@ This may take 30-60 seconds depending on the size of the changes.
                 schema_report = await run_schema_inspection(raw_diff_content, mcp_service.mongo_session, project_id=project_id)
                 if schema_report:
                     print(f"[+] Schema inspection complete. Found {len(schema_report.collections)} collections. Confidence: {schema_report.confidence}")
+                    await add_log("schema_check", f"✅ Schema analysis complete - {len(schema_report.collections)} collections examined", "completed")
+                else:
+                    await add_log("schema_check", "ℹ️ No database schema changes detected", "completed")
                     
                     # 1. Format and attach schema_report summary to raw_diff_content passed to run_gemini_review
                     schema_markdown = format_schema_report_to_markdown(schema_report)
@@ -423,17 +544,23 @@ This may take 30-60 seconds depending on the size of the changes.
                         print("[+] Schema snapshot logged to MongoDB collection: schema_snapshots")
             except Exception as schema_err:
                 print(f"[⚠️] Schema inspection failed (continuing anyway): {schema_err}")
+                await add_log("schema_check", "⚠️ Schema check encountered an error, continuing analysis", "completed")
 
             # --- 🧠 THE GEMINI COGNITIVE CORE ENGINE ---
             print("[*] Step 4: Shipping code diff to Gemini Pro Core for automated security review...")
-            
+            await add_log("ai_analysis", "🤖 Running AI-powered security and code quality analysis", "running")
+
             audit_report = await run_gemini_review(raw_diff_content, impact_context)
-            
+
             print(f"[✅] Step 4 complete: Gemini analysis compiled ({len(audit_report)} chars)")
+            await add_log("ai_analysis", f"✅ AI analysis complete - {len(audit_report)} characters of findings generated", "completed")
 
             # --- 🔍 POST-REVIEW VALIDATION ---
             print("[*] Running post-review validation to catch issues outside changed code...")
             validation_findings = []
+
+            if validation_findings:
+                await add_log("validation", f"🔍 Post-review validation found {len(validation_findings)} additional considerations", "completed")
 
             if impact_report:
                 try:
@@ -476,6 +603,9 @@ This may take 30-60 seconds depending on the size of the changes.
 
             # 3.5 Update MongoDB with AI analysis results
             try:
+                # Calculate review duration
+                review_duration_seconds = int(time.time() - analysis_start_time)
+
                 # Extract issues from audit_report for frontend display
                 ai_issues = []
                 lines = audit_report.split('\n')
@@ -508,9 +638,13 @@ This may take 30-60 seconds depending on the size of the changes.
                     "ai_summary": audit_report,
                     "ai_issues": ai_issues[:10],  # Store first 10 issues
                     "health_score": health_score,
+                    "status": "reviewed",  # Final status after review completion
                     "analysis_status": "completed",
-                    "reviewed_at": time.strftime('%Y-%m-%dT%H:%M:%SZ')
+                    "reviewed_at": time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                    "review_duration_seconds": review_duration_seconds
                 }
+
+                print(f"[INFO] Review completed in {review_duration_seconds} seconds ({review_duration_seconds / 60:.2f} minutes)")
 
                 await repository_service.update_mr_analysis(
                     repo_id=str(project_id),
@@ -518,6 +652,14 @@ This may take 30-60 seconds depending on the size of the changes.
                     analysis_data=update_data
                 )
                 print(f"[✅] Updated MR {mr_iid} in MongoDB with AI analysis")
+
+                # Update repository's running average review time
+                await repository_service.update_repository_avg_review_time(
+                    repo_id=str(project_id),
+                    new_duration_seconds=review_duration_seconds
+                )
+
+                await add_log("completed", "🎉 Review completed successfully - Report published to merge request", "completed")
             except Exception as update_err:
                 print(f"[⚠️] Failed to update MongoDB with AI analysis: {update_err}")
 
@@ -575,6 +717,7 @@ This may take 30-60 seconds depending on the size of the changes.
 
             # --- 🤖 AUTO-FIX FEATURE ---
             print("[*] Checking if issues can be auto-fixed via atomic patches...")
+            await add_log("auto_fix", "🔧 Analyzing issues for potential auto-fix generation", "running")
             try:
                 # Re-parse diff and create patch summary
                 patch_parser = AtomicPatchParser(context_lines=3)
@@ -597,16 +740,31 @@ This may take 30-60 seconds depending on the size of the changes.
                     fix_data=fix_data,
                     gitlab_session=gitlab_session
                 )
+                await add_log("auto_fix", "✅ Auto-fix analysis complete - generating fix branches", "completed")
 
             except asyncio.TimeoutError:
                 print("[⏱️] Fix analysis timed out after 60 seconds - skipping auto-fix")
+                await add_log("auto_fix", "⏱️ Auto-fix analysis timed out - skipping", "completed")
             except json.JSONDecodeError as parse_err:
                 print(f"[x] Failed to parse fix analysis JSON structure: {parse_err}")
+                await add_log("auto_fix", "⚠️ Failed to parse fix analysis - skipping", "completed")
             except Exception as loop_err:
                 print(f"[x] Auto-fix execution loop broken: {loop_err}")
+                await add_log("auto_fix", "⚠️ Auto-fix encountered an error - skipping", "completed")
 
         except Exception as e:
             print(f"[x] Intelligent Gemini Audit loop failed: {e}")
+
+            # Update MR status to failed
+            try:
+                await repository_service.update_mr_analysis(
+                    repo_id=str(project_id),
+                    mr_iid=mr_iid,
+                    analysis_data={"status": "failed", "analysis_status": "error"}
+                )
+                print(f"[⚠️] Updated MR {mr_iid} status to 'failed'")
+            except Exception as status_err:
+                print(f"[⚠️] Failed to update MR status to 'failed': {status_err}")
 
             # ❌ Set commit status to FAILED on error
             if commit_sha and gitlab_session:

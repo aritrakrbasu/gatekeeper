@@ -185,6 +185,21 @@ export function useOnboardRepository() {
 }
 
 /**
+ * Update repository credentials mutation
+ */
+export function useUpdateRepositoryCredentials() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({ repoId, data }) => api.updateRepositoryCredentials(repoId, data),
+    onSuccess: (_, variables) => {
+      // Invalidate the specific repository query to refresh connection status
+      queryClient.invalidateQueries({ queryKey: queryKeys.repositories.detail(variables.repoId) });
+    },
+  });
+}
+
+/**
  * Connect repository mutation
  */
 export function useConnectRepository() {
@@ -520,5 +535,21 @@ export function useSubmitFeedback() {
   return useMutation({
     mutationFn: ({ repoId, mrId, vote, comment }) =>
       api.submitFeedback(repoId, mrId, vote, comment),
+  });
+}
+
+/**
+ * Get MR progress logs
+ * @param {string|number} repoId - Repository ID
+ * @param {string|number} mrIid - Merge Request IID
+ * @param {Object} options - Query options
+ */
+export function useMRProgressLogs(repoId, mrIid, options = {}) {
+  return useQuery({
+    queryKey: ['mrProgress', repoId, mrIid],
+    queryFn: () => api.getMRProgressLogs(repoId, mrIid),
+    enabled: !!repoId && !!mrIid,
+    staleTime: options.staleTime || 5 * 1000, // 5 seconds - logs update frequently
+    refetchInterval: options.refetchInterval || 3000, // Poll every 3 seconds for new logs
   });
 }

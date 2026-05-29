@@ -35,8 +35,7 @@ const Settings = () => {
             Settings
           </h1>
           <p className="text-sm text-slate-500 mt-1">
-            Manage your integrations, AI engine parameters, and global
-            policies.
+            Manage your integrations, AI engine parameters, and global policies.
           </p>
         </div>
 
@@ -98,8 +97,8 @@ const Settings = () => {
                   Gemini AI Engine
                 </h3>
                 <p className="text-xs text-slate-400 mt-1">
-                  Configure the core model used for Gatekeeper's code review
-                  and auto-fixes.
+                  Configure the core model used for Gatekeeper's code review and
+                  auto-fixes.
                 </p>
               </div>
             </div>
@@ -203,9 +202,7 @@ const Settings = () => {
                       disabled={tokenStatus === "verifying" || !token}
                       className="bg-[#FC6D26] hover:bg-[#E24329] disabled:bg-slate-700 disabled:text-slate-400 text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition-all"
                     >
-                      {tokenStatus === "verifying"
-                        ? "Verifying..."
-                        : "Verify"}
+                      {tokenStatus === "verifying" ? "Verifying..." : "Verify"}
                     </button>
                   </div>
                 </div>
@@ -232,8 +229,8 @@ const Settings = () => {
                       )}
                     </div>
                     <p className="text-xs text-slate-500">
-                      Maximum reasoning capability. Best for deep
-                      architecture and security reviews.
+                      Maximum reasoning capability. Best for deep architecture
+                      and security reviews.
                     </p>
                   </div>
 
@@ -252,8 +249,8 @@ const Settings = () => {
                       )}
                     </div>
                     <p className="text-xs text-slate-500">
-                      High velocity and low latency. Best for fast linting
-                      and minor chore updates.
+                      High velocity and low latency. Best for fast linting and
+                      minor chore updates.
                     </p>
                   </div>
                 </div>
@@ -295,8 +292,8 @@ const Settings = () => {
                     Auto-Review on Creation
                   </h4>
                   <p className="text-xs text-slate-500 mt-0.5">
-                    Automatically trigger Gatekeeper AI when a new MR is
-                    opened in any repository.
+                    Automatically trigger Gatekeeper AI when a new MR is opened
+                    in any repository.
                   </p>
                 </div>
                 <button
@@ -395,9 +392,7 @@ const Settings = () => {
             </div>
 
             <h2 className="text-xl font-bold text-slate-900">John Doe</h2>
-            <p className="text-sm text-slate-500 mb-6">
-              john.doe@company.com
-            </p>
+            <p className="text-sm text-slate-500 mb-6">john.doe@company.com</p>
 
             <button className="w-full py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-semibold rounded-xl transition-colors border border-slate-200">
               Manage Account
@@ -407,9 +402,7 @@ const Settings = () => {
           {/* GitLab Integration Card */}
           <div className="bg-white/70 backdrop-blur-xl rounded-[2rem] border border-white/80 shadow-sm p-6 md:p-8">
             <div className="flex justify-between items-center mb-6">
-              <h3 className="text-lg font-bold text-slate-900">
-                Connections
-              </h3>
+              <h3 className="text-lg font-bold text-slate-900">Connections</h3>
             </div>
 
             <div className="p-4 rounded-xl border border-[#FC6D26]/20 bg-[#FC6D26]/5 flex flex-col gap-4">
@@ -456,7 +449,7 @@ const Settings = () => {
                 </div>
                 <div>
                   <h4 className="text-sm font-bold text-slate-900">
-                    Slack Notifications
+                    Email Notifications
                   </h4>
                   <p className="text-xs text-slate-500">Not connected</p>
                 </div>

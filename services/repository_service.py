@@ -355,6 +355,88 @@ def _get_enum_value(enum_or_string) -> str:
     return enum_or_string
 
 
+async def get_repository_avg_review_time(repo_id: str) -> float:
+    """
+    Get the pre-calculated average review time from repository document.
+
+    Args:
+        repo_id: Repository ID
+
+    Returns:
+        Average review time in minutes, or 2.5 if not set
+    """
+    try:
+        if MONGO_CONNECTION_STRING:
+            repo = await mongo_client.find_one(
+                collection_name=REPOS_COLLECTION,
+                filter={"id": repo_id},
+                projection={"avg_review_time": 1}
+            )
+            if repo and "avg_review_time" in repo:
+                return repo["avg_review_time"]
+        return 2.5
+    except Exception as e:
+        print(f"[ERROR] Failed to get avg review time: {e}")
+        return 2.5
+
+
+async def update_repository_avg_review_time(repo_id: str, new_duration_seconds: int) -> bool:
+    """
+    Update the running average review time in repository document when an MR completes.
+
+    Uses running average formula: new_avg = ((old_avg * n) + new_value) / (n + 1)
+
+    Args:
+        repo_id: Repository ID
+        new_duration_seconds: Duration of the just-completed MR review in seconds
+
+    Returns:
+        True if update successful, False otherwise
+    """
+    try:
+        if not MONGO_CONNECTION_STRING:
+            return False
+
+        # Get current repository data
+        repo = await mongo_client.find_one(
+            collection_name=REPOS_COLLECTION,
+            filter={"id": repo_id},
+            projection={"avg_review_time": 1, "mrs_reviewed": 1}
+        )
+
+        if not repo:
+            print(f"[WARN] Repository {repo_id} not found for avg review time update")
+            return False
+
+        # Get current values (with defaults)
+        current_avg_minutes = repo.get("avg_review_time", 2.5)
+        current_mrs_count = repo.get("mrs_reviewed", 0)
+
+        # Calculate new running average
+        # Convert current avg from minutes to seconds for calculation
+        current_avg_seconds = current_avg_minutes * 60.0
+        total_seconds = (current_avg_seconds * current_mrs_count) + new_duration_seconds
+        new_avg_seconds = total_seconds / (current_mrs_count + 1)
+        new_avg_minutes = round(new_avg_seconds / 60.0, 2)
+
+        # Update repository document
+        await mongo_client.update_one(
+            collection_name=REPOS_COLLECTION,
+            filter={"id": repo_id},
+            update={
+                "$set": {"avg_review_time": new_avg_minutes},
+                "$inc": {"mrs_reviewed": 1}
+            }
+        )
+
+        print(f"[INFO] Updated avg review time for repo {repo_id}: {new_avg_minutes} minutes (MRs reviewed: {current_mrs_count + 1})")
+        return True
+
+    except Exception as e:
+        print(f"[ERROR] Failed to update avg review time: {e}")
+        return False
+
+
 async def get_repository(repo_id: str) -> Dict:
     """
     Get detailed information about a specific repository.
@@ -394,6 +476,7 @@ async def get_repository(repo_id: str) -> Dict:
                         created_at = datetime.now()
 
                 mr_count = len(_merge_requests.get(repo_id, []))
+                avg_time = await get_repository_avg_review_time(repo_id)
 
                 return {
                     "id": mongo_repo.get("id", repo_id),
@@ -410,10 +493,15 @@ async def get_repository(repo_id: str) -> Dict:
                     "vector_analysis": mongo_repo.get("vector_analysis", {}),
                     "stats": {
                         "mrs_reviewed": mr_count,
-                        "avg_review_time": 2.5,
+                        "avg_review_time": avg_time,
                         "auto_fixes_applied": mongo_repo.get("auto_fixes_applied", 0),
                         "test_coverage": mongo_repo.get("test_coverage", "0%")
-                    }
+                    },
+                    # Credential status fields (don't return actual values, just indicate presence)
+                    "mongodb_uri": mongo_repo.get("mongodb_uri", ""),
+                    "fivetran_api_key": mongo_repo.get("fivetran_api_key", ""),
+                    "fivetran_api_secret": mongo_repo.get("fivetran_api_secret", ""),
+                    "credentials_encrypted": mongo_repo.get("credentials_encrypted", False)
                 }
     except Exception as e:
         print(f"[ERROR] Failed to fetch repository from MongoDB: {e}")
@@ -471,6 +559,7 @@ async def get_repository(repo_id: str) -> Dict:
 
     # Get MR count
     mr_count = len(_merge_requests.get(repo_id, []))
+    avg_time = await get_repository_avg_review_time(repo_id)
 
     return {
         "id": repo_data["id"],
@@ -487,10 +576,15 @@ async def get_repository(repo_id: str) -> Dict:
         "vector_analysis": repo_data.get("vector_analysis", {}),
         "stats": {
             "mrs_reviewed": mr_count,
-            "avg_review_time": 2.5,
+            "avg_review_time": avg_time,
             "auto_fixes_applied": 12,
             "test_coverage": 87.3
-        }
+        },
+        # Credential status fields (default empty for in-memory repos)
+        "mongodb_uri": repo_data.get("mongodb_uri", ""),
+        "fivetran_api_key": repo_data.get("fivetran_api_key", ""),
+        "fivetran_api_secret": repo_data.get("fivetran_api_secret", ""),
+        "credentials_encrypted": repo_data.get("credentials_encrypted", False)
     }
 
 
@@ -884,7 +978,9 @@ async def connect_repository(user_id: str, repo_id: str) -> Dict:
             "security": "0.0%",
             "performance": "0.0%",
             "complexity": "0.0%"
-        }
+        },
+        "avg_review_time": 2.5,
+        "mrs_reviewed": 0
     }
 
     # Store in memory
@@ -1398,6 +1494,95 @@ async def update_mr_analysis(
         return False
 
 
+async def add_mr_progress_log(
+    repo_id: str,
+    mr_iid: int,
+    step: str,
+    message: str,
+    status: str = "running"
+) -> bool:
+    """
+    Add a progress log entry to an MR.
+
+    Args:
+        repo_id: Repository ID
+        mr_iid: Merge Request IID
+        step: Step identifier (e.g., "fetching", "analyzing")
+        message: User-friendly message describing the current action
+        status: Status of the step (running, completed, failed)
+
+    Returns:
+        True if update successful, False otherwise
+    """
+    try:
+        from datetime import datetime, timezone
+
+        log_entry = {
+            "step": step,
+            "message": message,
+            "status": status,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+
+        if MONGO_CONNECTION_STRING:
+            result = await mongo_client.update_one(
+                collection_name=MRS_COLLECTION,
+                filter={
+                    "repository_id": repo_id,
+                    "gitlab_mr_id": mr_iid
+                },
+                update={
+                    "$push": {"progress_logs": log_entry}
+                }
+            )
+            return result > 0
+        else:
+            # Update in-memory cache
+            for mr in _merge_requests.get(repo_id, []):
+                if mr.get("gitlab_mr_id") == mr_iid:
+                    if "progress_logs" not in mr:
+                        mr["progress_logs"] = []
+                    mr["progress_logs"].append(log_entry)
+                    return True
+            return False
+    except Exception as e:
+        print(f"[ERROR] Failed to add progress log: {e}")
+        return False
+
+
+async def get_mr_progress_logs(repo_id: str, mr_iid: int) -> List[Dict]:
+    """
+    Get progress logs for a merge request.
+
+    Args:
+        repo_id: Repository ID
+        mr_iid: Merge Request IID
+
+    Returns:
+        List of progress log entries
+    """
+    try:
+        if MONGO_CONNECTION_STRING:
+            mr_doc = await mongo_client.find_one(
+                collection_name=MRS_COLLECTION,
+                filter={
+                    "repository_id": repo_id,
+                    "gitlab_mr_id": mr_iid
+                }
+            )
+            if mr_doc:
+                return mr_doc.get("progress_logs", [])
+        else:
+            # Get from in-memory cache
+            for mr in _merge_requests.get(repo_id, []):
+                if mr.get("gitlab_mr_id") == mr_iid:
+                    return mr.get("progress_logs", [])
+        return []
+    except Exception as e:
+        print(f"[ERROR] Failed to get progress logs: {e}")
+        return []
+
+
 def is_config_file(filepath: str) -> bool:
     filename = os.path.basename(filepath).lower()
     if filename.startswith(".env"):
@@ -1619,7 +1804,9 @@ async def onboard_repository(user_id: str, repo_id: str, data: Dict) -> Dict:
         "fivetran_api_key": fivetran_api_key,
         "fivetran_api_secret": fivetran_api_secret,
         "credentials_encrypted": encrypt_credentials,
-        "onboarded": True
+        "onboarded": True,
+        "avg_review_time": 2.5,
+        "mrs_reviewed": 0
     }
 
     # Check if document already exists
@@ -1659,5 +1846,92 @@ async def onboard_repository(user_id: str, repo_id: str, data: Dict) -> Dict:
         "status": _get_enum_value(new_repo["status"]),
         "onboarded": True,
         "message": "Repository onboarded and credentials saved successfully"
+    }
+
+
+async def update_repository_credentials(repo_id: str, data: Dict) -> Dict:
+    """
+    Update repository credentials.
+
+    Args:
+        repo_id: Repository ID
+        data: Dictionary containing credentials to update
+
+    Returns:
+        Updated repository information
+    """
+    # 1. Retrieve inputs
+    mongodb_uri = data.get("mongodb_uri")
+    fivetran_api_key = data.get("fivetran_api_key")
+    fivetran_api_secret = data.get("fivetran_api_secret")
+    encrypt_credentials = data.get("encrypt_credentials", True)
+
+    # 2. Verify repository exists in MongoDB
+    if not MONGO_CONNECTION_STRING:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="MongoDB connection not available"
+        )
+
+    existing_repo = await mongo_client.find_one(
+        collection_name=REPOS_COLLECTION,
+        filter={"id": repo_id}
+    )
+
+    if not existing_repo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Repository {repo_id} not found. Please onboard the repository first."
+        )
+
+    # 3. Perform encryption if requested
+    if encrypt_credentials:
+        from services.encryption_service import encrypt_value
+        if mongodb_uri:
+            mongodb_uri = encrypt_value(mongodb_uri)
+        if fivetran_api_key:
+            fivetran_api_key = encrypt_value(fivetran_api_key)
+        if fivetran_api_secret:
+            fivetran_api_secret = encrypt_value(fivetran_api_secret)
+
+    # 4. Prepare update data - only include provided fields
+    update_data = {}
+    if mongodb_uri is not None:
+        update_data["mongodb_uri"] = mongodb_uri
+    if fivetran_api_key is not None:
+        update_data["fivetran_api_key"] = fivetran_api_key
+    if fivetran_api_secret is not None:
+        update_data["fivetran_api_secret"] = fivetran_api_secret
+
+    # Always set encryption flag
+    update_data["credentials_encrypted"] = encrypt_credentials
+
+    if not update_data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No credentials provided for update"
+        )
+
+    # 5. Update repository in MongoDB
+    await mongo_client.update_one(
+        collection_name=REPOS_COLLECTION,
+        filter={"id": repo_id},
+        update={"$set": update_data}
+    )
+
+    print(f"[✅] Updated credentials for repository {repo_id}")
+
+    # 6. Get updated repository
+    updated_repo = await mongo_client.find_one(
+        collection_name=REPOS_COLLECTION,
+        filter={"id": repo_id}
+    )
+
+    return {
+        "message": "Repository credentials updated successfully",
+        "mongodb_uri_configured": bool(updated_repo.get("mongodb_uri")),
+        "fivetran_key_configured": bool(updated_repo.get("fivetran_api_key")),
+        "fivetran_secret_configured": bool(updated_repo.get("fivetran_api_secret")),
+        "credentials_encrypted": updated_repo.get("credentials_encrypted", False)
     }
 
