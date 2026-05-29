@@ -79,9 +79,12 @@ const Repositories = () => {
   }, [searchQuery, repositories]);
 
   // Handle repository connection with automatic refresh via React Query
-  const handleConnectRepository = async (repo) => {
+  const handleConnectRepository = async (repo, selectedBranches) => {
     try {
-      await connectMutation.mutateAsync(repo.id);
+      await connectMutation.mutateAsync({
+        repoId: repo.id,
+        targetBranches: selectedBranches || ["main", "master", "develop"]
+      });
       // React Query automatically invalidates and refetches the repositories list
     } catch (err) {
       console.error("Failed to connect repository:", err);

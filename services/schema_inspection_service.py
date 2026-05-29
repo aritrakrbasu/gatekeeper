@@ -382,9 +382,10 @@ def extract_collections_from_diff(diff_text: str) -> List[str]:
     return sorted(list(collections))
 
 
-async def _get_target_mongodb_uri(project_id: str) -> Tuple[Optional[str], Optional[str], bool]:
+async def _get_target_mongodb_uri(project_id: str, target_branch: Optional[str] = None) -> Tuple[Optional[str], Optional[str], bool]:
     """
-    Fetches and decrypts the target MongoDB URI and Fivetran secrets for a repository.
+    Fetches and decrypts the target MongoDB URI and Fivetran secrets for a repository,
+    prioritizing branch-specific credentials if available.
     Returns (mongodb_uri, db_name, is_encrypted)
     """
     if not project_id:
@@ -404,18 +405,30 @@ async def _get_target_mongodb_uri(project_id: str) -> Tuple[Optional[str], Optio
                 filter={"id": project_id}
             )
 
-        if repo and "mongodb_uri" in repo and repo["mongodb_uri"]:
-            uri = repo["mongodb_uri"]
+        if repo:
+            uri = None
             is_encrypted = repo.get("credentials_encrypted", False)
 
-            if is_encrypted:
-                from services.encryption_service import decrypt_value
-                uri = decrypt_value(uri)
+            # Try branch-specific override first
+            if target_branch and "branch_credentials" in repo and target_branch in repo["branch_credentials"]:
+                branch_creds = repo["branch_credentials"][target_branch]
+                if branch_creds and branch_creds.get("mongodb_uri"):
+                    uri = branch_creds["mongodb_uri"]
+                    print(f"[INFO] Using branch-specific MongoDB URI for branch '{target_branch}'")
 
-            import urllib.parse
-            parsed = urllib.parse.urlparse(uri)
-            db_name = parsed.path.split("?")[0].lstrip("/") or "gatekeeper_target"
-            return uri, db_name, is_encrypted
+            if not uri and "mongodb_uri" in repo and repo["mongodb_uri"]:
+                uri = repo["mongodb_uri"]
+                print(f"[INFO] Using repository-level fallback MongoDB URI")
+
+            if uri:
+                if is_encrypted:
+                    from services.encryption_service import decrypt_value
+                    uri = decrypt_value(uri)
+
+                import urllib.parse
+                parsed = urllib.parse.urlparse(uri)
+                db_name = parsed.path.split("?")[0].lstrip("/") or "gatekeeper_target"
+                return uri, db_name, is_encrypted
     except Exception as e:
         print(f"[⚠️] Failed to fetch target database credentials for project {project_id}: {e}")
 
@@ -445,19 +458,14 @@ def infer_mongo_type(val) -> str:
     return t_name
 
 
-async def run_schema_inspection(diff_text: str, mongo_session=None, project_id: Optional[Any] = None) -> Optional[SchemaInspectionReport]:
+async def run_schema_inspection(diff_text: str, mongo_session=None, project_id: Optional[Any] = None, target_branch: Optional[str] = None) -> Optional[SchemaInspectionReport]:
     """
     Performs database schema discovery and computes changes compared to previous state.
-    Uses dynamic direct Motor client to connect to the target database.
-
-    Args:
-        diff_text: The Git Merge Request diff text.
-        mongo_session: Deprecated/unused (for backward compatibility).
-        project_id: The project identifier from the GitLab webhook payload (optional).
-
-    Returns:
-        SchemaInspectionReport if a backend change was matched and inspected, else None.
+    Utilizes localized motor client with decrypted target database credentials (Step 3.5).
     """
+    # 1. Parse connection string & settings
+    uri, db_name, is_encrypted = await _get_target_mongodb_uri(project_id, target_branch)
+
     is_backend_change, suspicious_files, triggered_by_content, confidence = detect_backend_change(diff_text)
     if not is_backend_change:
         return None

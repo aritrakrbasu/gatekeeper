@@ -12,7 +12,7 @@ from services import mcp_service, review_service, auth_service, repository_servi
 from api_models import (
     OAuthCallbackRequest, TokenResponse, UserResponse,
     VerifyTokenRequest, VerifyTokenResponse, LogoutResponse,
-    RepositoryResponse, MergeRequestResponse, ScanRepositoryResponse,
+    RepositoryResponse, MergeRequestResponse, ScanRepositoryResponse, ScanRepositoryRequest,
     OnboardRepositoryRequest, UpdateRepositoryRequest, UpdateRepositoryResponse,
     GeminiSettingsResponse, ValidateTokenRequest, ValidateTokenResponse,
     PolicySettingsResponse, UpdateGeminiSettingsRequest, UpdatePolicySettingsRequest,
@@ -436,7 +436,11 @@ async def get_mr_progress_logs(repo_id: str, mr_iid: int, authorization: str = H
 
 
 @app.post("/api/repositories/{repo_id}/scan", response_model=ScanRepositoryResponse)
-async def scan_repo_credentials(repo_id: str, authorization: str = Header(None)):
+async def scan_repo_credentials(
+    repo_id: str,
+    request: Optional[ScanRepositoryRequest] = None,
+    authorization: str = Header(None)
+):
     """Scans the repository's configuration files for MongoDB and Fivetran credentials."""
     try:
         if not authorization:
@@ -449,7 +453,8 @@ async def scan_repo_credentials(repo_id: str, authorization: str = Header(None))
         if not user_id:
             raise HTTPException(status_code=401, detail="Invalid token")
 
-        result = await repository_service.scan_repository(user_id, repo_id)
+        branches = request.branches if request else None
+        result = await repository_service.scan_repository(user_id, repo_id, branches)
         return result
     except HTTPException as e:
         raise e

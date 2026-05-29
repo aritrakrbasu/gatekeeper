@@ -542,7 +542,7 @@ This may take 30-60 seconds depending on the size of the changes.
             schema_markdown = None
             try:
                 from services.schema_inspection_service import run_schema_inspection, format_schema_report_to_markdown
-                schema_report = await run_schema_inspection(raw_diff_content, mcp_service.mongo_session, project_id=project_id)
+                schema_report = await run_schema_inspection(raw_diff_content, mcp_service.mongo_session, project_id=project_id, target_branch=target_branch)
                 if schema_report:
                     print(f"[+] Schema inspection complete. Found {len(schema_report.collections)} collections. Confidence: {schema_report.confidence}")
                     await add_log("schema_check", f"✅ Schema analysis complete - {len(schema_report.collections)} collections examined", "completed")

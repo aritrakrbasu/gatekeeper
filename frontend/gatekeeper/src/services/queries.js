@@ -164,7 +164,7 @@ export function useImportRepository() {
  */
 export function useScanRepository() {
   return useMutation({
-    mutationFn: (repoId) => api.scanRepository(repoId),
+    mutationFn: ({ repoId, branches }) => api.scanRepository(repoId, branches),
   });
 }
 

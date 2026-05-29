@@ -133,7 +133,10 @@ const ConnectRepositoryModal = ({ isOpen, onClose, onConnect }) => {
     setOnboardingError(null);
 
     try {
-      const results = await scanMutation.mutateAsync(selectedRepo.id);
+      const results = await scanMutation.mutateAsync({
+        repoId: selectedRepo.id,
+        branches: selectedBranches,
+      });
       setScanResults(results);
       if (results.mongodb_uri) {
         setMongodbUri(results.mongodb_uri);
@@ -180,11 +183,12 @@ const ConnectRepositoryModal = ({ isOpen, onClose, onConnect }) => {
           fivetran_api_secret: fivetranApiSecret,
           encrypt_credentials: encryptCredentials,
           branches: selectedBranches,
+          branch_credentials: scanResults?.branch_credentials || {},
         },
       });
 
       setConnectedIds(new Set([...connectedIds, selectedRepo.id]));
-      onConnect && onConnect(selectedRepo);
+      onConnect && onConnect(selectedRepo, selectedBranches);
       handleClose();
     } catch (err) {
       console.error("Onboarding failed:", err);

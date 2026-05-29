@@ -355,12 +355,18 @@ class FeedbackResponse(BaseModel):
 # Onboarding & Scan Models
 # ============================================================================
 
+class ScanRepositoryRequest(BaseModel):
+    """Request to scan a repository for credentials with optional branch selection."""
+    branches: Optional[List[str]] = Field(default_factory=list, description="Branches to scan for secrets")
+
+
 class ScanRepositoryResponse(BaseModel):
     """Response from repository credentials scan."""
     mongodb_uri: Optional[str] = None
     fivetran_api_key: Optional[str] = None
     fivetran_api_secret: Optional[str] = None
     detected_in_files: List[str] = []
+    branch_credentials: Optional[dict] = None
 
 
 class OnboardRepositoryRequest(BaseModel):
@@ -370,6 +376,8 @@ class OnboardRepositoryRequest(BaseModel):
     fivetran_api_secret: Optional[str] = None
     encrypt_credentials: bool = True
     target_branch: Optional[str] = None  # Branch for webhooks to monitor
+    branches: Optional[List[str]] = Field(default_factory=list, description="Branches to activate Gatekeeper for")
+    branch_credentials: Optional[dict] = None
 
 
 class UpdateRepositoryRequest(BaseModel):

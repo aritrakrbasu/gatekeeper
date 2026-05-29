@@ -160,9 +160,10 @@ export const api = {
   /**
    * Scan repository for credentials
    */
-  scanRepository: (repoId) =>
+  scanRepository: (repoId, branches = []) =>
     apiRequest(`/api/repositories/${repoId}/scan`, {
       method: "POST",
+      body: JSON.stringify({ branches }),
     }),
 
   /**

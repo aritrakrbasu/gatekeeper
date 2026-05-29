@@ -1792,21 +1792,45 @@ async def get_mr_progress_logs(repo_id: str, mr_iid: int) -> List[Dict]:
 
 def is_config_file(filepath: str) -> bool:
     filename = os.path.basename(filepath).lower()
+    
+    # 1. Match environment files
     if filename.startswith(".env"):
         return True
-    if filename in ["config.js", "config.py", "settings.py", "database.js", "database.py", "docker-compose.yml", "docker-compose.yaml"]:
+        
+    # 2. Match standard configuration filenames exactly
+    config_filenames = {
+        "config.js", "config.py", "config.json", "config.ts",
+        "settings.py", "settings.json",
+        "database.js", "database.py", "database.ts", "db.js", "db.py", "db.ts",
+        "docker-compose.yml", "docker-compose.yaml",
+        "application.properties", "application.yml", "application.yaml",
+        "package.json", "poetry.lock", "pipfile", "gemfile"
+    }
+    if filename in config_filenames:
         return True
+        
+    # 3. Match configuration/code files inside config-related folders
+    parts = [p.lower() for p in filepath.replace('\\', '/').split('/')]
+    if any(p in parts for p in ["config", "configs", "settings", "database", "db", "env", "envs"]):
+        _, ext = os.path.splitext(filename)
+        if ext in [".json", ".yml", ".yaml", ".properties", ".conf", ".ini", ".js", ".ts", ".py", ".toml"]:
+            return True
+            
     return False
 
 
-async def _get_file_content_from_gitlab(gitlab_session, project_id: str, file_path: str) -> str:
+async def _get_file_content_from_gitlab(gitlab_session, project_id: str, file_path: str, ref: Optional[str] = None) -> str:
     try:
+        arguments = {
+            "project_id": str(project_id),
+            "file_path": file_path,
+        }
+        if ref:
+            arguments["ref"] = ref
+
         file_result = await gitlab_session.call_tool(
             name="get_file_contents",
-            arguments={
-                "project_id": str(project_id),
-                "file_path": file_path,
-            }
+            arguments=arguments
         )
         if hasattr(file_result, 'content') and file_result.content:
             file_data = json.loads(file_result.content[0].text)
@@ -1820,7 +1844,7 @@ async def _get_file_content_from_gitlab(gitlab_session, project_id: str, file_pa
                 return base64.b64decode(content).decode('utf-8', errors='replace')
             return content
     except Exception as e:
-        print(f"[⚠️] Failed to fetch file content for {file_path}: {e}")
+        print(f"[⚠️] Failed to fetch file content for {file_path} on ref {ref}: {e}")
     return ""
 
 
@@ -1832,9 +1856,10 @@ fivetran_key_pattern = re.compile(r'(?:fivetran_api_key|fivetran_key|fivetran_ap
 fivetran_secret_pattern = re.compile(r'(?:fivetran_api_secret|fivetran_secret|fivetran_api_password|fivetran_password)\s*[=:]\s*["\'`]?([a-zA-Z0-9_-]+)["\'`]?', re.IGNORECASE)
 
 
-async def scan_repository(user_id: str, repo_id: str) -> Dict:
+async def scan_repository(user_id: str, repo_id: str, branches: Optional[List[str]] = None) -> Dict:
     """
-    Scans the repository's files (e.g. .env, config.js, settings.py) for credentials.
+    Scans the repository's files (e.g. .env, config.js, settings.py) for credentials
+    across the specified branches.
     """
     # 1. Get gitlab_session
     gitlab_session = mcp_service.gitlab_session
@@ -1844,96 +1869,145 @@ async def scan_repository(user_id: str, repo_id: str) -> Dict:
             detail="GitLab MCP service is currently unavailable"
         )
 
-    # 2. Get repository tree
-    files_to_scan = []
+    # 2. Get default branch if none provided
+    default_branch = "main"
     try:
-        page_token = None
-        while len(files_to_scan) < 50: # Limit to first 50 files/config files to avoid huge searches
-            arguments = {
-                "project_id": str(repo_id),
-                "recursive": True,
-            }
-            if page_token:
-                arguments["page_token"] = page_token
-                arguments["pagination"] = "keyset"
-
-            tree_result = await gitlab_session.call_tool(
-                name="get_repository_tree",
-                arguments=arguments
-            )
-
-            if not (hasattr(tree_result, 'content') and tree_result.content):
-                break
-
-            tree_data = json.loads(tree_result.content[0].text)
-            items = tree_data.get("items", []) if isinstance(tree_data, dict) else tree_data
-
-            next_token = None
-            if isinstance(tree_data, dict):
-                next_token = tree_data.get("next_page_token")
-
-            if isinstance(items, list):
-                for item in items:
-                    if item.get("type") == "blob":
-                        path = item.get("path", "")
-                        if is_config_file(path):
-                            files_to_scan.append(path)
-
-            if next_token:
-                page_token = next_token
-            else:
-                break
+        project_result = await gitlab_session.call_tool(
+            name="get_project",
+            arguments={"project_id": str(repo_id)}
+        )
+        if hasattr(project_result, 'content') and project_result.content:
+            project_data = json.loads(project_result.content[0].text)
+            default_branch = project_data.get("default_branch", "main")
     except Exception as e:
-        print(f"[ERROR] Failed to fetch repository tree: {e}")
-        # If we failed to get tree, return empty results gracefully
-        return {
-            "mongodb_uri": None,
-            "fivetran_api_key": None,
-            "fivetran_api_secret": None,
-            "detected_in_files": []
-        }
+        print(f"[WARN] Failed to fetch project details during scan: {e}")
 
-    # Limit scanning to at most 10 config files
-    files_to_scan = files_to_scan[:10]
+    if not branches:
+        branches = [default_branch]
+    else:
+        # Deduplicate and limit to at most 5 branches for performance
+        branches = list(dict.fromkeys(branches))[:5]
 
     detected_mongodb_uri = None
     detected_fivetran_key = None
     detected_fivetran_secret = None
     detected_files = []
+    scanned_file_signatures = set()  # To avoid scanning identical file contents across branches
+    branch_credentials = {}
 
-    for file_path in files_to_scan:
-        content = await _get_file_content_from_gitlab(gitlab_session, repo_id, file_path)
-        if not content:
+    # 3. Scan across branches
+    for branch in branches:
+        files_to_scan = []
+        try:
+            page_token = None
+            page_count = 0
+            max_pages = 2  # Limit pages per branch to prevent timeouts on large repositories
+
+            while len(files_to_scan) < 15 and page_count < max_pages:
+                arguments = {
+                    "project_id": str(repo_id),
+                    "recursive": True,
+                    "ref": branch,
+                    "per_page": 100
+                }
+                if page_token:
+                    arguments["page_token"] = page_token
+                    arguments["pagination"] = "keyset"
+
+                tree_result = await gitlab_session.call_tool(
+                    name="get_repository_tree",
+                    arguments=arguments
+                )
+                page_count += 1
+
+                if not (hasattr(tree_result, 'content') and tree_result.content):
+                    break
+
+                tree_data = json.loads(tree_result.content[0].text)
+                items = tree_data.get("items", []) if isinstance(tree_data, dict) else tree_data
+
+                next_token = None
+                if isinstance(tree_data, dict):
+                    next_token = tree_data.get("next_page_token")
+
+                if isinstance(items, list):
+                    for item in items:
+                        if item.get("type") == "blob":
+                            path = item.get("path", "")
+                            if is_config_file(path):
+                                files_to_scan.append(path)
+
+                if next_token:
+                    page_token = next_token
+                else:
+                    break
+        except Exception as e:
+            print(f"[ERROR] Failed to fetch repository tree for branch {branch}: {e}")
             continue
 
-        file_matched = False
+        # Deduplicate and limit to 5 config files per branch
+        files_to_scan = list(dict.fromkeys(files_to_scan))[:5]
+        
+        branch_mongodb_uri = None
+        branch_fivetran_key = None
+        branch_fivetran_secret = None
 
-        # 1. Match MongoDB URI
-        mongo_match = mongo_uri_pattern.search(content)
-        if mongo_match and not detected_mongodb_uri:
-            detected_mongodb_uri = mongo_match.group(0)
-            file_matched = True
+        for file_path in files_to_scan:
+            content = await _get_file_content_from_gitlab(gitlab_session, repo_id, file_path, branch)
+            if not content:
+                continue
 
-        # 2. Match Fivetran key
-        key_match = fivetran_key_pattern.search(content)
-        if key_match and not detected_fivetran_key:
-            detected_fivetran_key = key_match.group(1)
-            file_matched = True
+            # Deduplicate content across branches using SHA-256 hash
+            import hashlib
+            content_hash = hashlib.sha256(content.encode('utf-8', errors='replace')).hexdigest()
+            if content_hash in scanned_file_signatures:
+                continue
+            scanned_file_signatures.add(content_hash)
 
-        # 3. Match Fivetran secret
-        secret_match = fivetran_secret_pattern.search(content)
-        if secret_match and not detected_fivetran_secret:
-            detected_fivetran_secret = secret_match.group(1)
-            file_matched = True
+            file_matched = False
 
-        if file_matched:
-            detected_files.append(file_path)
+            # 1. Match MongoDB URI
+            mongo_match = mongo_uri_pattern.search(content)
+            if mongo_match and not branch_mongodb_uri:
+                branch_mongodb_uri = mongo_match.group(0)
+                file_matched = True
+
+            # 2. Match Fivetran key
+            key_match = fivetran_key_pattern.search(content)
+            if key_match and not branch_fivetran_key:
+                branch_fivetran_key = key_match.group(1)
+                file_matched = True
+
+            # 3. Match Fivetran secret
+            secret_match = fivetran_secret_pattern.search(content)
+            if secret_match and not branch_fivetran_secret:
+                branch_fivetran_secret = secret_match.group(1)
+                file_matched = True
+
+            if file_matched:
+                detected_files.append(f"{file_path} ({branch})")
+
+        # Save branch credentials if any were found
+        if branch_mongodb_uri or branch_fivetran_key or branch_fivetran_secret:
+            branch_credentials[branch] = {
+                "mongodb_uri": branch_mongodb_uri,
+                "fivetran_api_key": branch_fivetran_key,
+                "fivetran_api_secret": branch_fivetran_secret
+            }
+            # Fallback/first-match compatibility
+            if not detected_mongodb_uri:
+                detected_mongodb_uri = branch_mongodb_uri
+            if not detected_fivetran_key:
+                detected_fivetran_key = branch_fivetran_key
+            if not detected_fivetran_secret:
+                detected_fivetran_secret = branch_fivetran_secret
 
     return {
         "mongodb_uri": detected_mongodb_uri,
         "fivetran_api_key": detected_fivetran_key,
         "fivetran_api_secret": detected_fivetran_secret,
-        "detected_in_files": detected_files
+        "detected_in_files": detected_files,
+        "branch_credentials": branch_credentials
     }
 
 
@@ -1946,6 +2020,7 @@ async def onboard_repository(user_id: str, repo_id: str, data: Dict) -> Dict:
     fivetran_api_key = data.get("fivetran_api_key")
     fivetran_api_secret = data.get("fivetran_api_secret")
     encrypt_credentials = data.get("encrypt_credentials", True)
+    branch_credentials = data.get("branch_credentials", {})
 
     # 2. Perform encryption if requested
     if encrypt_credentials:
@@ -1956,6 +2031,15 @@ async def onboard_repository(user_id: str, repo_id: str, data: Dict) -> Dict:
             fivetran_api_key = encrypt_value(fivetran_api_key)
         if fivetran_api_secret:
             fivetran_api_secret = encrypt_value(fivetran_api_secret)
+        if branch_credentials:
+            encrypted_branch_creds = {}
+            for br, creds in branch_credentials.items():
+                encrypted_branch_creds[br] = {
+                    "mongodb_uri": encrypt_value(creds.get("mongodb_uri")) if creds.get("mongodb_uri") else None,
+                    "fivetran_api_key": encrypt_value(creds.get("fivetran_api_key")) if creds.get("fivetran_api_key") else None,
+                    "fivetran_api_secret": encrypt_value(creds.get("fivetran_api_secret")) if creds.get("fivetran_api_secret") else None,
+                }
+            branch_credentials = encrypted_branch_creds
 
     # 3. Get user's GitLab token
     gitlab_token = None
@@ -2011,6 +2095,8 @@ async def onboard_repository(user_id: str, repo_id: str, data: Dict) -> Dict:
         "fivetran_api_key": fivetran_api_key,
         "fivetran_api_secret": fivetran_api_secret,
         "credentials_encrypted": encrypt_credentials,
+        "target_branches": data.get("branches", []),
+        "branch_credentials": branch_credentials,
         "onboarded": True,
         "avg_review_time": 2.5,
         "mrs_reviewed": 0
