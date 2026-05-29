@@ -1,30 +1,138 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
+import {
+  useGeminiSettings,
+  useUpdateGeminiSettings,
+  useValidateGeminiToken,
+  usePolicySettings,
+  useUpdatePolicySettings,
+  useUserProfile,
+  useDisconnectGitLab
+} from "../services/queries";
 
 const Settings = () => {
-  // State for the Gemini Token configuration
-  const [token, setToken] = useState("AIzaSyD-XXXXXXXXXXXXXXXXXXXXX");
+  // API calls using React Query hooks
+  const { data: geminiSettings, isLoading: geminiLoading, refetch: refetchGemini } = useGeminiSettings();
+  const { data: policySettings, isLoading: policyLoading, refetch: refetchPolicy } = usePolicySettings();
+  const { data: userProfile, isLoading: profileLoading } = useUserProfile();
+
+  const updateGeminiMutation = useUpdateGeminiSettings();
+  const validateTokenMutation = useValidateGeminiToken();
+  const updatePolicyMutation = useUpdatePolicySettings();
+  const disconnectGitLabMutation = useDisconnectGitLab();
+
+  // Local state for form inputs
+  const [tokenInput, setTokenInput] = useState("");
   const [isTokenVisible, setIsTokenVisible] = useState(false);
-  const [tokenStatus, setTokenStatus] = useState("verified"); // 'empty', 'unverified', 'verified', 'verifying'
-  const [selectedModel, setSelectedModel] = useState("gemini-1.5-pro");
+  const [tokenStatus, setTokenStatus] = useState("empty"); // 'empty', 'unverified', 'verified', 'verifying'
+  const [selectedModel, setSelectedModel] = useState("gemini-3.5-flash");
 
   const [toggles, setToggles] = useState({
     autoReview: true,
     strictMode: false,
     emailAlerts: true,
-    slackIntegration: false,
   });
 
-  const handleVerifyToken = () => {
+  const [saveSuccess, setSaveSuccess] = useState(false);
+
+  // Update local state when API data loads
+  useEffect(() => {
+    if (geminiSettings) {
+      setSelectedModel(geminiSettings.selected_model || "gemini-3.5-flash");
+      setTokenStatus(geminiSettings.api_token_configured ? "verified" : "empty");
+    }
+  }, [geminiSettings]);
+
+  useEffect(() => {
+    if (policySettings) {
+      setToggles({
+        autoReview: policySettings.auto_review_enabled,
+        strictMode: policySettings.strict_mode_enabled,
+        emailAlerts: policySettings.email_alerts_enabled,
+      });
+    }
+  }, [policySettings]);
+
+  const handleVerifyToken = async () => {
+    if (!tokenInput) return;
+
     setTokenStatus("verifying");
-    // Simulate API call
-    setTimeout(() => {
-      setTokenStatus("verified");
-    }, 1500);
+    try {
+      const result = await validateTokenMutation.mutateAsync(tokenInput);
+      if (result.valid) {
+        setTokenStatus("verified");
+        // Save the token after verification
+        await updateGeminiMutation.mutateAsync({
+          api_token: tokenInput,
+          selected_model: selectedModel
+        });
+        setTokenInput("");
+      } else {
+        setTokenStatus("unverified");
+        alert(result.message || "Token validation failed");
+      }
+    } catch (error) {
+      setTokenStatus("unverified");
+      alert("Token validation failed: " + error.message);
+    }
   };
 
-  const handleToggle = (key) => {
-    setToggles((prev) => ({ ...prev, [key]: !prev[key] }));
+  const handleToggle = async (key) => {
+    const newValue = !toggles[key];
+    setToggles((prev) => ({ ...prev, [key]: newValue }));
+
+    // Save immediately to API
+    try {
+      await updatePolicyMutation.mutateAsync({
+        auto_review_enabled: key === "autoReview" ? newValue : toggles.autoReview,
+        strict_mode_enabled: key === "strictMode" ? newValue : toggles.strictMode,
+        email_alerts_enabled: key === "emailAlerts" ? newValue : toggles.emailAlerts,
+      });
+      setSaveSuccess(true);
+      setTimeout(() => setSaveSuccess(false), 2000);
+    } catch (error) {
+      // Revert on error
+      setToggles((prev) => ({ ...prev, [key]: !newValue }));
+      alert("Failed to update settings: " + error.message);
+    }
   };
+
+  const handleSaveChanges = async () => {
+    try {
+      await updatePolicyMutation.mutateAsync({
+        auto_review_enabled: toggles.autoReview,
+        strict_mode_enabled: toggles.strictMode,
+        email_alerts_enabled: toggles.emailAlerts,
+      });
+      setSaveSuccess(true);
+      setTimeout(() => setSaveSuccess(false), 2000);
+    } catch (error) {
+      alert("Failed to save settings: " + error.message);
+    }
+  };
+
+  const handleDisconnectGitLab = async () => {
+    if (confirm("Are you sure you want to disconnect GitLab? This will log you out.")) {
+      try {
+        await disconnectGitLabMutation.mutateAsync();
+        localStorage.removeItem("access_token");
+        localStorage.removeItem("user");
+        window.location.href = "/login";
+      } catch (error) {
+        alert("Failed to disconnect: " + error.message);
+      }
+    }
+  };
+
+  // Show loading state
+  if (geminiLoading || policyLoading || profileLoading) {
+    return (
+      <div className="max-w-5xl mx-auto px-4 md:px-8 py-20">
+        <div className="flex items-center justify-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-[#FC6D26]"></div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-5xl mx-auto px-4 md:px-8">
@@ -40,21 +148,42 @@ const Settings = () => {
         </div>
 
         <div className="flex items-center gap-3">
-          <button className="bg-slate-900 hover:bg-slate-800 text-white font-medium py-2.5 px-5 rounded-2xl transition-all shadow-md flex items-center gap-2 text-sm">
-            <svg
-              className="w-4 h-4"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth="2"
-                d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4"
-              />
-            </svg>
-            Save Changes
+          {saveSuccess && (
+            <span className="text-emerald-600 text-sm font-medium flex items-center gap-1">
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
+              </svg>
+              Saved!
+            </span>
+          )}
+          <button
+            onClick={handleSaveChanges}
+            disabled={updatePolicyMutation.isPending}
+            className="bg-slate-900 hover:bg-slate-800 text-white font-medium py-2.5 px-5 rounded-2xl transition-all shadow-md flex items-center gap-2 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {updatePolicyMutation.isPending ? (
+              <>
+                <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+                Saving...
+              </>
+            ) : (
+              <>
+                <svg
+                  className="w-4 h-4"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth="2"
+                    d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4"
+                  />
+                </svg>
+                Save Changes
+              </>
+            )}
           </button>
         </div>
       </div>
@@ -148,13 +277,13 @@ const Settings = () => {
                   </div>
                   <input
                     type={isTokenVisible ? "text" : "password"}
-                    value={token}
+                    value={tokenInput}
                     onChange={(e) => {
-                      setToken(e.target.value);
+                      setTokenInput(e.target.value);
                       setTokenStatus("unverified");
                     }}
                     className={`w-full pl-11 pr-24 py-3 bg-slate-900 border rounded-xl text-sm font-mono focus:outline-none focus:ring-2 focus:ring-[#FC6D26]/50 transition-all ${tokenStatus === "verified" ? "border-emerald-500/30 text-emerald-100" : "border-slate-700 text-slate-200"}`}
-                    placeholder="AIzaSy..."
+                    placeholder={tokenStatus === "verified" ? "••••••••••••••••" : "AIzaSy..."}
                   />
                   <div className="absolute right-2 flex items-center gap-1">
                     <button
@@ -199,10 +328,10 @@ const Settings = () => {
                     </button>
                     <button
                       onClick={handleVerifyToken}
-                      disabled={tokenStatus === "verifying" || !token}
+                      disabled={validateTokenMutation.isPending || updateGeminiMutation.isPending || !tokenInput}
                       className="bg-[#FC6D26] hover:bg-[#E24329] disabled:bg-slate-700 disabled:text-slate-400 text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition-all"
                     >
-                      {tokenStatus === "verifying" ? "Verifying..." : "Verify"}
+                      {validateTokenMutation.isPending || updateGeminiMutation.isPending ? "Processing..." : "Verify"}
                     </button>
                   </div>
                 </div>
@@ -215,42 +344,64 @@ const Settings = () => {
                 </label>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div
-                    onClick={() => setSelectedModel("gemini-1.5-pro")}
-                    className={`p-4 rounded-xl border cursor-pointer transition-all ${selectedModel === "gemini-1.5-pro" ? "bg-[#FC6D26]/10 border-[#FC6D26] shadow-[0_0_15px_rgba(252,109,38,0.15)]" : "bg-slate-900 border-slate-700 hover:border-slate-500"}`}
+                    onClick={async () => {
+                      setSelectedModel("gemini-3.5-flash");
+                      try {
+                        await updateGeminiMutation.mutateAsync({
+                          selected_model: "gemini-3.5-flash"
+                        });
+                        setSaveSuccess(true);
+                        setTimeout(() => setSaveSuccess(false), 2000);
+                      } catch (error) {
+                        alert("Failed to update model: " + error.message);
+                      }
+                    }}
+                    className={`p-4 rounded-xl border cursor-pointer transition-all ${selectedModel === "gemini-3.5-flash" ? "bg-[#FC6D26]/10 border-[#FC6D26] shadow-[0_0_15px_rgba(252,109,38,0.15)]" : "bg-slate-900 border-slate-700 hover:border-slate-500"}`}
                   >
                     <div className="flex justify-between items-center mb-1">
                       <h4
-                        className={`text-sm font-bold ${selectedModel === "gemini-1.5-pro" ? "text-[#FC6D26]" : "text-slate-200"}`}
+                        className={`text-sm font-bold ${selectedModel === "gemini-3.5-flash" ? "text-[#FC6D26]" : "text-slate-200"}`}
                       >
-                        Gemini 1.5 Pro
+                        Gemini 3.5 Flash
                       </h4>
-                      {selectedModel === "gemini-1.5-pro" && (
-                        <div className="w-2 h-2 rounded-full bg-[#FC6D26]"></div>
-                      )}
-                    </div>
-                    <p className="text-xs text-slate-500">
-                      Maximum reasoning capability. Best for deep architecture
-                      and security reviews.
-                    </p>
-                  </div>
-
-                  <div
-                    onClick={() => setSelectedModel("gemini-1.5-flash")}
-                    className={`p-4 rounded-xl border cursor-pointer transition-all ${selectedModel === "gemini-1.5-flash" ? "bg-[#FC6D26]/10 border-[#FC6D26] shadow-[0_0_15px_rgba(252,109,38,0.15)]" : "bg-slate-900 border-slate-700 hover:border-slate-500"}`}
-                  >
-                    <div className="flex justify-between items-center mb-1">
-                      <h4
-                        className={`text-sm font-bold ${selectedModel === "gemini-1.5-flash" ? "text-[#FC6D26]" : "text-slate-200"}`}
-                      >
-                        Gemini 1.5 Flash
-                      </h4>
-                      {selectedModel === "gemini-1.5-flash" && (
+                      {selectedModel === "gemini-3.5-flash" && (
                         <div className="w-2 h-2 rounded-full bg-[#FC6D26]"></div>
                       )}
                     </div>
                     <p className="text-xs text-slate-500">
                       High velocity and low latency. Best for fast linting and
                       minor chore updates.
+                    </p>
+                  </div>
+
+                  <div
+                    onClick={async () => {
+                      setSelectedModel("gemini-3.1-pro-preview");
+                      try {
+                        await updateGeminiMutation.mutateAsync({
+                          selected_model: "gemini-3.1-pro-preview"
+                        });
+                        setSaveSuccess(true);
+                        setTimeout(() => setSaveSuccess(false), 2000);
+                      } catch (error) {
+                        alert("Failed to update model: " + error.message);
+                      }
+                    }}
+                    className={`p-4 rounded-xl border cursor-pointer transition-all ${selectedModel === "gemini-3.1-pro-preview" ? "bg-[#FC6D26]/10 border-[#FC6D26] shadow-[0_0_15px_rgba(252,109,38,0.15)]" : "bg-slate-900 border-slate-700 hover:border-slate-500"}`}
+                  >
+                    <div className="flex justify-between items-center mb-1">
+                      <h4
+                        className={`text-sm font-bold ${selectedModel === "gemini-3.1-pro-preview" ? "text-[#FC6D26]" : "text-slate-200"}`}
+                      >
+                        Gemini 3.1 Pro Preview
+                      </h4>
+                      {selectedModel === "gemini-3.1-pro-preview" && (
+                        <div className="w-2 h-2 rounded-full bg-[#FC6D26]"></div>
+                      )}
+                    </div>
+                    <p className="text-xs text-slate-500">
+                      Maximum reasoning capability. Best for deep architecture
+                      and security reviews.
                     </p>
                   </div>
                 </div>
@@ -360,7 +511,7 @@ const Settings = () => {
             <div className="relative group mb-4">
               <div className="w-24 h-24 rounded-[1.5rem] bg-slate-200 border-4 border-white shadow-md overflow-hidden relative">
                 <img
-                  src="https://api.dicebear.com/7.x/notionists/svg?seed=Felix"
+                  src={userProfile?.avatar_url || `https://api.dicebear.com/7.x/notionists/svg?seed=${userProfile?.username || "user"}`}
                   alt="User Avatar"
                   className="w-full h-full object-cover"
                 />
@@ -391,8 +542,8 @@ const Settings = () => {
               </div>
             </div>
 
-            <h2 className="text-xl font-bold text-slate-900">John Doe</h2>
-            <p className="text-sm text-slate-500 mb-6">john.doe@company.com</p>
+            <h2 className="text-xl font-bold text-slate-900">{userProfile?.name || "User"}</h2>
+            <p className="text-sm text-slate-500 mb-6">{userProfile?.email || "user@example.com"}</p>
 
             <button className="w-full py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-semibold rounded-xl transition-colors border border-slate-200">
               Manage Account
@@ -429,8 +580,12 @@ const Settings = () => {
                 <button className="flex-1 py-2 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold rounded-lg transition-colors border border-slate-200 shadow-sm">
                   Re-sync
                 </button>
-                <button className="flex-1 py-2 bg-rose-50 hover:bg-rose-100 text-rose-600 text-xs font-semibold rounded-lg transition-colors border border-rose-200">
-                  Disconnect
+                <button
+                  onClick={handleDisconnectGitLab}
+                  disabled={disconnectGitLabMutation.isPending}
+                  className="flex-1 py-2 bg-rose-50 hover:bg-rose-100 text-rose-600 text-xs font-semibold rounded-lg transition-colors border border-rose-200 disabled:opacity-50"
+                >
+                  {disconnectGitLabMutation.isPending ? "Disconnecting..." : "Disconnect"}
                 </button>
               </div>
             </div>

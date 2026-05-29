@@ -2,13 +2,18 @@ import os
 import asyncio
 import json
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict
 from google import genai
 from google.genai import types
 from google.genai.errors import APIError
 
-# Initialize official Gemini AI Client
+# Default client for when no user config is available
 ai_client = genai.Client()
+
+
+def create_user_client(api_token: str) -> genai.Client:
+    """Create a Gemini client with user's API token."""
+    return genai.Client(api_key=api_token)
 
 PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
 
@@ -65,10 +70,18 @@ def load_prompt(prompt_name: str) -> str:
         return "You are a senior code reviewer. Analyze the provided code changes for security, quality, and performance issues."
 
 
-async def run_gemini_review(raw_diff_content: str, impact_context: str) -> str:
-    """Sends MR unified diff stream to Gemini for automated security/quality review."""
+async def run_gemini_review(raw_diff_content: str, impact_context: str, user_config: Dict = None) -> str:
+    """
+    Sends MR unified diff stream to Gemini for automated security/quality review.
+
+    Args:
+        raw_diff_content: The code diff to review
+        impact_context: Impact analysis context
+        user_config: Optional dict with user's Gemini config (api_token, model)
+                     If not provided, uses default client and model
+    """
     system_instruction = load_prompt("senior_pr_reviewer")
-    
+
     review_prompt = f"""Review this raw pull request diff change stream:
 
 {raw_diff_content}
@@ -76,9 +89,24 @@ async def run_gemini_review(raw_diff_content: str, impact_context: str) -> str:
 {impact_context}
 """
 
+    # Use user's config if provided, otherwise use defaults
+    client = ai_client
+    model = 'gemini-3.5-flash'  # Default model
+
+    if user_config:
+        api_token = user_config.get("api_token")
+        model = user_config.get("model", "gemini-3.5-flash")
+        if api_token:
+            client = create_user_client(api_token)
+            print(f"[INFO] Using user's Gemini API with model: {model}")
+        else:
+            print(f"[WARN] User config provided but no API token, using defaults")
+    else:
+        print(f"[WARN] No user config provided, using default Gemini client")
+
     response = await call_gemini_with_retry(
-        ai_client.models.generate_content,
-        model='gemini-3.5-flash',
+        client.models.generate_content,
+        model=model,
         contents=review_prompt,
         config=types.GenerateContentConfig(
             system_instruction=system_instruction,
@@ -88,7 +116,7 @@ async def run_gemini_review(raw_diff_content: str, impact_context: str) -> str:
     return response.text
 
 
-async def run_gemini_fix_analysis(audit_report: str, patch_summary: str, schema_context: Optional[str] = None) -> dict:
+async def run_gemini_fix_analysis(audit_report: str, patch_summary: str, schema_context: Optional[str] = None, user_config: Dict = None) -> dict:
     """Invokes Gemini with structured JSON output to analyze and remediation patch hunks."""
     schema_prefix = ""
     if schema_context:
@@ -130,9 +158,22 @@ async def run_gemini_fix_analysis(audit_report: str, patch_summary: str, schema_
         '{"fixable": true/false, "fixes": [{"hunk_id": "id", "issue": "description", "original_lines": ["line1", "line2"], "fixed_lines": ["line1_fixed", "line2_fixed"], "extracted_env_vars": {"KEY": "value"}}]}'
     )
 
+    # Use user's config if provided, otherwise use defaults
+    client = ai_client
+    model = 'gemini-3.5-flash'  # Default model
+
+    if user_config:
+        api_token = user_config.get("api_token")
+        model = user_config.get("model", "gemini-3.5-flash")
+        if api_token:
+            client = create_user_client(api_token)
+            print(f"[INFO] Using user's Gemini API with model: {model}")
+        else:
+            print(f"[WARN] User config provided but no API token, using defaults")
+
     fix_analysis = await call_gemini_with_retry(
-        ai_client.models.generate_content,
-        model='gemini-3.5-flash',
+        client.models.generate_content,
+        model=model,
         contents=fix_prompt,
         config=types.GenerateContentConfig(
             system_instruction="You are a strict automated code repair system. Output only valid JSON with no markdown formatting.",

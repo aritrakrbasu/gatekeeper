@@ -293,12 +293,25 @@ async def handle_oauth_callback(code: str, state: str) -> Dict:
     }
 
     # Store GitLab access token for later use
+    gitlab_tokens = {
+        "access_token": token_data.get("access_token"),
+        "refresh_token": token_data.get("refresh_token")
+    }
     _user_sessions[user_info["id"]] = {
         "user": user_info,
-        "gitlab_access_token": token_data.get("access_token"),
-        "gitlab_refresh_token": token_data.get("refresh_token"),
+        "gitlab_access_token": gitlab_tokens["access_token"],
+        "gitlab_refresh_token": gitlab_tokens["refresh_token"],
         "gitlab_token_expires_at": datetime.utcnow() + timedelta(seconds=token_data.get("expires_in", 7200))
     }
+
+    # Create user in MongoDB (if not exists)
+    try:
+        from services.user_service import ensure_user_exists
+        await ensure_user_exists(user_info["id"], user_info, gitlab_tokens)
+        print(f"[✅] User {user_info['id']} ensured in MongoDB")
+    except Exception as e:
+        # Don't block login if MongoDB fails
+        print(f"[⚠️] Failed to create user in MongoDB: {e}")
 
     # Create JWT tokens
     access_token = create_access_token(user_info)

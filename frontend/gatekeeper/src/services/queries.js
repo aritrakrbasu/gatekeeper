@@ -200,13 +200,27 @@ export function useUpdateRepositoryCredentials() {
 }
 
 /**
+ * Get repository branches
+ * @param {string|number} repoId - Repository ID
+ * @param {boolean} enabled - Whether query is enabled
+ */
+export function useRepositoryBranches(repoId, enabled = true) {
+  return useQuery({
+    queryKey: ['repositoryBranches', repoId],
+    queryFn: () => api.getRepositoryBranches(repoId),
+    enabled: enabled && !!repoId,
+    staleTime: 5 * 60 * 1000, // 5 minutes - branches change less often
+  });
+}
+
+/**
  * Connect repository mutation
  */
 export function useConnectRepository() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: (repoId) => api.connectRepository(repoId),
+    mutationFn: ({ repoId, targetBranches }) => api.connectRepository(repoId, targetBranches),
     onSuccess: () => {
       // Invalidate repositories and available repositories
       queryClient.invalidateQueries({ queryKey: queryKeys.repositories.lists() });
@@ -377,11 +391,12 @@ export function useInvoices() {
 /**
  * Get Gemini settings
  */
-export function useGeminiSettings() {
+export function useGeminiSettings(options = {}) {
   return useQuery({
     queryKey: queryKeys.settings.gemini(),
     queryFn: api.getGeminiSettings,
     staleTime: 30 * 60 * 1000, // 30 minutes
+    ...options, // Allow overriding enabled, refetchInterval, etc.
   });
 }
 

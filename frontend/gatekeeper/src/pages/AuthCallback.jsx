@@ -3,12 +3,14 @@
  *
  * This page handles the callback from GitLab OAuth.
  * It extracts the authorization code and state from the URL,
- * calls the backend to exchange for tokens, and redirects to dashboard.
+ * calls the backend to exchange for tokens, and redirects to dashboard
+ * or onboarding if Gemini is not configured.
  */
 
 import React, { useEffect, useState } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
+import { useGeminiSettings } from "../services/queries";
 
 const AuthCallback = () => {
   const [searchParams] = useSearchParams();
@@ -17,6 +19,13 @@ const AuthCallback = () => {
   const [status, setStatus] = useState("Processing...");
   const [error, setError] = useState(null);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [authCompleted, setAuthCompleted] = useState(false);
+
+  // Fetch Gemini settings ONLY after auth completes
+  // This prevents 401 errors from being called before token is stored
+  const { data: geminiSettings } = useGeminiSettings({
+    enabled: authCompleted // Only fetch after auth is complete
+  });
 
   useEffect(() => {
     const processCallback = async () => {
@@ -38,10 +47,9 @@ const AuthCallback = () => {
         setStatus("Authenticating...");
         await handleCallback(code, state);
         setStatus("Success!");
-        // Redirect to dashboard after successful auth
-        setTimeout(() => {
-          navigate("/dashboard");
-        }, 500);
+        setAuthCompleted(true);
+
+        // Redirect will happen based on Gemini settings via useEffect
       } catch (err) {
         console.error("OAuth callback error:", err);
         setError(err.message || "Authentication failed");
@@ -55,6 +63,19 @@ const AuthCallback = () => {
 
     processCallback();
   }, [searchParams, handleCallback, navigate, isProcessing]);
+
+  // Redirect to appropriate page after auth completes and settings are fetched
+  useEffect(() => {
+    if (authCompleted && geminiSettings !== undefined) {
+      setTimeout(() => {
+        if (geminiSettings?.api_token_configured) {
+          navigate("/dashboard");
+        } else {
+          navigate("/onboarding");
+        }
+      }, 500);
+    }
+  }, [authCompleted, geminiSettings, navigate]);
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-[#F2F4F7]">

@@ -17,9 +17,66 @@ from impact_analysis import (
 from repo_manager import get_repo_manager
 
 # Service Imports
-from services import mcp_service, repository_service
+from services import mcp_service, repository_service, user_service
 from services.gemini_service import run_gemini_review, run_gemini_fix_analysis
 from services.remediation_service import apply_auto_fixes
+
+
+async def get_user_config_from_repo(project_id: str) -> dict:
+    """
+    Get user's Gemini configuration from the repository owner.
+
+    Args:
+        project_id: GitLab project/repository ID
+
+    Returns:
+        User's Gemini config dict or empty dict if not found
+    """
+    try:
+        # Look up repository to get user_id
+        repo = await repository_service.get_repository(str(project_id))
+        if repo and repo.get("user_id"):
+            user_id = repo["user_id"]
+            print(f"[INFO] Found repository owner: {user_id}")
+            # Get user's Gemini config
+            return await user_service.get_user_gemini_config(user_id)
+        else:
+            print(f"[WARN] Repository {project_id} not found or has no owner")
+            return {}
+    except Exception as e:
+        print(f"[WARN] Failed to get user config from repository: {e}")
+        return {}
+
+
+async def should_process_webhook(repo_id: str, target_branch: str) -> bool:
+    """
+    Check if webhook should be processed based on repository's target branches.
+
+    Args:
+        repo_id: Repository ID
+        target_branch: Target branch of the MR
+
+    Returns:
+        True if webhook should be processed, False otherwise
+    """
+    try:
+        repo = await repository_service.get_repository(str(repo_id))
+        target_branches = repo.get("target_branches", ["main", "master", "develop"])
+
+        # If no target branches specified, process all
+        if not target_branches:
+            return True
+
+        # Check if target branch is in the monitored list
+        should_process = target_branch in target_branches
+
+        if not should_process:
+            print(f"[ℹ️] Skipping MR for branch '{target_branch}' - not in monitored branches: {target_branches}")
+
+        return should_process
+    except Exception as e:
+        print(f"[⚠️] Failed to check target branches, processing anyway: {e}")
+        return True  # Default to processing on error
 
 
 async def orchestrate_review(payload: dict) -> dict:
@@ -71,6 +128,10 @@ async def orchestrate_review(payload: dict) -> dict:
     created_at = object_attrs.get("created_at", "")
     updated_at = object_attrs.get("updated_at", "")
     description = object_attrs.get("description", "")
+
+    # Check if we should process this webhook based on target branches
+    if not await should_process_webhook(str(project_id), target_branch):
+        return {"status": "skipped_branch_not_monitored", "target_branch": target_branch}
 
     # Extract changes statistics from webhook payload
     # GitLab MR hook provides this in object_attributes.stats
@@ -550,7 +611,9 @@ This may take 30-60 seconds depending on the size of the changes.
             print("[*] Step 4: Shipping code diff to Gemini Pro Core for automated security review...")
             await add_log("ai_analysis", "🤖 Running AI-powered security and code quality analysis", "running")
 
-            audit_report = await run_gemini_review(raw_diff_content, impact_context)
+            # Get user's Gemini config from repository owner
+            user_config = await get_user_config_from_repo(str(project_id))
+            audit_report = await run_gemini_review(raw_diff_content, impact_context, user_config)
 
             print(f"[✅] Step 4 complete: Gemini analysis compiled ({len(audit_report)} chars)")
             await add_log("ai_analysis", f"✅ AI analysis complete - {len(audit_report)} characters of findings generated", "completed")
@@ -726,7 +789,7 @@ This may take 30-60 seconds depending on the size of the changes.
 
                 print("[DEBUG] Requesting fix analysis from Gemini...")
                 fix_data = await asyncio.wait_for(
-                    run_gemini_fix_analysis(audit_report, patch_summary, schema_context=schema_markdown),
+                    run_gemini_fix_analysis(audit_report, patch_summary, schema_context=schema_markdown, user_config=user_config),
                     timeout=60.0
                 )
 

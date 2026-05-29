@@ -16,6 +16,7 @@ import Layout from "./components/Layout";
 import Alerts from "./pages/Alerts";
 import Settings from "./pages/Settings";
 import Billing from "./pages/Billing";
+import Onboarding from "./components/Onboarding";
 
 function App() {
   return (
@@ -26,6 +27,7 @@ function App() {
             <Route path="/" element={<Navigate to="/login" replace />} />
             <Route path="/login" element={<Login />} />
             <Route path="/auth/callback" element={<AuthCallback />} />
+            <Route path="/onboarding" element={<Onboarding />} />
             <Route element={<Layout />}>
               <Route
                 path="/dashboard"

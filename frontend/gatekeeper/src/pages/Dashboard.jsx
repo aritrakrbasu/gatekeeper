@@ -412,7 +412,11 @@ const Dashboard = () => {
         onClose={() => setShowConnectModal(false)}
         onConnect={async (repo) => {
           try {
-            await connectMutation.mutateAsync(repo.id);
+            // Connect with default branches (main, master, develop)
+            await connectMutation.mutateAsync({
+              repoId: repo.id,
+              targetBranches: ["main", "master", "develop"]
+            });
             console.log("Connected repository:", repo);
             // React Query automatically invalidates and refetches data
             // Optionally navigate to repositories page

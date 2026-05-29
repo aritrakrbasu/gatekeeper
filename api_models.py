@@ -244,15 +244,15 @@ class InvoiceResponse(BaseModel):
 
 class GeminiModel(str, Enum):
     """Available Gemini models."""
-    GEMINI_1_5_PRO = "gemini-1.5-pro"
-    GEMINI_1_5_FLASH = "gemini-1.5-flash"
+    GEMINI_3_5_FLASH = "gemini-3.5-flash"
+    GEMINI_3_1_PRO_PREVIEW = "gemini-3.1-pro-preview"
 
 
 class GeminiSettingsResponse(BaseModel):
     """Gemini API settings response."""
     api_token_configured: bool
     selected_model: GeminiModel
-    model_options: List[GeminiModel] = [GeminiModel.GEMINI_1_5_PRO, GeminiModel.GEMINI_1_5_FLASH]
+    model_options: List[GeminiModel] = [GeminiModel.GEMINI_3_5_FLASH, GeminiModel.GEMINI_3_1_PRO_PREVIEW]
 
 
 class ValidateTokenRequest(BaseModel):
@@ -301,6 +301,34 @@ class IntegrationStatusResponse(BaseModel):
 
 
 # ============================================================================
+# Settings Request Models
+# ============================================================================
+
+
+class UpdateGeminiSettingsRequest(BaseModel):
+    """Request to update Gemini settings."""
+    api_token: Optional[str] = None
+    selected_model: GeminiModel = GeminiModel.GEMINI_3_5_FLASH
+
+
+class UpdatePolicySettingsRequest(BaseModel):
+    """Request to update policy settings."""
+    auto_review_enabled: bool
+    strict_mode_enabled: bool
+    email_alerts_enabled: bool
+    slack_integration_enabled: bool = False
+    max_review_depth: int = 5
+    timeout_seconds: int = 300
+
+
+class UpdateUserProfileRequest(BaseModel):
+    """Request to update user profile."""
+    name: Optional[str] = None
+    email: Optional[str] = None
+    avatar_url: Optional[str] = None
+
+
+# ============================================================================
 # Feedback Models
 # ============================================================================
 
@@ -341,6 +369,7 @@ class OnboardRepositoryRequest(BaseModel):
     fivetran_api_key: Optional[str] = None
     fivetran_api_secret: Optional[str] = None
     encrypt_credentials: bool = True
+    target_branch: Optional[str] = None  # Branch for webhooks to monitor
 
 
 class UpdateRepositoryRequest(BaseModel):

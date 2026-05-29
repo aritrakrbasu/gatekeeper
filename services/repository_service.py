@@ -908,13 +908,166 @@ async def get_available_gitlab_repositories(user_id: str, search_query: str = ""
         )
 
 
-async def connect_repository(user_id: str, repo_id: str) -> Dict:
+async def install_gitlab_webhook(repo_id: str, gitlab_token: str) -> Dict:
     """
-    Connect a GitLab repository and store it in MongoDB.
+    Install Gatekeeper webhook on a GitLab repository.
+
+    Args:
+        repo_id: GitLab project ID
+        gitlab_token: GitLab access token
+
+    Returns:
+        Webhook installation result
+    """
+    # Get Gatekeeper webhook URL from environment
+    webhook_url = os.getenv("GATEKEEPER_WEBHOOK_URL", "")
+
+    if not webhook_url:
+        print("[⚠️] GATEKEEPER_WEBHOOK_URL not set in environment variables")
+        print("[ℹ️] Webhook will not be installed. Please set GATEKEEPER_WEBHOOK_URL in .env file")
+        print("[ℹ️] For local development, use ngrok: https://your-domain.ngrok.io/webhooks/gitlab")
+        return {
+            "status": "skipped_no_url",
+            "message": "Webhook URL not configured. Set GATEKEEPER_WEBHOOK_URL in environment."
+        }
+
+    # Warn if using localhost
+    if "localhost" in webhook_url or "127.0.0.1" in webhook_url:
+        print("[⚠️] WARNING: Using localhost webhook URL - GitLab cannot reach your local machine")
+        print("[ℹ️] Use ngrok for local development: https://ngrok.com")
+
+    print(f"[INFO] Installing webhook with URL: {webhook_url}")
+
+    headers = {"Authorization": f"Bearer {gitlab_token}"}
+
+    try:
+        async with httpx.AsyncClient() as client:
+            # Check if webhook already exists
+            list_response = await client.get(
+                f"{GITLAB_BASE_URL}/api/v4/projects/{repo_id}/hooks",
+                headers=headers,
+                timeout=30.0
+            )
+            list_response.raise_for_status()
+            existing_hooks = list_response.json()
+
+            # Check if Gatekeeper webhook already exists
+            for hook in existing_hooks:
+                if webhook_url in hook.get("url", ""):
+                    print(f"[INFO] Gatekeeper webhook already exists for repo {repo_id}")
+                    return {
+                        "webhook_id": hook.get("id"),
+                        "url": hook.get("url"),
+                        "status": "already_exists"
+                    }
+
+            # Install new webhook
+            webhook_data = {
+                "url": webhook_url,
+                "merge_requests_events": True,
+                "push_events": False,
+                "issues_events": False,
+                "job_events": False,
+                "wiki_page_events": False,
+                "pipeline_events": False,
+                "deployment_events": False,
+                "releases_events": False,
+                "tag_push_events": False,
+                "note_events": False,
+                "confidential_issues_events": False,
+                "confidential_note_events": False,
+                "ssl_verification": True
+            }
+
+            response = await client.post(
+                f"{GITLAB_BASE_URL}/api/v4/projects/{repo_id}/hooks",
+                headers=headers,
+                json=webhook_data,
+                timeout=30.0
+            )
+            response.raise_for_status()
+            webhook = response.json()
+
+            print(f"[✅] Installed Gatekeeper webhook for repo {repo_id}")
+            print(f"[ℹ️] Webhook ID: {webhook.get('id')}, URL: {webhook.get('url')}")
+            return {
+                "webhook_id": webhook.get("id"),
+                "url": webhook.get("url"),
+                "status": "installed"
+            }
+
+    except httpx.HTTPStatusError as e:
+        error_detail = e.response.text if hasattr(e.response, 'text') else str(e)
+        print(f"[ERROR] Failed to install webhook: {error_detail}")
+        print(f"[DEBUG] Status code: {e.response.status_code}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to install webhook: {error_detail}"
+        )
+    except Exception as e:
+        print(f"[ERROR] Failed to install webhook: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+
+
+async def get_repository_branches(repo_id: str, gitlab_token: str) -> List[Dict]:
+    """
+    Get branches for a GitLab repository.
+
+    Args:
+        repo_id: GitLab project ID
+        gitlab_token: GitLab access token
+
+    Returns:
+        List of branches with name and protected status
+    """
+    headers = {"Authorization": f"Bearer {gitlab_token}"}
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{GITLAB_BASE_URL}/api/v4/projects/{repo_id}/repository/branches",
+                headers=headers,
+                params={"per_page": 100},
+                timeout=30.0
+            )
+            response.raise_for_status()
+            branches = response.json()
+
+            return [
+                {
+                    "name": branch.get("name"),
+                    "protected": branch.get("protected", False),
+                    "default": branch.get("default", False),
+                    "web_url": branch.get("web_url")
+                }
+                for branch in branches
+            ]
+
+    except httpx.HTTPStatusError as e:
+        print(f"[ERROR] Failed to fetch branches: {e.response.text}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to fetch branches: {e.response.text}"
+        )
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch branches: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+
+
+async def connect_repository(user_id: str, repo_id: str, target_branches: Optional[List[str]] = None) -> Dict:
+    """
+    Connect a GitLab repository, install webhook, and store it in MongoDB.
 
     Args:
         user_id: User ID connecting the repository
         repo_id: GitLab project ID
+        target_branches: Optional list of branch names to monitor for MRs
 
     Returns:
         Connected repository information
@@ -931,10 +1084,41 @@ async def connect_repository(user_id: str, repo_id: str) -> Dict:
     # Check if already connected
     existing = await _find_repository(user_id, repo_id)
     if existing:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Repository is already connected"
-        )
+        # Repository already connected - still try to install/update webhook
+        print(f"[INFO] Repository {repo_id} already connected, checking webhook...")
+
+        # Try to install webhook anyway (it will check if already exists)
+        try:
+            webhook_result = await install_gitlab_webhook(repo_id, gitlab_token)
+            print(f"[✅] Webhook check complete for existing repo {repo_id}: {webhook_result.get('status')}")
+
+            # Update existing repository with webhook info and target branches
+            if target_branches:
+                await mongo_client.update_one(
+                    collection_name=REPOS_COLLECTION,
+                    filter={"user_id": user_id, "id": repo_id},
+                    update={"$set": {
+                        "target_branches": target_branches,
+                        "webhook_status": webhook_result.get("status"),
+                        "updated_at": datetime.now().isoformat() if MONGO_CONNECTION_STRING else datetime.now()
+                    }}
+                )
+                print(f"[✅] Updated target branches for existing repo: {target_branches}")
+        except Exception as webhook_err:
+            print(f"[⚠️] Failed to check/install webhook: {webhook_err}")
+
+        # Return existing repository info
+        return {
+            "id": existing.get("id"),
+            "name": existing.get("name"),
+            "full_name": existing.get("full_name"),
+            "visibility": _get_enum_value(existing.get("visibility", "private")),
+            "url": existing.get("url"),
+            "status": _get_enum_value(existing.get("status", "active")),
+            "target_branches": existing.get("target_branches", []),
+            "webhook_status": existing.get("webhook_status"),
+            "message": "Repository already connected. Webhook checked/updated."
+        }
 
     # Fetch repository details from GitLab
     headers = {"Authorization": f"Bearer {gitlab_token}"}
@@ -988,6 +1172,27 @@ async def connect_repository(user_id: str, repo_id: str) -> Dict:
     _merge_requests[new_repo["id"]] = []
     _policies[new_repo["id"]] = []
 
+    # Install webhook
+    try:
+        webhook_result = await install_gitlab_webhook(new_repo["id"], gitlab_token)
+        new_repo["webhook_id"] = webhook_result.get("webhook_id")
+        new_repo["webhook_url"] = webhook_result.get("url")
+        new_repo["webhook_status"] = webhook_result.get("status")
+        print(f"[✅] Webhook status for {new_repo['name']}: {webhook_result.get('status')}")
+    except Exception as webhook_err:
+        print(f"[⚠️] Failed to install webhook: {webhook_err}")
+        # Don't fail connection if webhook installation fails
+        new_repo["webhook_status"] = "failed"
+
+    # Store target branches if provided
+    if target_branches:
+        new_repo["target_branches"] = target_branches
+        print(f"[INFO] Monitoring {len(target_branches)} branches for {new_repo['name']}: {target_branches}")
+    else:
+        # Default to common branches
+        new_repo["target_branches"] = ["main", "master", "develop"]
+        print(f"[INFO] Using default target branches for {new_repo['name']}")
+
     # Store in MongoDB
     await _store_repository(user_id, new_repo)
 
@@ -998,6 +1203,8 @@ async def connect_repository(user_id: str, repo_id: str) -> Dict:
         "visibility": new_repo["visibility"].value,
         "url": new_repo["url"],
         "status": new_repo["status"].value,
+        "webhook_status": new_repo.get("webhook_status"),
+        "target_branches": new_repo.get("target_branches", []),
         "message": "Repository connected successfully"
     }
 

@@ -8,12 +8,15 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Import Gatekeeper Services
-from services import mcp_service, review_service, auth_service, repository_service, mongo_client
+from services import mcp_service, review_service, auth_service, repository_service, mongo_client, user_service
 from api_models import (
     OAuthCallbackRequest, TokenResponse, UserResponse,
     VerifyTokenRequest, VerifyTokenResponse, LogoutResponse,
     RepositoryResponse, MergeRequestResponse, ScanRepositoryResponse,
-    OnboardRepositoryRequest, UpdateRepositoryRequest, UpdateRepositoryResponse
+    OnboardRepositoryRequest, UpdateRepositoryRequest, UpdateRepositoryResponse,
+    GeminiSettingsResponse, ValidateTokenRequest, ValidateTokenResponse,
+    PolicySettingsResponse, UpdateGeminiSettingsRequest, UpdatePolicySettingsRequest,
+    UpdateUserProfileRequest, IntegrationStatusResponse
 )
 
 app = FastAPI(title="The Gatekeeper Gemini Orchestrator")
@@ -501,9 +504,9 @@ async def update_repository_credentials(repo_id: str, request: UpdateRepositoryR
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/repositories/{repo_id}/connect")
-async def connect_repository(repo_id: str, authorization: str = Header(None)):
-    """Connect a GitLab repository."""
+@app.get("/api/repositories/{repo_id}/branches")
+async def get_repository_branches(repo_id: str, authorization: str = Header(None)):
+    """Get branches for a repository."""
     try:
         # Extract user from token
         if not authorization:
@@ -516,7 +519,77 @@ async def connect_repository(repo_id: str, authorization: str = Header(None)):
         if not user_id:
             raise HTTPException(status_code=401, detail="Invalid token")
 
-        result = await repository_service.connect_repository(user_id, repo_id)
+        # Get user's GitLab token
+        gitlab_token = None
+        user_session = auth_service.get_user_session(user_id)
+        if user_session:
+            gitlab_token = user_session.get("gitlab_access_token")
+
+        if not gitlab_token:
+            # Fallback to env token
+            gitlab_token = os.getenv("GITLAB_PERSONAL_ACCESS_TOKEN", "")
+
+        branches = await repository_service.get_repository_branches(repo_id, gitlab_token)
+        return {"branches": branches}
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch branches: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/repositories/{repo_id}/install-webhook")
+async def install_webhook_manually(repo_id: str, authorization: str = Header(None)):
+    """Manually install or re-install webhook on a repository."""
+    try:
+        # Extract user from token
+        if not authorization:
+            raise HTTPException(status_code=401, detail="Authorization required")
+
+        token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+        user_info = auth_service.verify_token(token)
+        user_id = user_info.get("id")
+
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        # Get user's GitLab token
+        gitlab_token = None
+        user_session = auth_service.get_user_session(user_id)
+        if user_session:
+            gitlab_token = user_session.get("gitlab_access_token")
+
+        if not gitlab_token:
+            gitlab_token = os.getenv("GITLAB_PERSONAL_ACCESS_TOKEN", "")
+
+        # Install webhook
+        result = await repository_service.install_gitlab_webhook(repo_id, gitlab_token)
+        return result
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        print(f"[ERROR] Failed to install webhook manually: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/repositories/{repo_id}/connect")
+async def connect_repository(repo_id: str, request: dict, authorization: str = Header(None)):
+    """Connect a GitLab repository with optional branch selection."""
+    try:
+        # Extract user from token
+        if not authorization:
+            raise HTTPException(status_code=401, detail="Authorization required")
+
+        token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+        user_info = auth_service.verify_token(token)
+        user_id = user_info.get("id")
+
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        target_branches = request.get("target_branches")
+
+        result = await repository_service.connect_repository(user_id, repo_id, target_branches)
         return result
     except HTTPException as e:
         raise e
@@ -546,4 +619,233 @@ async def disconnect_repository(repo_id: str, authorization: str = Header(None))
         raise e
     except Exception as e:
         print(f"[ERROR] Failed to disconnect repository: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Settings Endpoints
+# ============================================================================
+
+@app.get("/api/settings/gemini", response_model=GeminiSettingsResponse)
+async def get_gemini_settings(authorization: str = Header(None)):
+    """Get user's Gemini API settings."""
+    try:
+        if not authorization:
+            raise HTTPException(status_code=401, detail="Authorization required")
+
+        token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+        user_info = auth_service.verify_token(token)
+        user_id = user_info.get("id")
+
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        # Ensure user exists in MongoDB
+        await user_service.ensure_user_exists(user_id, user_info)
+
+        return await user_service.get_gemini_settings(user_id)
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        print(f"[ERROR] Failed to get Gemini settings: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/api/settings/gemini", response_model=GeminiSettingsResponse)
+async def update_gemini_settings(request: UpdateGeminiSettingsRequest, authorization: str = Header(None)):
+    """Update user's Gemini API settings."""
+    try:
+        if not authorization:
+            raise HTTPException(status_code=401, detail="Authorization required")
+
+        token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+        user_info = auth_service.verify_token(token)
+        user_id = user_info.get("id")
+
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        return await user_service.update_gemini_settings(
+            user_id,
+            api_token=request.api_token,
+            selected_model=request.selected_model
+        )
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        print(f"[ERROR] Failed to update Gemini settings: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/settings/gemini/validate", response_model=ValidateTokenResponse)
+async def validate_gemini_token(request: ValidateTokenRequest):
+    """Validate a Gemini API token."""
+    try:
+        return await user_service.validate_gemini_token(request.token)
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        print(f"[ERROR] Failed to validate Gemini token: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/settings/policies", response_model=PolicySettingsResponse)
+async def get_policy_settings(authorization: str = Header(None)):
+    """Get user's global policy settings."""
+    try:
+        if not authorization:
+            raise HTTPException(status_code=401, detail="Authorization required")
+
+        token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+        user_info = auth_service.verify_token(token)
+        user_id = user_info.get("id")
+
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        # Ensure user exists in MongoDB
+        await user_service.ensure_user_exists(user_id, user_info)
+
+        return await user_service.get_policy_settings(user_id)
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        print(f"[ERROR] Failed to get policy settings: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/api/settings/policies", response_model=PolicySettingsResponse)
+async def update_policy_settings(request: UpdatePolicySettingsRequest, authorization: str = Header(None)):
+    """Update user's global policy settings."""
+    try:
+        if not authorization:
+            raise HTTPException(status_code=401, detail="Authorization required")
+
+        token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+        user_info = auth_service.verify_token(token)
+        user_id = user_info.get("id")
+
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        return await user_service.update_policy_settings(
+            user_id,
+            auto_review_enabled=request.auto_review_enabled,
+            strict_mode_enabled=request.strict_mode_enabled,
+            email_alerts_enabled=request.email_alerts_enabled,
+            slack_integration_enabled=request.slack_integration_enabled,
+            max_review_depth=request.max_review_depth,
+            timeout_seconds=request.timeout_seconds
+        )
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        print(f"[ERROR] Failed to update policy settings: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# User Profile Endpoints
+# ============================================================================
+
+@app.get("/api/user/profile", response_model=UserResponse)
+async def get_user_profile(authorization: str = Header(None)):
+    """Get user profile information."""
+    try:
+        if not authorization:
+            raise HTTPException(status_code=401, detail="Authorization required")
+
+        token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+        user_info = auth_service.verify_token(token)
+        user_id = user_info.get("id")
+
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        # Ensure user exists in MongoDB
+        await user_service.ensure_user_exists(user_id, user_info)
+
+        return await user_service.get_user_profile(user_id)
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        print(f"[ERROR] Failed to get user profile: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/api/user/profile", response_model=UserResponse)
+async def update_user_profile(request: UpdateUserProfileRequest, authorization: str = Header(None)):
+    """Update user profile information."""
+    try:
+        if not authorization:
+            raise HTTPException(status_code=401, detail="Authorization required")
+
+        token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+        user_info = auth_service.verify_token(token)
+        user_id = user_info.get("id")
+
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        profile_updates = {}
+        if request.name:
+            profile_updates["name"] = request.name
+        if request.email:
+            profile_updates["email"] = request.email
+        if request.avatar_url:
+            profile_updates["avatar_url"] = request.avatar_url
+
+        return await user_service.update_user_profile(user_id, profile_updates)
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        print(f"[ERROR] Failed to update user profile: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Integrations Endpoints
+# ============================================================================
+
+@app.get("/api/integrations/gitlab", response_model=IntegrationStatusResponse)
+async def get_gitlab_integration_status(authorization: str = Header(None)):
+    """Get user's GitLab integration status."""
+    try:
+        if not authorization:
+            raise HTTPException(status_code=401, detail="Authorization required")
+
+        token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+        user_info = auth_service.verify_token(token)
+        user_id = user_info.get("id")
+
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        return await user_service.get_gitlab_integration_status(user_id)
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        print(f"[ERROR] Failed to get GitLab integration status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/integrations/gitlab")
+async def disconnect_gitlab_integration(authorization: str = Header(None)):
+    """Disconnect user's GitLab integration."""
+    try:
+        if not authorization:
+            raise HTTPException(status_code=401, detail="Authorization required")
+
+        token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+        user_info = auth_service.verify_token(token)
+        user_id = user_info.get("id")
+
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        return await user_service.disconnect_gitlab_integration(user_id)
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        print(f"[ERROR] Failed to disconnect GitLab integration: {e}")
         raise HTTPException(status_code=500, detail=str(e))

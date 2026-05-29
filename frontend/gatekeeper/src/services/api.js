@@ -184,11 +184,18 @@ export const api = {
     }),
 
   /**
-   * Connect a repository
+   * Get repository branches
    */
-  connectRepository: (repoId) =>
+  getRepositoryBranches: (repoId) =>
+    apiRequest(`/api/repositories/${repoId}/branches`),
+
+  /**
+   * Connect a repository with optional branch selection
+   */
+  connectRepository: (repoId, targetBranches) =>
     apiRequest(`/api/repositories/${repoId}/connect`, {
       method: "POST",
+      body: JSON.stringify({ target_branches: targetBranches }),
     }),
 
   /**
