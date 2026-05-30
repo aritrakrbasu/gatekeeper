@@ -14,6 +14,24 @@ import {
 } from "../services/queries";
 import { useDebounce } from "../hooks/useDebounce";
 
+const formatSecretOptionLabel = (value, file, branch) => {
+  if (!value) return "";
+  let displayVal = value;
+  if (value.startsWith("mongodb")) {
+    try {
+      displayVal = value.replace(/:\/\/[^:]+:[^@]+@/, "://***:***@");
+      if (displayVal.length > 30) {
+        displayVal = displayVal.substring(0, 27) + "...";
+      }
+    } catch (e) {
+      displayVal = "MongoDB URI";
+    }
+  } else {
+    displayVal = value.length > 16 ? `${value.substring(0, 6)}...${value.substring(value.length - 4)}` : value;
+  }
+  return `${displayVal} (${file}${branch ? ` on ${branch}` : ""})`;
+};
+
 const ConnectRepositoryModal = ({ isOpen, onClose, onConnect }) => {
   const [searchQuery, setSearchQuery] = useState("");
   const [connectedIds, setConnectedIds] = useState(new Set());
@@ -38,6 +56,12 @@ const ConnectRepositoryModal = ({ isOpen, onClose, onConnect }) => {
   const [isScanning, setIsScanning] = useState(false);
   const [scanResults, setScanResults] = useState(null);
   const [onboardingError, setOnboardingError] = useState(null);
+
+  // Branch-specific credentials overrides states
+  const [branchCredentials, setBranchCredentials] = useState({});
+  const [showBranchCredentials, setShowBranchCredentials] = useState({});
+  const [showBranchMongoUri, setShowBranchMongoUri] = useState({});
+  const [showBranchFivetranSecret, setShowBranchFivetranSecret] = useState({});
 
   // Debounce the search query to reduce API calls (500ms delay)
   const debouncedSearchQuery = useDebounce(searchQuery, 500);
@@ -106,6 +130,10 @@ const ConnectRepositoryModal = ({ isOpen, onClose, onConnect }) => {
     setOnboardingError(null);
     setShowMongodbUri(false);
     setShowFivetranApiSecret(false);
+    setBranchCredentials({});
+    setShowBranchCredentials({});
+    setShowBranchMongoUri({});
+    setShowBranchFivetranSecret({});
     onClose();
   };
 
@@ -147,6 +175,31 @@ const ConnectRepositoryModal = ({ isOpen, onClose, onConnect }) => {
       if (results.fivetran_api_secret) {
         setFivetranApiSecret(results.fivetran_api_secret);
       }
+
+      // Initialize branch credentials state with auto-scanned overrides
+      const initialBranchCreds = {};
+      const initialShowBranchMongo = {};
+      const initialShowBranchFivetran = {};
+      const initialCollapses = {};
+
+      selectedBranches.forEach((branch) => {
+        const scannedCreds = results.branch_credentials?.[branch] || {};
+        initialBranchCreds[branch] = {
+          mongodb_uri: scannedCreds.mongodb_uri || "",
+          fivetran_api_key: scannedCreds.fivetran_api_key || "",
+          fivetran_api_secret: scannedCreds.fivetran_api_secret || "",
+          enabled: !!(scannedCreds.mongodb_uri || scannedCreds.fivetran_api_key || scannedCreds.fivetran_api_secret),
+        };
+        initialShowBranchMongo[branch] = false;
+        initialShowBranchFivetran[branch] = false;
+        initialCollapses[branch] = !!(scannedCreds.mongodb_uri || scannedCreds.fivetran_api_key || scannedCreds.fivetran_api_secret);
+      });
+
+      setBranchCredentials(initialBranchCreds);
+      setShowBranchCredentials(initialCollapses);
+      setShowBranchMongoUri(initialShowBranchMongo);
+      setShowBranchFivetranSecret(initialShowBranchFivetran);
+
     } catch (err) {
       console.error("Auto-scan failed:", err);
       setScanResults({
@@ -175,6 +228,18 @@ const ConnectRepositoryModal = ({ isOpen, onClose, onConnect }) => {
 
     setOnboardingError(null);
     try {
+      // Filter out disabled branch credentials and only submit enabled ones
+      const cleanedBranchCreds = {};
+      Object.entries(branchCredentials).forEach(([branch, creds]) => {
+        if (creds.enabled) {
+          cleanedBranchCreds[branch] = {
+            mongodb_uri: creds.mongodb_uri,
+            fivetran_api_key: creds.fivetran_api_key,
+            fivetran_api_secret: creds.fivetran_api_secret,
+          };
+        }
+      });
+
       await onboardMutation.mutateAsync({
         repoId: selectedRepo.id,
         data: {
@@ -183,7 +248,7 @@ const ConnectRepositoryModal = ({ isOpen, onClose, onConnect }) => {
           fivetran_api_secret: fivetranApiSecret,
           encrypt_credentials: encryptCredentials,
           branches: selectedBranches,
-          branch_credentials: scanResults?.branch_credentials || {},
+          branch_credentials: cleanedBranchCreds,
         },
       });
 
@@ -909,6 +974,29 @@ const ConnectRepositoryModal = ({ isOpen, onClose, onConnect }) => {
                       )}
                     </button>
                   </div>
+                  {scanResults?.all_mongodb_uris?.length > 0 && (
+                    <div className="mt-2 flex flex-wrap gap-1.5 items-center">
+                      <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">Suggested URIs:</span>
+                      {scanResults.all_mongodb_uris.map((opt, idx) => {
+                        const isSelected = mongodbUri === opt.value;
+                        return (
+                          <button
+                            key={idx}
+                            type="button"
+                            onClick={() => setMongodbUri(opt.value)}
+                            className={`text-[10px] font-mono px-2 py-0.5 rounded border transition-all ${
+                              isSelected
+                                ? "bg-emerald-500 border-emerald-600 text-white shadow-sm font-semibold"
+                                : "bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100 hover:text-slate-800"
+                            }`}
+                            title={`${opt.value} (found in ${opt.file} on branch ${opt.branch})`}
+                          >
+                            {formatSecretOptionLabel(opt.value, opt.file, opt.branch)}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
                   <p className="text-[10px] text-slate-400 mt-1">
                     Connecting to your database enables Gatekeeper to inspect
                     schema designs, detect drifts, and recommend precise
@@ -954,6 +1042,29 @@ const ConnectRepositoryModal = ({ isOpen, onClose, onConnect }) => {
                         value={fivetranApiKey}
                         onChange={(e) => setFivetranApiKey(e.target.value)}
                       />
+                      {scanResults?.all_fivetran_keys?.length > 0 && (
+                        <div className="mt-2 flex flex-wrap gap-1.5 items-center">
+                          <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">Suggested Keys:</span>
+                          {scanResults.all_fivetran_keys.map((opt, idx) => {
+                            const isSelected = fivetranApiKey === opt.value;
+                            return (
+                              <button
+                                key={idx}
+                                type="button"
+                                onClick={() => setFivetranApiKey(opt.value)}
+                                className={`text-[10px] font-mono px-2 py-0.5 rounded border transition-all ${
+                                  isSelected
+                                    ? "bg-emerald-500 border-emerald-600 text-white shadow-sm font-semibold"
+                                    : "bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100 hover:text-slate-800"
+                                }`}
+                                title={`${opt.value} (found in ${opt.file} on branch ${opt.branch})`}
+                              >
+                                {formatSecretOptionLabel(opt.value, opt.file, opt.branch)}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
                     </div>
 
                     <div>
@@ -1024,7 +1135,381 @@ const ConnectRepositoryModal = ({ isOpen, onClose, onConnect }) => {
                           )}
                         </button>
                       </div>
+                      {scanResults?.all_fivetran_secrets?.length > 0 && (
+                        <div className="mt-2 flex flex-wrap gap-1.5 items-center">
+                          <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">Suggested Secrets:</span>
+                          {scanResults.all_fivetran_secrets.map((opt, idx) => {
+                            const isSelected = fivetranApiSecret === opt.value;
+                            return (
+                              <button
+                                key={idx}
+                                type="button"
+                                onClick={() => setFivetranApiSecret(opt.value)}
+                                className={`text-[10px] font-mono px-2 py-0.5 rounded border transition-all ${
+                                  isSelected
+                                    ? "bg-emerald-500 border-emerald-600 text-white shadow-sm font-semibold"
+                                    : "bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100 hover:text-slate-800"
+                                }`}
+                                title={`${opt.value} (found in ${opt.file} on branch ${opt.branch})`}
+                              >
+                                {formatSecretOptionLabel(opt.value, opt.file, opt.branch)}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
                     </div>
+                  </div>
+                </div>
+
+                {/* Branch-Specific Overrides Section */}
+                <div className="pt-4 border-t border-slate-100">
+                  <div className="flex items-center justify-between mb-2">
+                    <h4 className="text-xs font-bold uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
+                      <svg
+                        className="w-4 h-4 text-[#FC6D26]"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth="2"
+                          d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4"
+                        />
+                      </svg>
+                      Branch-Specific Overrides (Optional)
+                    </h4>
+                  </div>
+                  <p className="text-[11px] text-slate-500 mb-4 leading-relaxed">
+                    Configure custom connection credentials per branch if different branches connect to different environments (e.g. staging vs. production).
+                  </p>
+
+                  <div className="space-y-3">
+                    {selectedBranches.map((branch) => {
+                      const creds = branchCredentials[branch] || {
+                        mongodb_uri: "",
+                        fivetran_api_key: "",
+                        fivetran_api_secret: "",
+                        enabled: false,
+                      };
+                      const isOpen = !!showBranchCredentials[branch];
+                      
+                      return (
+                        <div
+                          key={branch}
+                          className={`border rounded-2xl overflow-hidden transition-all duration-200 ${
+                            creds.enabled
+                              ? "border-[#FC6D26]/30 bg-[#FC6D26]/5"
+                              : "border-slate-200 bg-white"
+                          }`}
+                        >
+                          {/* Accordion Header */}
+                          <div className="p-4 flex items-center justify-between gap-4 select-none">
+                            <div className="flex items-center gap-3">
+                              <input
+                                type="checkbox"
+                                checked={creds.enabled}
+                                onChange={(e) => {
+                                  setBranchCredentials((prev) => ({
+                                    ...prev,
+                                    [branch]: {
+                                      ...prev[branch],
+                                      enabled: e.target.checked,
+                                    },
+                                  }));
+                                  if (e.target.checked) {
+                                    setShowBranchCredentials((prev) => ({
+                                      ...prev,
+                                      [branch]: true,
+                                    }));
+                                  }
+                                }}
+                                className="w-4 h-4 text-[#FC6D26] focus:ring-[#FC6D26]/30 border-slate-300 rounded cursor-pointer"
+                              />
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs font-mono font-bold text-slate-800">
+                                  {branch}
+                                </span>
+                                {creds.enabled && (
+                                  <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-100 font-bold flex items-center gap-1">
+                                    <svg className="w-2.5 h-2.5 text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                    Auto-detected
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                            
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setShowBranchCredentials((prev) => ({
+                                  ...prev,
+                                  [branch]: !prev[branch],
+                                }));
+                              }}
+                              className="text-slate-400 hover:text-slate-600 p-1 rounded-full hover:bg-slate-100/50"
+                            >
+                              <svg
+                                className={`w-4 h-4 transform transition-transform duration-200 ${
+                                  isOpen ? "rotate-180" : ""
+                                }`}
+                                fill="none"
+                                viewBox="0 0 24 24"
+                                stroke="currentColor"
+                              >
+                                <path
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                  strokeWidth="2.5"
+                                  d="M19 9l-7 7-7-7"
+                                />
+                              </svg>
+                            </button>
+                          </div>
+
+                          {/* Accordion Body */}
+                          {isOpen && (
+                            <div className="p-4 border-t border-slate-100 bg-white space-y-4">
+                              {/* Branch MongoDB URI */}
+                              <div>
+                                <div className="flex items-center justify-between mb-1.5">
+                                  <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wide">
+                                    MongoDB URI Override
+                                  </label>
+                                  {scanResults?.branch_credentials?.[branch]?.mongodb_uri && (
+                                    <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-100 font-bold">
+                                      Auto-detected
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="relative">
+                                  <input
+                                    type={showBranchMongoUri[branch] ? "text" : "password"}
+                                    placeholder="mongodb://username:password@staging-db.net/db"
+                                    className="w-full pl-4 pr-12 py-2.5 bg-slate-50/50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#FC6D26]/20 focus:border-[#FC6D26] text-xs text-slate-800 font-mono focus:bg-white"
+                                    value={creds.mongodb_uri}
+                                    disabled={!creds.enabled}
+                                    onChange={(e) => {
+                                      setBranchCredentials((prev) => ({
+                                        ...prev,
+                                        [branch]: {
+                                          ...prev[branch],
+                                          mongodb_uri: e.target.value,
+                                        },
+                                      }));
+                                    }}
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setShowBranchMongoUri((prev) => ({
+                                        ...prev,
+                                        [branch]: !prev[branch],
+                                      }))
+                                    }
+                                    className="absolute right-3.5 top-1/2 transform -translate-y-1/2 text-slate-400 hover:text-slate-600 focus:outline-none transition-colors"
+                                  >
+                                    {showBranchMongoUri[branch] ? (
+                                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l18 18" />
+                                      </svg>
+                                    ) : (
+                                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                                      </svg>
+                                    )}
+                                  </button>
+                                </div>
+                                {scanResults?.branch_credentials?.[branch]?.all_mongodb_uris?.length > 0 && (
+                                  <div className="mt-2 flex flex-wrap gap-1.5 items-center">
+                                    <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">Suggested URIs:</span>
+                                    {scanResults.branch_credentials[branch].all_mongodb_uris.map((opt, idx) => {
+                                      const isSelected = creds.mongodb_uri === opt.value;
+                                      return (
+                                        <button
+                                          key={idx}
+                                          type="button"
+                                          disabled={!creds.enabled}
+                                          onClick={() => {
+                                            setBranchCredentials((prev) => ({
+                                              ...prev,
+                                              [branch]: {
+                                                ...prev[branch],
+                                                mongodb_uri: opt.value,
+                                              },
+                                            }));
+                                          }}
+                                          className={`text-[10px] font-mono px-2 py-0.5 rounded border transition-all ${
+                                            isSelected
+                                              ? "bg-emerald-500 border-emerald-600 text-white shadow-sm font-semibold"
+                                              : "bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100 hover:text-slate-800 disabled:opacity-50"
+                                          }`}
+                                          title={`${opt.value} (found in ${opt.file})`}
+                                        >
+                                          {formatSecretOptionLabel(opt.value, opt.file, null)}
+                                        </button>
+                                      );
+                                    })}
+                                  </div>
+                                )}
+                              </div>
+
+                              {/* Branch Fivetran Key & Secret */}
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                <div>
+                                  <div className="flex items-center justify-between mb-1.5">
+                                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wide">
+                                      Fivetran API Key Override
+                                    </label>
+                                    {scanResults?.branch_credentials?.[branch]?.fivetran_api_key && (
+                                      <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-100 font-bold">
+                                        Auto-detected
+                                      </span>
+                                    )}
+                                  </div>
+                                  <input
+                                    type="text"
+                                    placeholder="API Key"
+                                    className="w-full px-4 py-2.5 bg-slate-50/50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#FC6D26]/20 focus:border-[#FC6D26] text-xs text-slate-800 font-mono focus:bg-white"
+                                    value={creds.fivetran_api_key}
+                                    disabled={!creds.enabled}
+                                    onChange={(e) => {
+                                      setBranchCredentials((prev) => ({
+                                        ...prev,
+                                        [branch]: {
+                                          ...prev[branch],
+                                          fivetran_api_key: e.target.value,
+                                        },
+                                      }));
+                                    }}
+                                  />
+                                  {scanResults?.branch_credentials?.[branch]?.all_fivetran_keys?.length > 0 && (
+                                    <div className="mt-2 flex flex-wrap gap-1.5 items-center">
+                                      <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">Suggested Keys:</span>
+                                      {scanResults.branch_credentials[branch].all_fivetran_keys.map((opt, idx) => {
+                                        const isSelected = creds.fivetran_api_key === opt.value;
+                                        return (
+                                          <button
+                                            key={idx}
+                                            type="button"
+                                            disabled={!creds.enabled}
+                                            onClick={() => {
+                                              setBranchCredentials((prev) => ({
+                                                ...prev,
+                                                [branch]: {
+                                                  ...prev[branch],
+                                                  fivetran_api_key: opt.value,
+                                                },
+                                              }));
+                                            }}
+                                            className={`text-[10px] font-mono px-2 py-0.5 rounded border transition-all ${
+                                              isSelected
+                                                ? "bg-emerald-500 border-emerald-600 text-white shadow-sm font-semibold"
+                                                : "bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100 hover:text-slate-800 disabled:opacity-50"
+                                            }`}
+                                            title={`${opt.value} (found in ${opt.file})`}
+                                          >
+                                            {formatSecretOptionLabel(opt.value, opt.file, null)}
+                                          </button>
+                                        );
+                                      })}
+                                    </div>
+                                  )}
+                                </div>
+                                <div>
+                                  <div className="flex items-center justify-between mb-1.5">
+                                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wide">
+                                      Fivetran Secret Override
+                                    </label>
+                                    {scanResults?.branch_credentials?.[branch]?.fivetran_api_secret && (
+                                      <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-100 font-bold">
+                                        Auto-detected
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className="relative">
+                                    <input
+                                      type={showBranchFivetranSecret[branch] ? "text" : "password"}
+                                      placeholder="API Secret"
+                                      className="w-full pl-4 pr-12 py-2.5 bg-slate-50/50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#FC6D26]/20 focus:border-[#FC6D26] text-xs text-slate-800 font-mono focus:bg-white"
+                                      value={creds.fivetran_api_secret}
+                                      disabled={!creds.enabled}
+                                      onChange={(e) => {
+                                        setBranchCredentials((prev) => ({
+                                          ...prev,
+                                          [branch]: {
+                                            ...prev[branch],
+                                            fivetran_api_secret: e.target.value,
+                                          },
+                                        }));
+                                      }}
+                                    />
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        setShowBranchFivetranSecret((prev) => ({
+                                          ...prev,
+                                          [branch]: !prev[branch],
+                                        }))
+                                      }
+                                      className="absolute right-3.5 top-1/2 transform -translate-y-1/2 text-slate-400 hover:text-slate-600 focus:outline-none transition-colors"
+                                    >
+                                      {showBranchFivetranSecret[branch] ? (
+                                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l18 18" />
+                                        </svg>
+                                      ) : (
+                                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                                        </svg>
+                                      )}
+                                    </button>
+                                  </div>
+                                  {scanResults?.branch_credentials?.[branch]?.all_fivetran_secrets?.length > 0 && (
+                                    <div className="mt-2 flex flex-wrap gap-1.5 items-center">
+                                      <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">Suggested Secrets:</span>
+                                      {scanResults.branch_credentials[branch].all_fivetran_secrets.map((opt, idx) => {
+                                        const isSelected = creds.fivetran_api_secret === opt.value;
+                                        return (
+                                          <button
+                                            key={idx}
+                                            type="button"
+                                            disabled={!creds.enabled}
+                                            onClick={() => {
+                                              setBranchCredentials((prev) => ({
+                                                ...prev,
+                                                [branch]: {
+                                                  ...prev[branch],
+                                                  fivetran_api_secret: opt.value,
+                                                },
+                                              }));
+                                            }}
+                                            className={`text-[10px] font-mono px-2 py-0.5 rounded border transition-all ${
+                                              isSelected
+                                                ? "bg-emerald-500 border-emerald-600 text-white shadow-sm font-semibold"
+                                                : "bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100 hover:text-slate-800 disabled:opacity-50"
+                                            }`}
+                                            title={`${opt.value} (found in ${opt.file})`}
+                                          >
+                                            {formatSecretOptionLabel(opt.value, opt.file, null)}
+                                          </button>
+                                        );
+                                      })}
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
 
