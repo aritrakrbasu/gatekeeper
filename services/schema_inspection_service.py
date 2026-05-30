@@ -489,9 +489,6 @@ async def run_schema_inspection(diff_text: str, mongo_session=None, project_id: 
         )
 
     try:
-        # 1. Retrieve dynamic credentials for project
-        uri, db_name, is_encrypted = await _get_target_mongodb_uri(project_id)
-
         if not uri:
             print(f"[⚠️] No target database URI configured for project {project_id}; skipping target schema inspection.")
             return SchemaInspectionReport(

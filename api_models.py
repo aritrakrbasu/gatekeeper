@@ -367,6 +367,9 @@ class ScanRepositoryResponse(BaseModel):
     fivetran_api_secret: Optional[str] = None
     detected_in_files: List[str] = []
     branch_credentials: Optional[dict] = None
+    all_mongodb_uris: Optional[List[dict]] = Field(default_factory=list)
+    all_fivetran_keys: Optional[List[dict]] = Field(default_factory=list)
+    all_fivetran_secrets: Optional[List[dict]] = Field(default_factory=list)
 
 
 class OnboardRepositoryRequest(BaseModel):
@@ -386,6 +389,8 @@ class UpdateRepositoryRequest(BaseModel):
     fivetran_api_key: Optional[str] = None
     fivetran_api_secret: Optional[str] = None
     encrypt_credentials: bool = True
+    branches: Optional[List[str]] = Field(default_factory=list, description="Branches to activate Gatekeeper for")
+    branch_credentials: Optional[dict] = None
 
 
 class UpdateRepositoryResponse(BaseModel):

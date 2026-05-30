@@ -1799,12 +1799,15 @@ def is_config_file(filepath: str) -> bool:
         
     # 2. Match standard configuration filenames exactly
     config_filenames = {
-        "config.js", "config.py", "config.json", "config.ts",
-        "settings.py", "settings.json",
-        "database.js", "database.py", "database.ts", "db.js", "db.py", "db.ts",
+        "config.js", "config.py", "config.json", "config.ts", "config.yml", "config.yaml", "config.toml", "config.ini", "config.conf",
+        "settings.py", "settings.json", "settings.yml", "settings.yaml", "settings.toml", "settings.ini", "settings.conf",
+        "database.js", "database.py", "database.ts", "database.yml", "database.yaml", "database.toml", "database.ini", "database.conf",
+        "db.js", "db.py", "db.ts", "db.yml", "db.yaml", "db.toml", "db.ini", "db.conf",
         "docker-compose.yml", "docker-compose.yaml",
         "application.properties", "application.yml", "application.yaml",
-        "package.json", "poetry.lock", "pipfile", "gemfile"
+        "package.json", "poetry.lock", "pipfile", "gemfile",
+        "secrets.json", "secrets.toml", "secrets.yaml", "secrets.yml",
+        "credentials.json", "credentials.toml", "credentials.yaml", "credentials.yml"
     }
     if filename in config_filenames:
         return True
@@ -1892,11 +1895,15 @@ async def scan_repository(user_id: str, repo_id: str, branches: Optional[List[st
     detected_fivetran_key = None
     detected_fivetran_secret = None
     detected_files = []
-    scanned_file_signatures = set()  # To avoid scanning identical file contents across branches
     branch_credentials = {}
+
+    all_mongodb_uris = []
+    all_fivetran_keys = []
+    all_fivetran_secrets = []
 
     # 3. Scan across branches
     for branch in branches:
+        scanned_file_signatures = set()  # Reset per branch to avoid scanning identical file contents within the same branch
         files_to_scan = []
         try:
             page_token = None
@@ -1948,9 +1955,9 @@ async def scan_repository(user_id: str, repo_id: str, branches: Optional[List[st
         # Deduplicate and limit to 5 config files per branch
         files_to_scan = list(dict.fromkeys(files_to_scan))[:5]
         
-        branch_mongodb_uri = None
-        branch_fivetran_key = None
-        branch_fivetran_secret = None
+        branch_all_mongodb_uris = []
+        branch_all_fivetran_keys = []
+        branch_all_fivetran_secrets = []
 
         for file_path in files_to_scan:
             content = await _get_file_content_from_gitlab(gitlab_session, repo_id, file_path, branch)
@@ -1967,32 +1974,66 @@ async def scan_repository(user_id: str, repo_id: str, branches: Optional[List[st
             file_matched = False
 
             # 1. Match MongoDB URI
-            mongo_match = mongo_uri_pattern.search(content)
-            if mongo_match and not branch_mongodb_uri:
-                branch_mongodb_uri = mongo_match.group(0)
-                file_matched = True
+            for match in mongo_uri_pattern.finditer(content):
+                val = match.group(0)
+                if not any(item["value"] == val for item in branch_all_mongodb_uris):
+                    branch_all_mongodb_uris.append({"value": val, "file": file_path})
+                    file_matched = True
 
             # 2. Match Fivetran key
-            key_match = fivetran_key_pattern.search(content)
-            if key_match and not branch_fivetran_key:
-                branch_fivetran_key = key_match.group(1)
-                file_matched = True
+            for match in fivetran_key_pattern.finditer(content):
+                val = match.group(1)
+                if not any(item["value"] == val for item in branch_all_fivetran_keys):
+                    branch_all_fivetran_keys.append({"value": val, "file": file_path})
+                    file_matched = True
 
             # 3. Match Fivetran secret
-            secret_match = fivetran_secret_pattern.search(content)
-            if secret_match and not branch_fivetran_secret:
-                branch_fivetran_secret = secret_match.group(1)
-                file_matched = True
+            for match in fivetran_secret_pattern.finditer(content):
+                val = match.group(1)
+                if not any(item["value"] == val for item in branch_all_fivetran_secrets):
+                    branch_all_fivetran_secrets.append({"value": val, "file": file_path})
+                    file_matched = True
 
             if file_matched:
                 detected_files.append(f"{file_path} ({branch})")
 
+        # Select first detected as fallback
+        branch_mongodb_uri = branch_all_mongodb_uris[0]["value"] if branch_all_mongodb_uris else None
+        branch_fivetran_key = branch_all_fivetran_keys[0]["value"] if branch_all_fivetran_keys else None
+        branch_fivetran_secret = branch_all_fivetran_secrets[0]["value"] if branch_all_fivetran_secrets else None
+
+        # Propagate branch scanned options to global list
+        for item in branch_all_mongodb_uris:
+            if not any(x["value"] == item["value"] for x in all_mongodb_uris):
+                all_mongodb_uris.append({
+                    "value": item["value"],
+                    "file": item["file"],
+                    "branch": branch
+                })
+        for item in branch_all_fivetran_keys:
+            if not any(x["value"] == item["value"] for x in all_fivetran_keys):
+                all_fivetran_keys.append({
+                    "value": item["value"],
+                    "file": item["file"],
+                    "branch": branch
+                })
+        for item in branch_all_fivetran_secrets:
+            if not any(x["value"] == item["value"] for x in all_fivetran_secrets):
+                all_fivetran_secrets.append({
+                    "value": item["value"],
+                    "file": item["file"],
+                    "branch": branch
+                })
+
         # Save branch credentials if any were found
-        if branch_mongodb_uri or branch_fivetran_key or branch_fivetran_secret:
+        if branch_all_mongodb_uris or branch_all_fivetran_keys or branch_all_fivetran_secrets:
             branch_credentials[branch] = {
                 "mongodb_uri": branch_mongodb_uri,
                 "fivetran_api_key": branch_fivetran_key,
-                "fivetran_api_secret": branch_fivetran_secret
+                "fivetran_api_secret": branch_fivetran_secret,
+                "all_mongodb_uris": branch_all_mongodb_uris,
+                "all_fivetran_keys": branch_all_fivetran_keys,
+                "all_fivetran_secrets": branch_all_fivetran_secrets
             }
             # Fallback/first-match compatibility
             if not detected_mongodb_uri:
@@ -2007,7 +2048,10 @@ async def scan_repository(user_id: str, repo_id: str, branches: Optional[List[st
         "fivetran_api_key": detected_fivetran_key,
         "fivetran_api_secret": detected_fivetran_secret,
         "detected_in_files": detected_files,
-        "branch_credentials": branch_credentials
+        "branch_credentials": branch_credentials,
+        "all_mongodb_uris": all_mongodb_uris,
+        "all_fivetran_keys": all_fivetran_keys,
+        "all_fivetran_secrets": all_fivetran_secrets
     }
 
 
@@ -2158,6 +2202,8 @@ async def update_repository_credentials(repo_id: str, data: Dict) -> Dict:
     fivetran_api_key = data.get("fivetran_api_key")
     fivetran_api_secret = data.get("fivetran_api_secret")
     encrypt_credentials = data.get("encrypt_credentials", True)
+    branches = data.get("branches")
+    branch_credentials = data.get("branch_credentials")
 
     # 2. Verify repository exists in MongoDB
     if not MONGO_CONNECTION_STRING:
@@ -2178,14 +2224,37 @@ async def update_repository_credentials(repo_id: str, data: Dict) -> Dict:
         )
 
     # 3. Perform encryption if requested
+    from services.encryption_service import encrypt_value
     if encrypt_credentials:
-        from services.encryption_service import encrypt_value
         if mongodb_uri:
             mongodb_uri = encrypt_value(mongodb_uri)
         if fivetran_api_key:
             fivetran_api_key = encrypt_value(fivetran_api_key)
         if fivetran_api_secret:
             fivetran_api_secret = encrypt_value(fivetran_api_secret)
+        if branch_credentials:
+            encrypted_branch_creds = {}
+            for br, creds in branch_credentials.items():
+                if not creds:
+                    continue
+                encrypted_branch_creds[br] = {
+                    "mongodb_uri": encrypt_value(creds.get("mongodb_uri")) if creds.get("mongodb_uri") else None,
+                    "fivetran_api_key": encrypt_value(creds.get("fivetran_api_key")) if creds.get("fivetran_api_key") else None,
+                    "fivetran_api_secret": encrypt_value(creds.get("fivetran_api_secret")) if creds.get("fivetran_api_secret") else None,
+                }
+            branch_credentials = encrypted_branch_creds
+    else:
+        if branch_credentials:
+            unencrypted_branch_creds = {}
+            for br, creds in branch_credentials.items():
+                if not creds:
+                    continue
+                unencrypted_branch_creds[br] = {
+                    "mongodb_uri": creds.get("mongodb_uri"),
+                    "fivetran_api_key": creds.get("fivetran_api_key"),
+                    "fivetran_api_secret": creds.get("fivetran_api_secret"),
+                }
+            branch_credentials = unencrypted_branch_creds
 
     # 4. Prepare update data - only include provided fields
     update_data = {}
@@ -2195,6 +2264,10 @@ async def update_repository_credentials(repo_id: str, data: Dict) -> Dict:
         update_data["fivetran_api_key"] = fivetran_api_key
     if fivetran_api_secret is not None:
         update_data["fivetran_api_secret"] = fivetran_api_secret
+    if branches is not None:
+        update_data["target_branches"] = branches
+    if branch_credentials is not None:
+        update_data["branch_credentials"] = branch_credentials
 
     # Always set encryption flag
     update_data["credentials_encrypted"] = encrypt_credentials
