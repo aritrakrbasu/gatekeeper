@@ -11,6 +11,7 @@ from mcp.types import Implementation
 mongo_session = None
 gitlab_session = None
 nexus_session = None
+fivetran_session = None
 mcp_ready = False  # Track when MCP sessions are ready
 
 # Detect the correct GitNexus command for the platform
@@ -26,7 +27,7 @@ else:
 
 async def boot_mcp_bridge():
     """Spins up and maintains persistent stdio pipes to MongoDB, GitLab, and GitNexus MCP servers"""
-    global mongo_session, gitlab_session, nexus_session, mcp_ready
+    global mongo_session, gitlab_session, nexus_session, fivetran_session, mcp_ready
 
     # Detect platform and configure paths dynamically
     is_windows = platform.system() == "Windows"
@@ -108,6 +109,11 @@ async def boot_mcp_bridge():
     nexus_params = StdioServerParameters(
         command=npx_cmd,
         args=["-y", "gitnexus@latest", "mcp"],
+        env={**os.environ}
+    )
+    fivetran_params = StdioServerParameters(
+        command=npx_cmd,
+        args=["-y", "fivetran-mcp"],
         env={**os.environ}
     )
 
@@ -253,6 +259,23 @@ async def boot_mcp_bridge():
                                 else:
                                     print("[ℹ️] Standard analysis available (MongoDB + GitLab + Built-in Impact)")
 
+                                if os.getenv("FIVETRAN_MCP_ENABLED", "false").lower() == "true":
+                                    print("[*] Attempting optional Fivetran MCP initialization...")
+                                    try:
+                                        async with stdio_client(fivetran_params) as (f_read, f_write):
+                                            async with ClientSession(
+                                                f_read,
+                                                f_write,
+                                                client_info=Implementation(name="gk-fivetran", version="1.0.0")
+                                            ) as f_sess:
+                                                await asyncio.wait_for(f_sess.initialize(), timeout=10.0)
+                                                fivetran_session = f_sess
+                                                print("[✅] Fivetran MCP initialized")
+                                                await asyncio.sleep(float('inf'))
+                                    except Exception as fivetran_err:
+                                        print(f"[ℹ️] Fivetran MCP unavailable, using REST fallback: {fivetran_err}")
+                                        fivetran_session = None
+
                                 # Keep the background process streams alive indefinitely
                                 try:
                                     await asyncio.sleep(float('inf'))
@@ -321,6 +344,23 @@ async def boot_mcp_bridge():
 
                         print("[+] MCP Bridge fully initialized!")
                         print("[ℹ️] Standard analysis available (MongoDB + GitLab + Built-in Impact)")
+
+                        if os.getenv("FIVETRAN_MCP_ENABLED", "false").lower() == "true":
+                            print("[*] Attempting optional Fivetran MCP initialization...")
+                            try:
+                                async with stdio_client(fivetran_params) as (f_read, f_write):
+                                    async with ClientSession(
+                                        f_read,
+                                        f_write,
+                                        client_info=Implementation(name="gk-fivetran", version="1.0.0")
+                                    ) as f_sess:
+                                        await asyncio.wait_for(f_sess.initialize(), timeout=10.0)
+                                        fivetran_session = f_sess
+                                        print("[✅] Fivetran MCP initialized")
+                                        await asyncio.sleep(float('inf'))
+                            except Exception as fivetran_err:
+                                print(f"[ℹ️] Fivetran MCP unavailable, using REST fallback: {fivetran_err}")
+                                fivetran_session = None
 
                         # Keep alive
                         try:

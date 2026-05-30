@@ -1,0 +1,30 @@
+{
+  "example_repository": {
+    "project_id": "12345678",
+    "gitlab_url": "https://gitlab.com/your-org/your-project",
+    "branch": "main",
+    "private_token": null,
+    "auto_update": true
+  },
+  "rapid-agents-test": {
+    "project_id": "rapid-agents-test",
+    "gitlab_url": "https://gitlab.com/Swapnendu003/rapid-agents-test",
+    "branch": "main",
+    "private_token": null,
+    "auto_update": true
+  },
+  "82576405": {
+    "project_id": "82576405",
+    "gitlab_url": "https://gitlab.com/Swapnendu003/rapid-agents-test.git",
+    "branch": "main",
+    "private_token": null,
+    "auto_update": true
+  },
+  "gatekeeper-test": {
+    "project_id": "gatekeeper-test",
+    "gitlab_url": "https://gitlab.com/sagnikmis.datta/gatekeeper-test.git",
+    "branch": "main",
+    "private_token": null,
+    "auto_update": true
+  }
+}

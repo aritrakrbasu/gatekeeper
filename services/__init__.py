@@ -6,7 +6,8 @@ from services import (
     auth_service,
     repository_service,
     mongo_client,
-    user_service
+    user_service,
+    fivetran_service
 )
 
 __all__ = [
@@ -15,5 +16,6 @@ __all__ = [
     "auth_service",
     "repository_service",
     "mongo_client",
-    "user_service"
+    "user_service",
+    "fivetran_service"
 ]

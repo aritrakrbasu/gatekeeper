@@ -17,7 +17,7 @@ from impact_analysis import (
 from repo_manager import get_repo_manager
 
 # Service Imports
-from services import mcp_service, repository_service, user_service
+from services import mcp_service, repository_service, user_service, fivetran_service
 from services.gemini_service import run_gemini_review, run_gemini_fix_analysis
 from services.remediation_service import apply_auto_fixes
 
@@ -540,20 +540,19 @@ This may take 30-60 seconds depending on the size of the changes.
 
             schema_report = None
             schema_markdown = None
+            fivetran_markdown = None
             try:
                 from services.schema_inspection_service import run_schema_inspection, format_schema_report_to_markdown
                 schema_report = await run_schema_inspection(raw_diff_content, mcp_service.mongo_session, project_id=project_id, target_branch=target_branch)
                 if schema_report:
                     print(f"[+] Schema inspection complete. Found {len(schema_report.collections)} collections. Confidence: {schema_report.confidence}")
                     await add_log("schema_check", f"✅ Schema analysis complete - {len(schema_report.collections)} collections examined", "completed")
-                else:
-                    await add_log("schema_check", "ℹ️ No database schema changes detected", "completed")
-                    
+
                     # 1. Format and attach schema_report summary to raw_diff_content passed to run_gemini_review
                     schema_markdown = format_schema_report_to_markdown(schema_report)
                     if schema_markdown:
                         raw_diff_content += f"\n\n{schema_markdown}"
-                        
+
                     # 2. Log schema_report to MongoDB collection "schema_snapshots"
                     if mcp_service.mongo_session:
                         delta_list = []
@@ -568,7 +567,7 @@ This may take 30-60 seconds depending on the size of the changes.
                                 })
                         else:
                             delta_list = None
-                            
+
                         schema_dict = {
                             "inspected_at": schema_report.inspected_at.isoformat() if schema_report.inspected_at else None,
                             "triggered_by_files": schema_report.triggered_by_files,
@@ -586,7 +585,7 @@ This may take 30-60 seconds depending on the size of the changes.
                                 } for col in schema_report.collections
                             ]
                         }
-                        
+
                         from datetime import datetime, timezone
                         await mcp_service.mongo_session.call_tool(
                             name="insert-many",
@@ -603,9 +602,31 @@ This may take 30-60 seconds depending on the size of the changes.
                             }
                         )
                         print("[+] Schema snapshot logged to MongoDB collection: schema_snapshots")
+
+                    # 3. Fivetran impact analysis runs only when schema delta has changes.
+                    if schema_report.delta and schema_report.delta.has_changes:
+                        await add_log("fivetran_check", "🔗 Analyzing Fivetran connector impact", "running")
+                        fivetran_report = await fivetran_service.analyze_schema_impact(
+                            project_id=str(project_id),
+                            mr_iid=int(mr_iid),
+                            schema_delta=schema_report.delta,
+                            target_branch=target_branch,
+                        )
+                        fivetran_markdown = fivetran_service.format_impact_report_markdown(fivetran_report)
+                        await add_log(
+                            "fivetran_check",
+                            f"✅ Fivetran analysis complete - status: {fivetran_report.get('status', 'unknown')}",
+                            "completed",
+                        )
+                    else:
+                        await add_log("fivetran_check", "ℹ️ No schema delta changes; Fivetran impact skipped", "completed")
+                else:
+                    await add_log("schema_check", "ℹ️ No database schema changes detected", "completed")
+                    await add_log("fivetran_check", "ℹ️ No schema report available; Fivetran impact skipped", "completed")
             except Exception as schema_err:
                 print(f"[⚠️] Schema inspection failed (continuing anyway): {schema_err}")
                 await add_log("schema_check", "⚠️ Schema check encountered an error, continuing analysis", "completed")
+                await add_log("fivetran_check", "⚠️ Fivetran impact skipped due to schema check error", "completed")
 
             # --- 🧠 THE GEMINI COGNITIVE CORE ENGINE ---
             print("[*] Step 4: Shipping code diff to Gemini Pro Core for automated security review...")
@@ -660,6 +681,8 @@ This may take 30-60 seconds depending on the size of the changes.
             final_report = f"""### 🛡️ The Gatekeeper Security Audit
 
 {audit_report}
+
+{fivetran_markdown or ""}
 
 ---
 *✅ Review completed at {time.strftime('%Y-%m-%d %H:%M:%S UTC')}*"""

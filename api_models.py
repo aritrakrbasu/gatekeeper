@@ -401,3 +401,18 @@ class UpdateRepositoryResponse(BaseModel):
     fivetran_secret_configured: bool
     credentials_encrypted: bool
 
+
+class FivetranActionRequest(BaseModel):
+    """Request to execute selected Fivetran actions."""
+    actions: List[dict] = Field(default_factory=list)
+    target_branch: Optional[str] = None
+
+
+class FivetranActionResponse(BaseModel):
+    """Response after Fivetran action execution."""
+    status: str
+    executed_actions: List[dict] = Field(default_factory=list)
+    failed_actions: List[dict] = Field(default_factory=list)
+    error: Optional[str] = None
+    executed_at: Optional[str] = None
+

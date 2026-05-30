@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Import Gatekeeper Services
-from services import mcp_service, review_service, auth_service, repository_service, mongo_client, user_service
+from services import mcp_service, review_service, auth_service, repository_service, mongo_client, user_service, fivetran_service
 from api_models import (
     OAuthCallbackRequest, TokenResponse, UserResponse,
     VerifyTokenRequest, VerifyTokenResponse, LogoutResponse,
@@ -16,7 +16,8 @@ from api_models import (
     OnboardRepositoryRequest, UpdateRepositoryRequest, UpdateRepositoryResponse,
     GeminiSettingsResponse, ValidateTokenRequest, ValidateTokenResponse,
     PolicySettingsResponse, UpdateGeminiSettingsRequest, UpdatePolicySettingsRequest,
-    UpdateUserProfileRequest, IntegrationStatusResponse
+    UpdateUserProfileRequest, IntegrationStatusResponse,
+    FivetranActionRequest, FivetranActionResponse
 )
 
 app = FastAPI(title="The Gatekeeper Gemini Orchestrator")
@@ -122,7 +123,8 @@ async def health_check():
         "mcp_ready": mcp_service.mcp_ready,
         "mongo_connected": mcp_service.mongo_session is not None,
         "gitlab_connected": mcp_service.gitlab_session is not None,
-        "nexus_connected": mcp_service.nexus_session is not None
+        "nexus_connected": mcp_service.nexus_session is not None,
+        "fivetran_connected": mcp_service.fivetran_session is not None
     }
 
 
@@ -624,6 +626,41 @@ async def disconnect_repository(repo_id: str, authorization: str = Header(None))
         raise e
     except Exception as e:
         print(f"[ERROR] Failed to disconnect repository: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/repositories/{repo_id}/mrs/{mr_iid}/fivetran/actions/execute", response_model=FivetranActionResponse)
+async def execute_fivetran_actions(
+    repo_id: str,
+    mr_iid: int,
+    request: FivetranActionRequest,
+    authorization: str = Header(None)
+):
+    """Execute selected Fivetran recovery actions for a merge request."""
+    try:
+        if not authorization:
+            raise HTTPException(status_code=401, detail="Authorization required")
+
+        token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+        user_info = auth_service.verify_token(token)
+        user_id = user_info.get("id")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        # Ensures repository exists and belongs to current context.
+        await repository_service.get_repository(repo_id)
+
+        result = await fivetran_service.execute_actions(
+            project_id=repo_id,
+            mr_iid=mr_iid,
+            actions=request.actions,
+            target_branch=request.target_branch,
+        )
+        return FivetranActionResponse(**result)
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        print(f"[ERROR] Failed to execute Fivetran actions: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
