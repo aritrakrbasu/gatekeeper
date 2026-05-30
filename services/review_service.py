@@ -71,11 +71,11 @@ async def should_process_webhook(repo_id: str, target_branch: str) -> bool:
         should_process = target_branch in target_branches
 
         if not should_process:
-            print(f"[ℹ️] Skipping MR for branch '{target_branch}' - not in monitored branches: {target_branches}")
+            print(f"[INFO] Skipping MR for branch '{target_branch}' - not in monitored branches: {target_branches}")
 
         return should_process
     except Exception as e:
-        print(f"[⚠️] Failed to check target branches, processing anyway: {e}")
+        print(f"[WARN] Failed to check target branches, processing anyway: {e}")
         return True  # Default to processing on error
 
 
@@ -110,7 +110,7 @@ async def orchestrate_review(payload: dict) -> dict:
                 status=status
             )
         except Exception as log_err:
-            print(f"[⚠️] Failed to add progress log: {log_err}")
+            print(f"[WARN] Failed to add progress log: {log_err}")
     state = object_attrs.get("state")
 
     if state != "opened":
@@ -124,6 +124,8 @@ async def orchestrate_review(payload: dict) -> dict:
     mr_iid = object_attrs.get("iid")
     mr_internal_id = object_attrs.get("id")
     author = payload.get("user", {}).get("username", "unknown")
+    # Extract user_id from webhook payload for billing attribution
+    user_id = payload.get("user", {}).get("id")
     web_url = object_attrs.get("url", "")
     created_at = object_attrs.get("created_at", "")
     updated_at = object_attrs.get("updated_at", "")
@@ -230,10 +232,10 @@ async def orchestrate_review(payload: dict) -> dict:
 
         # Add initial log
         await add_log("received", "Merge request received and queued for analysis", "completed")
-        print(f"[✅] MR {mr_iid} stored in MongoDB with changes data")
+        print(f"[OK] MR {mr_iid} stored in MongoDB with changes data")
 
     except Exception as e:
-        print(f"[⚠️] Failed to store MR in MongoDB: {e}")
+        print(f"[WARN] Failed to store MR in MongoDB: {e}")
         # Continue with review even if storage fails
 
     # Get commit SHA for status updates
@@ -244,19 +246,19 @@ async def orchestrate_review(payload: dict) -> dict:
         None
     )
 
-    print(f"[+] Webhook caught MR !{mr_iid} on Project {project_id}")
-    print(f"[+] Commit SHA: {commit_sha}")
-    print(f"[+] Starting Gatekeeper analysis pipeline...")
+    print(f"[OK] Webhook caught MR !{mr_iid} on Project {project_id}")
+    print(f"[OK] Commit SHA: {commit_sha}")
+    print(f"[OK] Starting Gatekeeper analysis pipeline...")
 
     if not commit_sha:
-        print("[⚠️] Warning: No commit SHA found in webhook!")
+        print("[WARN] Warning: No commit SHA found in webhook!")
         print(f"[DEBUG] object_attrs keys: {list(object_attrs.keys())}")
         print(f"[DEBUG] last_commit: {object_attrs.get('last_commit')}")
 
         # Fallback: Try to get the MR details from GitLab MCP to find the commit SHA
         if gitlab_session:
             try:
-                print("[*] Fetching MR details from GitLab to get commit SHA...")
+                print("[INFO] Fetching MR details from GitLab to get commit SHA...")
                 mr_details = await gitlab_session.call_tool(
                     name="get_merge_request",
                     arguments={
@@ -268,7 +270,7 @@ async def orchestrate_review(payload: dict) -> dict:
                 if hasattr(mr_details, 'content'):
                     print(f"[DEBUG] MR details content preview: {str(mr_details.content)[:300]}...")
             except Exception as e:
-                print(f"[x] Failed to fetch MR details: {e}")
+                print(f"[ERROR] Failed to fetch MR details: {e}")
 
     # 🔒 Skip audit for Gatekeeper auto-generated branches to prevent infinite loops
     if source_branch.startswith("gatekeeper/"):
@@ -286,22 +288,22 @@ async def orchestrate_review(payload: dict) -> dict:
                     "documents": [{"title": mr_title, "project_id": project_id, "mr_iid": mr_iid, "status": "gemini_auditing"}]
                 }
             )
-            print("[+] Metadata logged to local MongoDB cluster.")
+            print("[OK] Metadata logged to local MongoDB cluster.")
         except Exception as e:
-            print(f"[x] DB Log failed: {e}")
+            print(f"[ERROR] DB Log failed: {e}")
     else:
-        print("[⚠️] MongoDB session not available - skipping DB log")
+        print("[WARN] MongoDB session not available - skipping DB log")
 
     # 2. Prepare Repository for GitNexus (Option 2 → Option 1)
-    print("[*] ===== PREPARING REPOSITORY FOR ANALYSIS =====")
+    print("[INFO] ===== PREPARING REPOSITORY FOR ANALYSIS =====")
     repo_manager = get_repo_manager()
     repo_local_path = None
 
     gitlab_token = os.getenv("GITLAB_PERSONAL_ACCESS_TOKEN")
     if gitlab_token:
-        print(f"[✅] GitLab token found (length: {len(gitlab_token)})")
+        print(f"[OK] GitLab token found (length: {len(gitlab_token)})")
     else:
-        print("[⚠️] GitLab token NOT found in environment!")
+        print("[WARN] GitLab token NOT found in environment!")
 
     # Try to get project URL from GitLab
     gitlab_url = None
@@ -314,12 +316,12 @@ async def orchestrate_review(payload: dict) -> dict:
             project_data = json.loads(project_result.content[0].text)
             gitlab_url = project_data.get("http_url_to_repo")
     except Exception as e:
-        print(f"[⚠️] Could not fetch project URL: {e}")
+        print(f"[WARN] Could not fetch project URL: {e}")
 
     # Ensure repository is ready (Option 2: Pre-indexed → Option 1: Auto-index)
     if gitlab_url:
-        print(f"[*] Ensuring repository {project_id} is ready...")
-        print("[ℹ️] Checking for pre-indexed repository (Option 2)...")
+        print(f"[INFO] Ensuring repository {project_id} is ready...")
+        print("[INFO] Checking for pre-indexed repository (Option 2)...")
 
         try:
             repo_local_path = await repo_manager.ensure_repository_ready(
@@ -330,17 +332,17 @@ async def orchestrate_review(payload: dict) -> dict:
             )
 
             if repo_local_path:
-                print(f"[✅] Repository ready at: {repo_local_path}")
+                print(f"[OK] Repository ready at: {repo_local_path}")
             else:
-                print("[⚠️] Repository preparation failed - using fallback analysis")
+                print("[WARN] Repository preparation failed - using fallback analysis")
         except Exception as repo_err:
-            print(f"[⚠️] Repository preparation error: {repo_err}")
-            print("[ℹ️] Impact analysis will use built-in AST-based analysis")
+            print(f"[WARN] Repository preparation error: {repo_err}")
+            print("[INFO] Impact analysis will use built-in AST-based analysis")
     else:
-        print("[⚠️] No repository URL available - skipping GitNexus integration")
+        print("[WARN] No repository URL available - skipping GitNexus integration")
 
     # 3. Extract Comprehensive Diffs via GitLab MCP and Process using Gemini
-    print("[*] ===== STARTING GATEKEEPER ANALYSIS PIPELINE =====")
+    print("[INFO] ===== STARTING GATEKEEPER ANALYSIS PIPELINE =====")
 
     # Update status to "reviewing"
     try:
@@ -350,18 +352,18 @@ async def orchestrate_review(payload: dict) -> dict:
             analysis_data={"status": "reviewing", "analysis_status": "in_progress"}
         )
         await add_log("starting", "🚀 Starting Gatekeeper security analysis", "completed")
-        print(f"[✅] Updated MR {mr_iid} status to 'reviewing'")
+        print(f"[OK] Updated MR {mr_iid} status to 'reviewing'")
     except Exception as status_err:
-        print(f"[⚠️] Failed to update MR status to 'reviewing': {status_err}")
+        print(f"[WARN] Failed to update MR status to 'reviewing': {status_err}")
 
-    print("[*] Step 1: Posting loading indicator to MR...")
+    print("[INFO] Step 1: Posting loading indicator to MR...")
     await add_log("fetching", "📡 Fetching merge request details and code changes", "running")
 
     if gitlab_session:
         loading_note_id = None
         try:
             # 🔄 Post a loading comment (will be updated with results)
-            print("[*] Posting loading indicator to MR...")
+            print("[INFO] Posting loading indicator to MR...")
             loading_note = await gitlab_session.call_tool(
                 name="create_merge_request_note",
                 arguments={
@@ -384,15 +386,15 @@ This may take 30-60 seconds depending on the size of the changes.
                     note_data = json.loads(text_content)
                     loading_note_id = note_data.get("id")
                     if loading_note_id:
-                        print(f"[+] Loading indicator posted! Note ID: {loading_note_id}")
+                        print(f"[OK] Loading indicator posted! Note ID: {loading_note_id}")
                     else:
-                        print("[+] Loading indicator posted! (No ID in response)")
+                        print("[OK] Loading indicator posted! (No ID in response)")
                 except json.JSONDecodeError:
-                    print("[+] Loading indicator posted! (Could not parse JSON)")
+                    print("[OK] Loading indicator posted! (Could not parse JSON)")
             else:
-                print("[+] Loading indicator posted!")
+                print("[OK] Loading indicator posted!")
 
-            print("[*] Step 2: Fetching comprehensive MR diff text via GitLab MCP...")
+            print("[INFO] Step 2: Fetching comprehensive MR diff text via GitLab MCP...")
 
             # Using list_merge_request_diffs to pull actual raw line changes
             changes = await gitlab_session.call_tool(
@@ -429,17 +431,17 @@ This may take 30-60 seconds depending on the size of the changes.
             if not raw_diff_content:
                 raw_diff_content = str(changes.content)
 
-            print(f"[✅] Step 2 complete: Raw code diffs retrieved ({len(raw_diff_content)} chars)")
+            print(f"[OK] Step 2 complete: Raw code diffs retrieved ({len(raw_diff_content)} chars)")
 
             if raw_diff_content:
                 print(f"[DEBUG] Diff preview: {raw_diff_content[:500]}")
                 await add_log("diff_fetched", f"📥 Retrieved {len(raw_diff_content)} characters of code changes", "completed")
             else:
-                print("[⚠️] WARNING: Diff content is empty!")
+                print("[WARN] WARNING: Diff content is empty!")
                 await add_log("diff_fetched", "⚠️ No code changes found in this merge request", "completed")
 
             # --- 🎯 PRE-REVIEW IMPACT ANALYSIS ---
-            print("[*] Step 3: Running pre-review impact analysis to identify affected code...")
+            print("[INFO] Step 3: Running pre-review impact analysis to identify affected code...")
             await add_log("semantic_analysis", "🔍 Analyzing semantic changes and affected code areas", "running")
 
             impact_report = None
@@ -474,7 +476,7 @@ This may take 30-60 seconds depending on the size of the changes.
 
                 calculated_files_changed = len(changed_files)
 
-                print(f"[ℹ️] Calculated changes from diff: +{calculated_additions} -{calculated_deletions} ({calculated_files_changed} files)")
+                print(f"[INFO] Calculated changes from diff: +{calculated_additions} -{calculated_deletions} ({calculated_files_changed} files)")
 
                 # Update the MR in MongoDB with the calculated stats
                 if calculated_additions > 0 or calculated_deletions > 0 or calculated_files_changed > 0:
@@ -490,11 +492,11 @@ This may take 30-60 seconds depending on the size of the changes.
                                 }
                             }
                         )
-                        print(f"[✅] Updated MR {mr_iid} with calculated diff stats")
+                        print(f"[OK] Updated MR {mr_iid} with calculated diff stats")
                     except Exception as stats_err:
-                        print(f"[⚠️] Failed to update MR stats: {stats_err}")
+                        print(f"[WARN] Failed to update MR stats: {stats_err}")
 
-                print(f"[ℹ️] Identified {len(changed_files)} changed files for impact analysis")
+                print(f"[INFO] Identified {len(changed_files)} changed files for impact analysis")
 
                 impact_report, impact_context = await run_pre_review_analysis(
                     project_id=str(project_id),
@@ -506,7 +508,7 @@ This may take 30-60 seconds depending on the size of the changes.
                     nexus_session=nexus_session
                 )
 
-                print(f"[✅] Step 3 complete: Impact analysis found {len(impact_report.findings)} findings")
+                print(f"[OK] Step 3 complete: Impact analysis found {len(impact_report.findings)} findings")
 
                 if impact_report.findings:
                     impact_summary = impact_report.to_markdown()
@@ -522,20 +524,20 @@ This may take 30-60 seconds depending on the size of the changes.
 *This analysis helps identify potential ripple effects from the proposed changes.*"""
                         }
                     )
-                    print("[+] Impact analysis posted to MR")
+                    print("[OK] Impact analysis posted to MR")
 
             except asyncio.TimeoutError:
                 print("[⏱️] Parser timeout after 10s - using fallback file extraction")
                 import re
                 changed_files = re.findall(r'diff --git a/(.+?) b/', raw_diff_content)
-                print(f"[ℹ️] Fallback extracted {len(changed_files)} files: {changed_files}")
+                print(f"[INFO] Fallback extracted {len(changed_files)} files: {changed_files}")
                 impact_context = ""
             except Exception as impact_err:
-                print(f"[⚠️] Impact analysis failed (continuing anyway): {impact_err}")
+                print(f"[WARN] Impact analysis failed (continuing anyway): {impact_err}")
                 impact_context = ""
 
             # --- 🔍 SCHEMA INSPECTION SERVICE (Step 3.5) ---
-            print("[*] Step 3.5: Checking for backend-touching changes and database schema inspection...")
+            print("[INFO] Step 3.5: Checking for backend-touching changes and database schema inspection...")
             await add_log("schema_check", "🗄️ Checking for MongoDB schema changes", "running")
 
             schema_report = None
@@ -544,7 +546,7 @@ This may take 30-60 seconds depending on the size of the changes.
                 from services.schema_inspection_service import run_schema_inspection, format_schema_report_to_markdown
                 schema_report = await run_schema_inspection(raw_diff_content, mcp_service.mongo_session, project_id=project_id, target_branch=target_branch)
                 if schema_report:
-                    print(f"[+] Schema inspection complete. Found {len(schema_report.collections)} collections. Confidence: {schema_report.confidence}")
+                    print(f"[OK] Schema inspection complete. Found {len(schema_report.collections)} collections. Confidence: {schema_report.confidence}")
                     await add_log("schema_check", f"✅ Schema analysis complete - {len(schema_report.collections)} collections examined", "completed")
                 else:
                     await add_log("schema_check", "ℹ️ No database schema changes detected", "completed")
@@ -602,24 +604,31 @@ This may take 30-60 seconds depending on the size of the changes.
                                 }]
                             }
                         )
-                        print("[+] Schema snapshot logged to MongoDB collection: schema_snapshots")
+                        print("[OK] Schema snapshot logged to MongoDB collection: schema_snapshots")
             except Exception as schema_err:
-                print(f"[⚠️] Schema inspection failed (continuing anyway): {schema_err}")
+                print(f"[WARN] Schema inspection failed (continuing anyway): {schema_err}")
                 await add_log("schema_check", "⚠️ Schema check encountered an error, continuing analysis", "completed")
 
             # --- 🧠 THE GEMINI COGNITIVE CORE ENGINE ---
-            print("[*] Step 4: Shipping code diff to Gemini Pro Core for automated security review...")
+            print("[INFO] Step 4: Shipping code diff to Gemini Pro Core for automated security review...")
             await add_log("ai_analysis", "🤖 Running AI-powered security and code quality analysis", "running")
 
-            # Get user's Gemini config from repository owner
+            # Get user's Gemini config from repository owner (user_id from webhook payload)
             user_config = await get_user_config_from_repo(str(project_id))
-            audit_report = await run_gemini_review(raw_diff_content, impact_context, user_config)
 
-            print(f"[✅] Step 4 complete: Gemini analysis compiled ({len(audit_report)} chars)")
+            # Run Gemini review with user context for usage tracking
+            # user_id is extracted from webhook payload at the beginning of the function
+            gemini_result = await run_gemini_review(raw_diff_content, impact_context, user_config, user_id=user_id, mr_id=mr_iid, repository_id=project_id)
+            audit_report = gemini_result.get("review_text", "")
+            review_usage = gemini_result.get("usage", {})
+
+            print(f"[OK] Step 4 complete: Gemini analysis compiled ({len(audit_report)} chars)")
+            if review_usage:
+                print(f"[ℹ] Review usage: {review_usage.get('total_tokens', 0)} tokens ({review_usage.get('model_name', 'unknown')})")
             await add_log("ai_analysis", f"✅ AI analysis complete - {len(audit_report)} characters of findings generated", "completed")
 
             # --- 🔍 POST-REVIEW VALIDATION ---
-            print("[*] Running post-review validation to catch issues outside changed code...")
+            print("[INFO] Running post-review validation to catch issues outside changed code...")
             validation_findings = []
 
             if validation_findings:
@@ -653,10 +662,10 @@ This may take 30-60 seconds depending on the size of the changes.
                         audit_report += validation_section
 
                 except Exception as validation_err:
-                    print(f"[⚠️] Post-review validation failed: {validation_err}")
+                    print(f"[WARN] Post-review validation failed: {validation_err}")
 
             # 3. Update the loading comment with the final report
-            print("[*] Updating review with findings...")
+            print("[INFO] Updating review with findings...")
             final_report = f"""### 🛡️ The Gatekeeper Security Audit
 
 {audit_report}
@@ -714,7 +723,7 @@ This may take 30-60 seconds depending on the size of the changes.
                     mr_iid=mr_iid,
                     analysis_data=update_data
                 )
-                print(f"[✅] Updated MR {mr_iid} in MongoDB with AI analysis")
+                print(f"[OK] Updated MR {mr_iid} in MongoDB with AI analysis")
 
                 # Update repository's running average review time
                 await repository_service.update_repository_avg_review_time(
@@ -724,7 +733,7 @@ This may take 30-60 seconds depending on the size of the changes.
 
                 await add_log("completed", "🎉 Review completed successfully - Report published to merge request", "completed")
             except Exception as update_err:
-                print(f"[⚠️] Failed to update MongoDB with AI analysis: {update_err}")
+                print(f"[WARN] Failed to update MongoDB with AI analysis: {update_err}")
 
             if loading_note_id:
                 try:
@@ -737,9 +746,9 @@ This may take 30-60 seconds depending on the size of the changes.
                             "body": final_report
                         }
                     )
-                    print("[+] Review report updated in place!")
+                    print("[OK] Review report updated in place!")
                 except Exception as update_err:
-                    print(f"[⚠️] Could not update note (ID: {loading_note_id}): {update_err}")
+                    print(f"[WARN] Could not update note (ID: {loading_note_id}): {update_err}")
                     await gitlab_session.call_tool(
                         name="create_merge_request_note",
                         arguments={
@@ -748,7 +757,7 @@ This may take 30-60 seconds depending on the size of the changes.
                             "body": final_report
                         }
                     )
-                    print("[+] Review report published as new comment!")
+                    print("[OK] Review report published as new comment!")
             else:
                 await gitlab_session.call_tool(
                     name="create_merge_request_note",
@@ -758,11 +767,11 @@ This may take 30-60 seconds depending on the size of the changes.
                         "body": final_report
                     }
                 )
-                print("[+] Review report published!")
+                print("[OK] Review report published!")
 
             # 🎉 Set commit status to SUCCESS
             if commit_sha:
-                print(f"[*] Setting commit status to SUCCESS...")
+                print(f"[INFO] Setting commit status to SUCCESS...")
                 try:
                     await gitlab_session.call_tool(
                         name="create_commit_status",
@@ -774,12 +783,12 @@ This may take 30-60 seconds depending on the size of the changes.
                             "description": "✅ Gatekeeper review completed"
                         }
                     )
-                    print("[+] Status set to SUCCESS!")
+                    print("[OK] Status set to SUCCESS!")
                 except Exception as status_err:
-                    print(f"[⚠️] Could not set commit status: {status_err}")
+                    print(f"[WARN] Could not set commit status: {status_err}")
 
             # --- 🤖 AUTO-FIX FEATURE ---
-            print("[*] Checking if issues can be auto-fixed via atomic patches...")
+            print("[INFO] Checking if issues can be auto-fixed via atomic patches...")
             await add_log("auto_fix", "🔧 Analyzing issues for potential auto-fix generation", "running")
             try:
                 # Re-parse diff and create patch summary
@@ -788,10 +797,16 @@ This may take 30-60 seconds depending on the size of the changes.
                 patch_summary = create_patch_summary(atomic_patches)
 
                 print("[DEBUG] Requesting fix analysis from Gemini...")
-                fix_data = await asyncio.wait_for(
-                    run_gemini_fix_analysis(audit_report, patch_summary, schema_context=schema_markdown, user_config=user_config),
+                fix_result = await asyncio.wait_for(
+                    run_gemini_fix_analysis(audit_report, patch_summary, schema_context=schema_markdown, user_config=user_config, user_id=user_id, mr_id=mr_iid, repository_id=project_id),
                     timeout=60.0
                 )
+
+                # Extract fix data and usage from result
+                fix_usage = fix_result.pop("usage", {})
+                fix_data = fix_result
+
+                print(f"[ℹ] Fix analysis usage: {fix_usage.get('total_tokens', 0)} tokens ({fix_usage.get('model_name', 'unknown')})")
 
                 # Delegate auto-fix branch application to remediation service
                 await apply_auto_fixes(
@@ -809,14 +824,14 @@ This may take 30-60 seconds depending on the size of the changes.
                 print("[⏱️] Fix analysis timed out after 60 seconds - skipping auto-fix")
                 await add_log("auto_fix", "⏱️ Auto-fix analysis timed out - skipping", "completed")
             except json.JSONDecodeError as parse_err:
-                print(f"[x] Failed to parse fix analysis JSON structure: {parse_err}")
+                print(f"[ERROR] Failed to parse fix analysis JSON structure: {parse_err}")
                 await add_log("auto_fix", "⚠️ Failed to parse fix analysis - skipping", "completed")
             except Exception as loop_err:
-                print(f"[x] Auto-fix execution loop broken: {loop_err}")
+                print(f"[ERROR] Auto-fix execution loop broken: {loop_err}")
                 await add_log("auto_fix", "⚠️ Auto-fix encountered an error - skipping", "completed")
 
         except Exception as e:
-            print(f"[x] Intelligent Gemini Audit loop failed: {e}")
+            print(f"[ERROR] Intelligent Gemini Audit loop failed: {e}")
 
             # Update MR status to failed
             try:
@@ -825,9 +840,9 @@ This may take 30-60 seconds depending on the size of the changes.
                     mr_iid=mr_iid,
                     analysis_data={"status": "failed", "analysis_status": "error"}
                 )
-                print(f"[⚠️] Updated MR {mr_iid} status to 'failed'")
+                print(f"[WARN] Updated MR {mr_iid} status to 'failed'")
             except Exception as status_err:
-                print(f"[⚠️] Failed to update MR status to 'failed': {status_err}")
+                print(f"[WARN] Failed to update MR status to 'failed': {status_err}")
 
             # ❌ Set commit status to FAILED on error
             if commit_sha and gitlab_session:
@@ -842,8 +857,8 @@ This may take 30-60 seconds depending on the size of the changes.
                             "description": f"❌ Gatekeeper review failed: {str(e)[:100]}"
                         }
                     )
-                    print("[+] Status set to FAILED")
+                    print("[OK] Status set to FAILED")
                 except Exception as status_err:
-                    print(f"[x] Failed to set error status: {status_err}")
+                    print(f"[ERROR] Failed to set error status: {status_err}")
 
     return {"status": "event_processed"}

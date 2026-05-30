@@ -210,6 +210,13 @@ class ModelUsage(BaseModel):
     estimated_cost: float
 
 
+class DailyUsage(BaseModel):
+    """Daily usage statistics for chart."""
+    date: str  # ISO format date string
+    tokens: int
+    cost: float
+
+
 class BillingUsageResponse(BaseModel):
     """Billing usage statistics response."""
     current_cycle_start: datetime
@@ -218,6 +225,13 @@ class BillingUsageResponse(BaseModel):
     total_mrs_processed: int
     estimated_cost: float
     model_usage: List[ModelUsage]
+    daily_usage: List[DailyUsage] = []
+
+
+class SyncRequest(BaseModel):
+    """Request to sync usage data from Phoenix."""
+    cycle: Optional[str] = None  # Specific cycle or current
+    force_resync: bool = False
 
 
 class InvoiceStatus(str, Enum):

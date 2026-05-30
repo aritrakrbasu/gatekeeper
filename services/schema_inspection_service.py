@@ -259,7 +259,7 @@ async def get_target_database(mongo_session) -> str:
             if names:
                 return names[0]
     except Exception as e:
-        print(f"[⚠️] list-databases tool call failed: {e}")
+        print(f"[WARN] list-databases tool call failed: {e}")
         
     return "gatekeeper_dev"
 
@@ -430,7 +430,7 @@ async def _get_target_mongodb_uri(project_id: str, target_branch: Optional[str] 
                 db_name = parsed.path.split("?")[0].lstrip("/") or "gatekeeper_target"
                 return uri, db_name, is_encrypted
     except Exception as e:
-        print(f"[⚠️] Failed to fetch target database credentials for project {project_id}: {e}")
+        print(f"[WARN] Failed to fetch target database credentials for project {project_id}: {e}")
 
     return None, None, False
 
@@ -470,10 +470,10 @@ async def run_schema_inspection(diff_text: str, mongo_session=None, project_id: 
     if not is_backend_change:
         return None
 
-    print(f"[+] Backend change detected (Confidence: {confidence})")
-    print(f"[+] Files: {suspicious_files}")
+    print(f"[OK] Backend change detected (Confidence: {confidence})")
+    print(f"[OK] Files: {suspicious_files}")
     if triggered_by_content:
-        print(f"[+] Content lines: {triggered_by_content}")
+        print(f"[OK] Content lines: {triggered_by_content}")
 
     # Gating Logic (LOW confidence checks skip MCP calls entirely)
     if confidence == "LOW":
@@ -493,7 +493,7 @@ async def run_schema_inspection(diff_text: str, mongo_session=None, project_id: 
         uri, db_name, is_encrypted = await _get_target_mongodb_uri(project_id)
 
         if not uri:
-            print(f"[⚠️] No target database URI configured for project {project_id}; skipping target schema inspection.")
+            print(f"[WARN] No target database URI configured for project {project_id}; skipping target schema inspection.")
             return SchemaInspectionReport(
                 inspected_at=datetime.now(timezone.utc),
                 triggered_by_files=suspicious_files,
@@ -505,7 +505,7 @@ async def run_schema_inspection(diff_text: str, mongo_session=None, project_id: 
                 delta=None
             )
 
-        print(f"[*] Decoupled: connecting to target database '{db_name}' directly...")
+        print(f"[INFO] Decoupled: connecting to target database '{db_name}' directly...")
         from motor.motor_asyncio import AsyncIOMotorClient
         client = AsyncIOMotorClient(uri, serverSelectionTimeoutMS=5000)
         db = client[db_name]
@@ -515,13 +515,13 @@ async def run_schema_inspection(diff_text: str, mongo_session=None, project_id: 
             db_collections = await db.list_collection_names()
             # Filter out system collections
             target_collections = [col for col in db_collections if not col.startswith("system.")]
-            print(f"[+] Retrieved target collections from database: {target_collections}")
+            print(f"[OK] Retrieved target collections from database: {target_collections}")
             scoped = False
         except Exception as list_err:
-            print(f"[⚠️] Failed to list collections from database: {list_err}")
+            print(f"[WARN] Failed to list collections from database: {list_err}")
             # Fall back to extracted collections from diff
             extracted_collections = extract_collections_from_diff(diff_text)
-            print(f"[+] Falling back to extracted collections from diff: {extracted_collections}")
+            print(f"[OK] Falling back to extracted collections from diff: {extracted_collections}")
             target_collections = extracted_collections
             scoped = True
 
@@ -544,7 +544,7 @@ async def run_schema_inspection(diff_text: str, mongo_session=None, project_id: 
                             fields[k] = infer_mongo_type(v)
                             sample_keys.append(k)
             except Exception as e:
-                print(f"[⚠️] Failed to query schema/sample documents for '{col_name}': {e}")
+                print(f"[WARN] Failed to query schema/sample documents for '{col_name}': {e}")
 
             # Query indexes
             try:
@@ -552,7 +552,7 @@ async def run_schema_inspection(diff_text: str, mongo_session=None, project_id: 
                 for idx_name in idx_info.keys():
                     indexes.append(idx_name)
             except Exception as e:
-                print(f"[⚠️] Failed to query indexes for '{col_name}': {e}")
+                print(f"[WARN] Failed to query indexes for '{col_name}': {e}")
 
             collection_schemas.append(CollectionSchema(
                 name=col_name,
@@ -568,7 +568,7 @@ async def run_schema_inspection(diff_text: str, mongo_session=None, project_id: 
         delta = None
         if project_id:
             try:
-                print(f"[*] Fetching previous snapshot from schema_snapshots collection for project: {project_id}...")
+                print(f"[INFO] Fetching previous snapshot from schema_snapshots collection for project: {project_id}...")
                 from services import mongo_client
                 prev_docs = await mongo_client.find(
                     collection_name="schema_snapshots",
@@ -592,9 +592,9 @@ async def run_schema_inspection(diff_text: str, mongo_session=None, project_id: 
                     prev_collections_data = prev_report.get("collections", [])
                     delta = compute_schema_delta(prev_collections_data, collection_schemas)
                 else:
-                    print("[ℹ️] No previous schema snapshot found for this project.")
+                    print("[INFO] No previous schema snapshot found for this project.")
             except Exception as delta_err:
-                print(f"[⚠️] Failed to compute schema delta: {delta_err}")
+                print(f"[WARN] Failed to compute schema delta: {delta_err}")
 
         return SchemaInspectionReport(
             inspected_at=datetime.now(timezone.utc),
@@ -606,7 +606,7 @@ async def run_schema_inspection(diff_text: str, mongo_session=None, project_id: 
             delta=delta
         )
     except Exception as e:
-        print(f"[x] Error executing schema inspection: {e}")
+        print(f"[ERROR] Error executing schema inspection: {e}")
         return SchemaInspectionReport(
             inspected_at=datetime.now(timezone.utc),
             triggered_by_files=suspicious_files,

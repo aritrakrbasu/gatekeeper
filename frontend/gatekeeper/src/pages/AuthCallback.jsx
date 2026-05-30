@@ -11,6 +11,7 @@ import React, { useEffect, useState } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
 import { useGeminiSettings } from "../services/queries";
+import api from "../services/api";
 
 const AuthCallback = () => {
   const [searchParams] = useSearchParams();
@@ -48,6 +49,16 @@ const AuthCallback = () => {
         await handleCallback(code, state);
         setStatus("Success!");
         setAuthCompleted(true);
+
+        // Sync billing data after successful login
+        try {
+          setStatus("Syncing billing data...");
+          await api.syncBilling();
+          console.log("Billing sync completed successfully");
+        } catch (billingErr) {
+          // Don't fail login if billing sync fails
+          console.warn("Billing sync failed (non-critical):", billingErr);
+        }
 
         // Redirect will happen based on Gemini settings via useEffect
       } catch (err) {
@@ -105,7 +116,7 @@ const AuthCallback = () => {
         </div>
 
         <h2 className="text-2xl font-semibold text-slate-900 mb-2">
-          {error ? "Authentication Failed" : "Authenticating..."}
+          {error ? "Authentication Failed" : "Setting up your account..."}
         </h2>
 
         <p className="text-slate-500 mb-4">

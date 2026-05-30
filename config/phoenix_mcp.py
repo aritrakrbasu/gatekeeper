@@ -72,7 +72,7 @@ class PhoenixMCPBridge:
             return True
 
         if not is_phoenix_configured():
-            logger.warning("[⚠️] Phoenix not configured - MCP bridge unavailable")
+            logger.warning("[WARN] Phoenix not configured - MCP bridge unavailable")
             return False
 
         try:
@@ -90,11 +90,11 @@ class PhoenixMCPBridge:
             # Test connection
             await self._test_connection()
             self._connected = True
-            logger.info(f"[✅] Phoenix MCP bridge connected to {self.base_url}")
+            logger.info(f"[OK] Phoenix MCP bridge connected to {self.base_url}")
             return True
 
         except Exception as e:
-            logger.error(f"[x] Failed to connect to Phoenix: {e}")
+            logger.error(f"[ERROR] Failed to connect to Phoenix: {e}")
             return False
 
     async def _test_connection(self):
@@ -116,7 +116,7 @@ class PhoenixMCPBridge:
             await self._client.aclose()
             self._client = None
             self._connected = False
-            logger.info("[✅] Phoenix MCP bridge disconnected")
+            logger.info("[OK] Phoenix MCP bridge disconnected")
 
     async def get_recent_traces(
         self,
@@ -158,14 +158,14 @@ class PhoenixMCPBridge:
             data = response.json()
             traces = data.get("data", [])
 
-            logger.info(f"[+] Retrieved {len(traces)} traces from Phoenix")
+            logger.info(f"[OK] Retrieved {len(traces)} traces from Phoenix")
             return traces
 
         except httpx.HTTPStatusError as e:
-            logger.warning(f"[⚠️] Phoenix API error: {e.response.status_code}")
+            logger.warning(f"[WARN] Phoenix API error: {e.response.status_code}")
             return []
         except Exception as e:
-            logger.error(f"[x] Failed to get traces: {e}")
+            logger.error(f"[ERROR] Failed to get traces: {e}")
             return []
 
     async def get_trace_details(self, trace_id: str) -> Optional[Dict[str, Any]]:
@@ -196,10 +196,10 @@ class PhoenixMCPBridge:
             if e.response.status_code == 404:
                 logger.debug(f"[DEBUG] Trace {trace_id} not found")
             else:
-                logger.warning(f"[⚠️] Phoenix API error: {e.response.status_code}")
+                logger.warning(f"[WARN] Phoenix API error: {e.response.status_code}")
             return None
         except Exception as e:
-            logger.error(f"[x] Failed to get trace details: {e}")
+            logger.error(f"[ERROR] Failed to get trace details: {e}")
             return None
 
     async def get_evaluations(
@@ -234,14 +234,14 @@ class PhoenixMCPBridge:
             data = response.json()
             evaluations = data.get("data", [])
 
-            logger.info(f"[+] Retrieved {len(evaluations)} evaluations from Phoenix")
+            logger.info(f"[OK] Retrieved {len(evaluations)} evaluations from Phoenix")
             return evaluations
 
         except httpx.HTTPStatusError as e:
-            logger.warning(f"[⚠️] Phoenix API error: {e.response.status_code}")
+            logger.warning(f"[WARN] Phoenix API error: {e.response.status_code}")
             return []
         except Exception as e:
-            logger.error(f"[x] Failed to get evaluations: {e}")
+            logger.error(f"[ERROR] Failed to get evaluations: {e}")
             return []
 
     async def get_evaluation_summary(self, hours_ago: int = 24) -> Dict[str, Any]:
@@ -320,14 +320,14 @@ class PhoenixMCPBridge:
             data = response.json()
             experiments = data.get("data", [])
 
-            logger.info(f"[+] Retrieved {len(experiments)} experiments from Phoenix")
+            logger.info(f"[OK] Retrieved {len(experiments)} experiments from Phoenix")
             return experiments
 
         except httpx.HTTPStatusError as e:
-            logger.warning(f"[⚠️] Phoenix API error: {e.response.status_code}")
+            logger.warning(f"[WARN] Phoenix API error: {e.response.status_code}")
             return []
         except Exception as e:
-            logger.error(f"[x] Failed to get experiments: {e}")
+            logger.error(f"[ERROR] Failed to get experiments: {e}")
             return []
 
     async def query_traces_by_metadata(
@@ -370,14 +370,14 @@ class PhoenixMCPBridge:
             if response.status_code == 200:
                 data = response.json()
                 traces = data.get("data", [])
-                logger.info(f"[+] Found {len(traces)} traces matching filters")
+                logger.info(f"[OK] Found {len(traces)} traces matching filters")
                 return traces
             else:
-                logger.warning(f"[⚠️] Query returned status {response.status_code}")
+                logger.warning(f"[WARN] Query returned status {response.status_code}")
                 return []
 
         except Exception as e:
-            logger.error(f"[x] Failed to query traces by metadata: {e}")
+            logger.error(f"[ERROR] Failed to query traces by metadata: {e}")
             return []
 
     async def get_performance_metrics(self, hours_ago: int = 24) -> Dict[str, Any]:

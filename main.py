@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Import Gatekeeper Services
-from services import mcp_service, review_service, auth_service, repository_service, mongo_client, user_service
+from services import mcp_service, review_service, auth_service, repository_service, mongo_client, user_service, billing_service
 from api_models import (
     OAuthCallbackRequest, TokenResponse, UserResponse,
     VerifyTokenRequest, VerifyTokenResponse, LogoutResponse,
@@ -16,7 +16,8 @@ from api_models import (
     OnboardRepositoryRequest, UpdateRepositoryRequest, UpdateRepositoryResponse,
     GeminiSettingsResponse, ValidateTokenRequest, ValidateTokenResponse,
     PolicySettingsResponse, UpdateGeminiSettingsRequest, UpdatePolicySettingsRequest,
-    UpdateUserProfileRequest, IntegrationStatusResponse
+    UpdateUserProfileRequest, IntegrationStatusResponse,
+    SyncRequest, BillingUsageResponse, InvoiceResponse
 )
 
 app = FastAPI(title="The Gatekeeper Gemini Orchestrator")
@@ -74,6 +75,30 @@ async def startup_event():
         print("[ℹ️] Install GitNexus for enhanced analysis: npm install -g gitnexus")
     except Exception as e:
         print(f"[ℹ️] Could not check GitNexus status: {e}")
+
+    # Initialize Arize observability for LLM usage tracking
+    try:
+        from config.arize_config import init_arize, instrument_google_genai, init_phoenix_client
+
+        print("[*] Initializing Arize observability...")
+        if init_arize(project_name="gatekeeper"):
+            print("[✅] Arize observability initialized successfully")
+            # Instrument Google GenAI for automatic tracing
+            if instrument_google_genai():
+                print("[✅] Google GenAI instrumentor registered")
+            else:
+                print("[⚠️] Failed to instrument Google GenAI")
+        else:
+            print("[⚠️] Arize initialization failed - LLM usage tracking disabled")
+
+        # Initialize Phoenix client for querying traces
+        if init_phoenix_client():
+            print("[✅] Phoenix client initialized for billing sync")
+        else:
+            print("[⚠️] Phoenix client initialization failed")
+    except Exception as e:
+        print(f"[⚠️] Failed to initialize Arize/Phoenix: {e}")
+        print("[ℹ️] LLM usage tracking will be unavailable")
 
     # Launch Stdio MCP pipes in the background
     asyncio.create_task(mcp_service.boot_mcp_bridge())
@@ -854,3 +879,189 @@ async def disconnect_gitlab_integration(authorization: str = Header(None)):
     except Exception as e:
         print(f"[ERROR] Failed to disconnect GitLab integration: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Billing Endpoints
+# ============================================================================
+
+@app.get("/api/billing/usage", response_model=BillingUsageResponse)
+async def get_billing_usage(authorization: str = Header(None)):
+    """Get billing usage statistics for current user."""
+    try:
+        if not authorization:
+            raise HTTPException(status_code=401, detail="Authorization required")
+
+        token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+        user_info = auth_service.verify_token(token)
+        user_id = user_info.get("id")
+
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        # Get billing data
+        data = await billing_service.get_billing_dashboard_data(user_id)
+
+        # Auto-sync if no usage data found (first visit or empty state)
+        if data.get("total_tokens", 0) == 0 and data.get("estimated_cost", 0) == 0:
+            print(f"[INFO] No billing data found for user {user_id}, triggering auto-sync from Arize...")
+            sync_result = await billing_service.sync_user_usage_from_phoenix(user_id=user_id)
+            if sync_result.get("success"):
+                print(f"[INFO] Auto-sync complete: {sync_result.get('synced', 0)} records synced")
+                # Fetch updated data after sync
+                data = await billing_service.get_billing_dashboard_data(user_id)
+
+        return BillingUsageResponse(**data)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[ERROR] Failed to get billing usage: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/billing/sync")
+async def sync_billing_data(
+    request: SyncRequest,
+    authorization: str = Header(None)
+):
+    """Sync billing data from Arize Cloud."""
+    try:
+        if not authorization:
+            raise HTTPException(status_code=401, detail="Authorization required")
+
+        token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+        user_info = auth_service.verify_token(token)
+        user_id = user_info.get("id")
+
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        print(f"[INFO] /api/billing/sync called with user_id: {user_id} (type: {type(user_id).__name__})")
+
+        # Sync from Arize Cloud
+        result = await billing_service.sync_user_usage_from_phoenix(
+            user_id=user_id,
+            force_resync=request.force_resync
+        )
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[ERROR] Failed to sync billing data: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/billing/invoices")
+async def get_invoices(
+    limit: int = 12,
+    authorization: str = Header(None)
+):
+    """Get invoice history."""
+    try:
+        if not authorization:
+            raise HTTPException(status_code=401, detail="Authorization required")
+
+        token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+        user_info = auth_service.verify_token(token)
+        user_id = user_info.get("id")
+
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        invoices = await billing_service.get_user_invoices(user_id, limit)
+
+        return [InvoiceResponse(**inv) for inv in invoices]
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[ERROR] Failed to get invoices: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/billing/debug")
+async def debug_billing(authorization: str = Header(None)):
+    """Debug endpoint to check Phoenix connection and trace data."""
+    try:
+        if not authorization:
+            raise HTTPException(status_code=401, detail="Authorization required")
+
+        token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+        user_info = auth_service.verify_token(token)
+        user_id = user_info.get("id")
+
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        # Check Arize status
+        from config.arize_config import is_arize_initialized, is_phoenix_configured
+        arize_status = {
+            "arize_initialized": is_arize_initialized(),
+            "phoenix_configured": is_phoenix_configured()
+        }
+
+        # Try to get Arize Cloud traces
+        arize_data = {}
+        try:
+            from config.arize_client import get_arize_client
+            client = await get_arize_client()
+            arize_data["connected"] = client.is_connected()
+
+            if client.is_connected():
+                # Get recent traces
+                traces = await client.get_recent_traces(limit=10, hours_ago=24)
+                arize_data["trace_count"] = len(traces)
+                arize_data["sample_traces"] = []
+
+                for trace in traces[:3]:  # First 3 traces as samples
+                    trace_id = trace.get("trace_id", "")
+                    attributes = trace.get("attributes", {})
+                    arize_data["sample_traces"].append({
+                        "trace_id": trace_id[:16] + "..." if trace_id else "unknown",
+                        "user_id": attributes.get("user_id"),
+                        "mr_id": attributes.get("mr_id"),
+                        "repository_id": attributes.get("repository_id"),
+                        "operation_type": attributes.get("operation_type"),
+                        "has_llm_input_tokens": "llm_input_tokens" in attributes,
+                        "llm_input_tokens": attributes.get("llm_input_tokens"),
+                        "llm_output_tokens": attributes.get("llm_output_tokens"),
+                        "llm_model_name": attributes.get("llm_model_name"),
+                        "attribute_keys": list(attributes.keys())
+                    })
+        except Exception as e:
+            arize_data["error"] = str(e)
+
+        # Check MongoDB for existing data
+        mongo_data = {}
+        try:
+            from services import mongo_client
+            cycles = await mongo_client.find(
+                "billing_cycles",
+                {"user_id": user_id},
+                limit=5
+            )
+            mongo_data["billing_cycles_found"] = len(cycles)
+            mongo_data["cycles"] = cycles
+
+            usage_records = await mongo_client.find(
+                "llm_usage_records",
+                {"user_id": user_id},
+                limit=5
+            )
+            mongo_data["usage_records_found"] = len(usage_records)
+        except Exception as e:
+            mongo_data["error"] = str(e)
+
+        return {
+            "user_id": user_id,
+            "arize_status": arize_status,
+            "arize_data": arize_data,
+            "mongo_data": mongo_data
+        }
+
+    except Exception as e:
+        import traceback
+        return {"error": str(e), "trace": traceback.format_exc()}

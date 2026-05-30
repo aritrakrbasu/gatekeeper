@@ -29,11 +29,11 @@ GITLAB_PERSONAL_ACCESS_TOKEN = os.getenv("GITLAB_PERSONAL_ACCESS_TOKEN", "")
 # MongoDB configuration check
 MONGO_CONNECTION_STRING = os.getenv("MDB_MCP_CONNECTION_STRING", "")
 if not MONGO_CONNECTION_STRING:
-    print("[⚠️] MDB_MCP_CONNECTION_STRING not set in environment variables")
-    print("[ℹ️] Repository data will be stored in memory only")
-    print("[ℹ️] To enable MongoDB storage, set MDB_MCP_CONNECTION_STRING in .env file")
+    print("[WARN] MDB_MCP_CONNECTION_STRING not set in environment variables")
+    print("[INFO] Repository data will be stored in memory only")
+    print("[INFO] To enable MongoDB storage, set MDB_MCP_CONNECTION_STRING in .env file")
 else:
-    print(f"[✅] MongoDB connection string configured: {MONGO_CONNECTION_STRING[:20]}...{MONGO_CONNECTION_STRING[-10:]}")
+    print(f"[OK] MongoDB connection string configured: {MONGO_CONNECTION_STRING[:20]}...{MONGO_CONNECTION_STRING[-10:]}")
 
 
 # ============================================================================
@@ -181,28 +181,28 @@ async def _store_repository(user_id: str, repo_data: Dict):
                     collection_name=REPOS_COLLECTION,
                     document=repo_data
                 )
-                print(f"[✅] Successfully stored repository {repo_data['name']} in MongoDB with ID: {doc_id}")
+                print(f"[OK] Successfully stored repository {repo_data['name']} in MongoDB with ID: {doc_id}")
             except Exception as mongo_err:
-                print(f"[⚠️] MongoDB insert failed: {mongo_err}")
-                print(f"[ℹ️] Falling back to in-memory storage for repository {repo_data['name']}")
+                print(f"[WARN] MongoDB insert failed: {mongo_err}")
+                print(f"[INFO] Falling back to in-memory storage for repository {repo_data['name']}")
                 # Store in memory as fallback
                 _repositories[repo_data["id"]] = repo_data
         else:
-            print(f"[⚠️] MongoDB connection string not configured - repository {repo_data['name']} stored in memory only")
-            print(f"[ℹ️] Set MDB_MCP_CONNECTION_STRING in .env to enable MongoDB storage")
+            print(f"[WARN] MongoDB connection string not configured - repository {repo_data['name']} stored in memory only")
+            print(f"[INFO] Set MDB_MCP_CONNECTION_STRING in .env to enable MongoDB storage")
 
             # Store in memory as fallback
             _repositories[repo_data["id"]] = repo_data
-            print(f"[✅] Repository {repo_data['name']} stored in in-memory cache")
+            print(f"[OK] Repository {repo_data['name']} stored in in-memory cache")
     except Exception as e:
-        print(f"[❌] Failed to store repository: {e}")
-        print(f"[ℹ️] Repository data: {repo_data.get('name', 'unknown')}")
+        print(f"[ERROR] Failed to store repository: {e}")
+        print(f"[INFO] Repository data: {repo_data.get('name', 'unknown')}")
         import traceback
         traceback.print_exc()
 
         # Fallback to in-memory storage
         _repositories[repo_data["id"]] = repo_data
-        print(f"[ℹ️] Repository stored in in-memory cache as fallback")
+        print(f"[INFO] Repository stored in in-memory cache as fallback")
 
 
 async def _find_repository(user_id: str, repo_id: str) -> Optional[Dict]:
@@ -231,10 +231,10 @@ async def _get_user_repositories(user_id: str, limit: Optional[int] = None) -> L
             print(f"[INFO] Retrieved {len(documents)} repositories from MongoDB for user {user_id}")
             return documents
         else:
-            print(f"[⚠️] MongoDB connection string not configured - using in-memory cache for user {user_id}")
+            print(f"[WARN] MongoDB connection string not configured - using in-memory cache for user {user_id}")
     except Exception as e:
         print(f"[ERROR] Failed to get user repositories from MongoDB: {e}")
-        print(f"[ℹ️] Falling back to in-memory cache")
+        print(f"[INFO] Falling back to in-memory cache")
 
     # Fallback to in-memory cache
     print(f"[INFO] Returning repositories from in-memory cache")
@@ -298,42 +298,38 @@ async def get_all_repositories(user_id: Optional[str] = None, limit: Optional[in
     # Fallback to in-memory repositories (for development/testing)
     print("[INFO] Using in-memory repository cache")
     for repo_id, repo_data in _repositories.items():
+        # Handle both enum instances and plain strings
+        visibility = repo_data["visibility"]
+        if hasattr(visibility, "value"):
+            visibility = visibility.value
+
+        repo_status = repo_data["status"]
+        if hasattr(repo_status, "value"):
+            repo_status = repo_status.value
+
+        # Handle datetime objects and ISO strings
+        last_sync = repo_data["last_sync"]
+        if hasattr(last_sync, "isoformat"):
+            last_sync = last_sync.isoformat()
+
+        created_at = repo_data["created_at"]
+        if hasattr(created_at, "isoformat"):
+            created_at = created_at.isoformat()
+
         repos.append({
             "id": repo_data["id"],
             "name": repo_data["name"],
             "full_name": repo_data["full_name"],
-            "visibility": repo_data["visibility"].value,
+            "visibility": visibility,
             "url": repo_data["url"],
-            "last_sync": repo_data["last_sync"].isoformat(),
+            "last_sync": last_sync,
             "health_score": repo_data["health_score"],
-            "status": repo_data["status"].value,
+            "status": repo_status,
             "description": repo_data.get("description"),
-            "created_at": repo_data["created_at"].isoformat(),
+            "created_at": created_at,
             "executive_summary": repo_data.get("executive_summary", ""),
             "vector_analysis": repo_data.get("vector_analysis", {})
         })
-
-    return repos
-
-    # Return formatted repositories
-    repos = []
-    for repo_id, repo_data in _repositories.items():
-        # Format for response
-        repo = {
-            "id": repo_data["id"],
-            "name": repo_data["name"],
-            "full_name": repo_data["full_name"],
-            "visibility": repo_data["visibility"].value,
-            "url": repo_data["url"],
-            "last_sync": repo_data["last_sync"].isoformat(),
-            "health_score": repo_data["health_score"],
-            "status": repo_data["status"].value,
-            "description": repo_data.get("description"),
-            "created_at": repo_data["created_at"].isoformat(),
-            "executive_summary": repo_data.get("executive_summary", ""),
-            "vector_analysis": repo_data.get("vector_analysis", {})
-        }
-        repos.append(repo)
 
     return repos
 
@@ -923,9 +919,9 @@ async def install_gitlab_webhook(repo_id: str, gitlab_token: str) -> Dict:
     webhook_url = os.getenv("GATEKEEPER_WEBHOOK_URL", "")
 
     if not webhook_url:
-        print("[⚠️] GATEKEEPER_WEBHOOK_URL not set in environment variables")
-        print("[ℹ️] Webhook will not be installed. Please set GATEKEEPER_WEBHOOK_URL in .env file")
-        print("[ℹ️] For local development, use ngrok: https://your-domain.ngrok.io/webhooks/gitlab")
+        print("[WARN] GATEKEEPER_WEBHOOK_URL not set in environment variables")
+        print("[INFO] Webhook will not be installed. Please set GATEKEEPER_WEBHOOK_URL in .env file")
+        print("[INFO] For local development, use ngrok: https://your-domain.ngrok.io/webhooks/gitlab")
         return {
             "status": "skipped_no_url",
             "message": "Webhook URL not configured. Set GATEKEEPER_WEBHOOK_URL in environment."
@@ -933,8 +929,8 @@ async def install_gitlab_webhook(repo_id: str, gitlab_token: str) -> Dict:
 
     # Warn if using localhost
     if "localhost" in webhook_url or "127.0.0.1" in webhook_url:
-        print("[⚠️] WARNING: Using localhost webhook URL - GitLab cannot reach your local machine")
-        print("[ℹ️] Use ngrok for local development: https://ngrok.com")
+        print("[WARN] WARNING: Using localhost webhook URL - GitLab cannot reach your local machine")
+        print("[INFO] Use ngrok for local development: https://ngrok.com")
 
     print(f"[INFO] Installing webhook with URL: {webhook_url}")
 
@@ -988,8 +984,8 @@ async def install_gitlab_webhook(repo_id: str, gitlab_token: str) -> Dict:
             response.raise_for_status()
             webhook = response.json()
 
-            print(f"[✅] Installed Gatekeeper webhook for repo {repo_id}")
-            print(f"[ℹ️] Webhook ID: {webhook.get('id')}, URL: {webhook.get('url')}")
+            print(f"[OK] Installed Gatekeeper webhook for repo {repo_id}")
+            print(f"[INFO] Webhook ID: {webhook.get('id')}, URL: {webhook.get('url')}")
             return {
                 "webhook_id": webhook.get("id"),
                 "url": webhook.get("url"),
@@ -1090,7 +1086,7 @@ async def connect_repository(user_id: str, repo_id: str, target_branches: Option
         # Try to install webhook anyway (it will check if already exists)
         try:
             webhook_result = await install_gitlab_webhook(repo_id, gitlab_token)
-            print(f"[✅] Webhook check complete for existing repo {repo_id}: {webhook_result.get('status')}")
+            print(f"[OK] Webhook check complete for existing repo {repo_id}: {webhook_result.get('status')}")
 
             # Update existing repository with webhook info and target branches
             if target_branches:
@@ -1103,9 +1099,9 @@ async def connect_repository(user_id: str, repo_id: str, target_branches: Option
                         "updated_at": datetime.now().isoformat() if MONGO_CONNECTION_STRING else datetime.now()
                     }}
                 )
-                print(f"[✅] Updated target branches for existing repo: {target_branches}")
+                print(f"[OK] Updated target branches for existing repo: {target_branches}")
         except Exception as webhook_err:
-            print(f"[⚠️] Failed to check/install webhook: {webhook_err}")
+            print(f"[WARN] Failed to check/install webhook: {webhook_err}")
 
         # Return existing repository info
         return {
@@ -1178,9 +1174,9 @@ async def connect_repository(user_id: str, repo_id: str, target_branches: Option
         new_repo["webhook_id"] = webhook_result.get("webhook_id")
         new_repo["webhook_url"] = webhook_result.get("url")
         new_repo["webhook_status"] = webhook_result.get("status")
-        print(f"[✅] Webhook status for {new_repo['name']}: {webhook_result.get('status')}")
+        print(f"[OK] Webhook status for {new_repo['name']}: {webhook_result.get('status')}")
     except Exception as webhook_err:
-        print(f"[⚠️] Failed to install webhook: {webhook_err}")
+        print(f"[WARN] Failed to install webhook: {webhook_err}")
         # Don't fail connection if webhook installation fails
         new_repo["webhook_status"] = "failed"
 
@@ -1229,7 +1225,7 @@ async def disconnect_repository(user_id: str, repo_id: str) -> Dict:
             if deleted:
                 print(f"[INFO] Disconnected repository {repo_id} for user {user_id} from MongoDB")
             else:
-                print(f"[ℹ️] Repository {repo_id} not found in MongoDB for user {user_id}")
+                print(f"[INFO] Repository {repo_id} not found in MongoDB for user {user_id}")
 
         # Remove from memory
         if repo_id in _repositories:
@@ -1339,7 +1335,7 @@ async def store_mr_in_mongodb(mr_data: Dict) -> str:
     """
     try:
         if not MONGO_CONNECTION_STRING:
-            print("[⚠️] MongoDB connection string not configured - MR stored in memory only")
+            print("[WARN] MongoDB connection string not configured - MR stored in memory only")
             # Store in in-memory cache as fallback
             repo_id = mr_data.get("repository_id")
             if repo_id not in _merge_requests:
@@ -1371,11 +1367,11 @@ async def store_mr_in_mongodb(mr_data: Dict) -> str:
                 collection_name=MRS_COLLECTION,
                 document=mr_data
             )
-            print(f"[✅] Stored MR {mr_data.get('gitlab_mr_id')} in MongoDB with ID: {doc_id}")
+            print(f"[OK] Stored MR {mr_data.get('gitlab_mr_id')} in MongoDB with ID: {doc_id}")
             return doc_id
 
     except Exception as e:
-        print(f"[❌] Failed to store MR in MongoDB: {e}")
+        print(f"[ERROR] Failed to store MR in MongoDB: {e}")
         # Fallback to in-memory storage
         repo_id = mr_data.get("repository_id")
         if repo_id not in _merge_requests:
@@ -1431,7 +1427,7 @@ async def get_repository_mrs_from_db(
                 print(f"[DEBUG] Sample MRs in collection: {[mr.get('repository_id', 'no_repo_id') for mr in all_mrs]}")
         else:
             # Fallback to in-memory cache
-            print(f"[⚠️] MongoDB not configured - using in-memory MR cache")
+            print(f"[WARN] MongoDB not configured - using in-memory MR cache")
             documents = _merge_requests.get(repo_id, [])
 
         # Format for frontend response
@@ -1519,7 +1515,7 @@ async def link_auto_fix_to_original_mr(
     """
     try:
         if not MONGO_CONNECTION_STRING:
-            print("[⚠️] MongoDB not configured - auto-fix link stored in memory only")
+            print("[WARN] MongoDB not configured - auto-fix link stored in memory only")
             # Update in-memory cache
             for mr in _merge_requests.get(repo_id, []):
                 if mr.get("gitlab_mr_id") == auto_fix_mr_iid:
@@ -1566,7 +1562,7 @@ async def link_auto_fix_to_original_mr(
             }
         )
 
-        print(f"[✅] Linked auto-fix MR {auto_fix_mr_iid} to original MR {original_mr_iid}")
+        print(f"[OK] Linked auto-fix MR {auto_fix_mr_iid} to original MR {original_mr_iid}")
 
         return {
             "status": "linked",
@@ -1624,9 +1620,9 @@ async def submit_mr_feedback(
                 collection_name="ai_feedback",
                 document=feedback_doc
             )
-            print(f"[✅] Stored feedback for MR {mr_id} with ID: {doc_id}")
+            print(f"[OK] Stored feedback for MR {mr_id} with ID: {doc_id}")
         else:
-            print("[⚠️] MongoDB not configured - feedback not stored")
+            print("[WARN] MongoDB not configured - feedback not stored")
 
         return {
             "status": "recorded",
@@ -1673,10 +1669,10 @@ async def update_mr_analysis(
             )
 
             if result:
-                print(f"[✅] Updated MR {mr_iid} analysis in MongoDB")
+                print(f"[OK] Updated MR {mr_iid} analysis in MongoDB")
                 return True
             else:
-                print(f"[⚠️] No MR found to update: repo_id={repo_id}, mr_iid={mr_iid}")
+                print(f"[WARN] No MR found to update: repo_id={repo_id}, mr_iid={mr_iid}")
                 # Try to find the MR to debug
                 existing = await mongo_client.find_one(
                     collection_name=MRS_COLLECTION,
@@ -1692,7 +1688,7 @@ async def update_mr_analysis(
             for mr in _merge_requests.get(repo_id, []):
                 if mr.get("gitlab_mr_id") == mr_iid:
                     mr.update(analysis_data)
-                    print(f"[✅] Updated MR {mr_iid} analysis in memory")
+                    print(f"[OK] Updated MR {mr_iid} analysis in memory")
                     return True
             return False
 
@@ -1844,7 +1840,7 @@ async def _get_file_content_from_gitlab(gitlab_session, project_id: str, file_pa
                 return base64.b64decode(content).decode('utf-8', errors='replace')
             return content
     except Exception as e:
-        print(f"[⚠️] Failed to fetch file content for {file_path} on ref {ref}: {e}")
+        print(f"[WARN] Failed to fetch file content for {file_path} on ref {ref}: {e}")
     return ""
 
 
@@ -2123,7 +2119,7 @@ async def onboard_repository(user_id: str, repo_id: str, data: Dict) -> Dict:
                 filter={"user_id": user_id, "id": str(repo_id)},
                 update={"$set": new_repo}
             )
-            print(f"[✅] Onboarded/Updated repository {new_repo['name']} in MongoDB")
+            print(f"[OK] Onboarded/Updated repository {new_repo['name']} in MongoDB")
     else:
         # Save new repository in memory and db
         _repositories[new_repo["id"]] = new_repo
@@ -2212,7 +2208,7 @@ async def update_repository_credentials(repo_id: str, data: Dict) -> Dict:
         update={"$set": update_data}
     )
 
-    print(f"[✅] Updated credentials for repository {repo_id}")
+    print(f"[OK] Updated credentials for repository {repo_id}")
 
     # 6. Get updated repository
     updated_repo = await mongo_client.find_one(
