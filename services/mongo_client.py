@@ -106,13 +106,14 @@ async def insert_one(collection_name: str, document: Dict[str, Any]) -> str:
         raise
 
 
-async def find_one(collection_name: str, filter: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+async def find_one(collection_name: str, filter: Dict[str, Any], projection: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
     """
     Find a single document in a collection.
 
     Args:
         collection_name: Name of the collection
         filter: Query filter
+        projection: Optional projection to limit returned fields
 
     Returns:
         Dict if found, None otherwise
@@ -120,7 +121,10 @@ async def find_one(collection_name: str, filter: Dict[str, Any]) -> Optional[Dic
     try:
         db = await get_database()
         collection = db[collection_name]
-        document = await collection.find_one(filter)
+        if projection:
+            document = await collection.find_one(filter, projection)
+        else:
+            document = await collection.find_one(filter)
         return document
     except Exception as e:
         print(f"[ERROR] Failed to find document: {e}")

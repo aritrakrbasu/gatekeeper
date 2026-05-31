@@ -362,6 +362,17 @@ class ArizeCloudClient:
             output_tokens = int(attrs.get('llm.token_count.completion', 0) or 0)
             total_tokens = int(attrs.get('llm.token_count.total', 0) or 0)
 
+            # Extract cost from Arize (handle both flat and nested formats)
+            # Try flat format first (llm.cost.total)
+            total_cost = float(attrs.get('llm.cost.total', 0) or 0)
+            if total_cost == 0:
+                # Try nested format
+                total_cost = float(get_attr_value(attrs, 'llm', 'cost', 'total') or 0)
+
+            # Also extract individual costs for detail
+            input_cost = float(attrs.get('llm.cost.prompt', 0) or 0)
+            output_cost = float(attrs.get('llm.cost.completion', 0) or 0)
+
             # If flat format didn't work, try nested format (llm.token_count.input)
             if input_tokens == 0:
                 input_tokens = int(get_attr_value(attrs, 'llm', 'token_count', 'input') or 0)
@@ -373,14 +384,26 @@ class ArizeCloudClient:
             # Extract model name (handle both formats)
             model_name = attrs.get('llm.model_name') or get_attr_value(attrs, 'llm', 'model_name') or 'gemini-3.5-flash'
 
-            # Get trace/span ID from context
+            # Get trace/span ID and timestamp from context
             span_context = getattr(span, 'context', None)
+            span_start_time = getattr(span, 'start_time', None)
+
             if span_context:
                 trace_id = getattr(span_context, 'trace_id', '') or ''
                 span_id = getattr(span_context, 'span_id', '') or ''
             else:
                 trace_id = ''
                 span_id = ''
+
+            # Convert span start_time to ISO format if available
+            timestamp = None
+            if span_start_time:
+                if isinstance(span_start_time, datetime):
+                    timestamp = span_start_time.isoformat()
+                elif hasattr(span_start_time, 'isoformat'):
+                    timestamp = span_start_time.isoformat()
+                else:
+                    timestamp = str(span_start_time)
 
             # Create trace-like object with LLM data
             trace = {
@@ -389,9 +412,20 @@ class ArizeCloudClient:
                 "attributes": {
                     "llm_input_tokens": input_tokens,
                     "llm_output_tokens": output_tokens,
+                    "llm_total_tokens": total_tokens,
                     "llm_model_name": model_name,
                 }
             }
+
+            # Add cost if available from Arize
+            if total_cost > 0:
+                trace["attributes"]["llm_total_cost"] = total_cost
+                trace["attributes"]["llm_input_cost"] = input_cost
+                trace["attributes"]["llm_output_cost"] = output_cost
+
+            # Add timestamp if available
+            if timestamp:
+                trace["attributes"]["timestamp"] = timestamp
 
             # Debug log the trace creation
             logger.debug(f"[DEBUG] Created trace {trace_id[:16]}...: input_tokens={input_tokens}, output_tokens={output_tokens}, context={context}")

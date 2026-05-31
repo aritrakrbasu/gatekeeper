@@ -33,7 +33,19 @@ const RepoDetails = () => {
     enabled: false,
   });
   const [showBranchMongoUriModal, setShowBranchMongoUriModal] = useState(false);
-  const [showBranchFivetranSecretModal, setShowBranchFivetranSecretModal] = useState(false);
+  const [showBranchFivetranSecretModal, setShowBranchFivetranSecretModal] =
+    useState(false);
+
+  // Reset feedback state when selected MR changes
+  useEffect(() => {
+    if (selectedMR) {
+      setFeedback({
+        vote: null,
+        text: "",
+        submitted: selectedMR.userHasRated || false,
+      });
+    }
+  }, [selectedMR]);
 
   // Fetch repository details
   const {
@@ -83,7 +95,6 @@ const RepoDetails = () => {
       </div>
     );
   }
-
   // Default values if repo not loaded yet
   const repoData = repo || {
     name: "Loading...",
@@ -94,7 +105,7 @@ const RepoDetails = () => {
       mrsReviewed: 0,
       avg_review_time: "0s",
       auto_fixes_applied: 0,
-      testCoverage: "0%",
+      fixes_merged: "0%",
     },
     vectorAnalysis: {
       security: "0%",
@@ -105,13 +116,29 @@ const RepoDetails = () => {
 
   // Map backend stats to frontend format
   const stats = {
-    mrsReviewed: repoData.stats?.mrs_reviewed || repoMRs.length,
-    avgTime: repoData.stats?.avg_review_time || "0s",
-    autoFixes: repoData.stats?.auto_fixes_applied || 0,
-    testCoverage: repoData.stats?.test_coverage || "0%",
+    mrsReviewed: repoData.metrics?.mrs_reviewed || repoMRs.length,
+    avgTime: repoData.metrics?.avg_review_time || "0s",
+    autoFixes: repoData.metrics?.auto_fixes_proposed || 0,
+    fixes_merged: repoData.metrics?.fixes_merged || "0%",
   };
 
   const repoMRsList = repoMRs || [];
+
+  // Group MRs: separate original MRs from auto-fix MRs
+  const originalMRs = repoMRsList.filter((mr) => !mr.isAutoFix);
+  const autoFixMRs = repoMRsList.filter((mr) => mr.isAutoFix);
+
+  // Create a map of auto-fix MRs by their original MR ID
+  const autoFixMRsByOriginal = {};
+  autoFixMRs.forEach((autoFixMR) => {
+    const originalMrIid = autoFixMR.autoFixFor;
+    if (originalMrIid) {
+      if (!autoFixMRsByOriginal[originalMrIid]) {
+        autoFixMRsByOriginal[originalMrIid] = [];
+      }
+      autoFixMRsByOriginal[originalMrIid].push(autoFixMR);
+    }
+  });
 
   // Connection status from repo data (computed after repoData is available)
   const connectionStatus = {
@@ -334,10 +361,10 @@ const RepoDetails = () => {
         </div>
         <div className="bg-white/70 backdrop-blur-xl rounded-[1.5rem] border border-white/80 p-5 shadow-sm">
           <p className="text-slate-500 text-xs font-bold uppercase tracking-wider mb-1">
-            Test Coverage
+            Approved Autofixes
           </p>
           <p className="text-2xl font-bold text-emerald-600">
-            {stats.testCoverage}
+            {stats.fixes_merged}
           </p>
         </div>
       </div>
@@ -346,30 +373,80 @@ const RepoDetails = () => {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* LEFT COLUMN: MR Feed */}
         <div className="lg:col-span-2 flex flex-col gap-6">
-          <div className="bg-white/70 backdrop-blur-xl rounded-[2rem] border border-white/80 shadow-sm p-6 lg:p-8">
-            <div className="flex justify-between items-center mb-6">
-              <h3 className="text-lg font-bold text-slate-900">
-                Merge Requests Feed
-              </h3>
-              <div className="flex items-center gap-2">
+          <div className="bg-white/70 backdrop-blur-xl rounded-[2rem] border border-white/80 shadow-sm p-6 lg:p-8 flex flex-col h-full">
+            {/* Header */}
+            <div className="flex justify-between items-center mb-6 pb-4 border-b border-slate-100/50">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-slate-900 flex items-center justify-center shadow-sm">
+                  <svg
+                    className="w-5 h-5 text-white"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth="2"
+                      d="M8 7v8a2 2 0 002 2h6M8 7V5a2 2 0 012-2h4.586a1 1 0 01.707.293l4.414 4.414a1 1 0 01.293.707V15a2 2 0 01-2 2h-2M8 7H6a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2v-2"
+                    />
+                  </svg>
+                </div>
+                <h3 className="text-lg font-bold text-slate-900 tracking-tight">
+                  Merge Requests Feed
+                </h3>
+              </div>
+              <div className="flex items-center gap-3">
                 {mrsLoading && (
                   <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-[#FC6D26]"></div>
                 )}
-                <button className="text-sm font-semibold text-[#FC6D26] bg-[#FC6D26]/10 px-3 py-1.5 rounded-lg hover:bg-[#FC6D26]/20 transition-colors">
+                <button className="text-xs font-bold uppercase tracking-wider text-[#FC6D26] bg-[#FC6D26]/10 px-4 py-2 rounded-xl hover:bg-[#FC6D26]/20 transition-colors flex items-center gap-1.5">
+                  <svg
+                    className="w-3.5 h-3.5"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth="2"
+                      d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z"
+                    />
+                  </svg>
                   Filter
                 </button>
               </div>
             </div>
 
-            <div className="space-y-3">
+            <div className="space-y-5 flex-1">
               {repoMRsList.length === 0 ? (
-                <div className="text-center py-12">
-                  <p className="text-slate-500">
-                    No merge requests found. Sync to fetch latest data.
+                <div className="text-center py-16 flex flex-col items-center justify-center h-full">
+                  <div className="w-16 h-16 bg-slate-50 border border-slate-100 rounded-full flex items-center justify-center mb-4">
+                    <svg
+                      className="w-8 h-8 text-slate-300"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth="1.5"
+                        d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"
+                      />
+                    </svg>
+                  </div>
+                  <h4 className="text-base font-semibold text-slate-900 mb-1">
+                    Queue is empty
+                  </h4>
+                  <p className="text-sm text-slate-500 max-w-xs">
+                    No merge requests found. Sync your repository to fetch the
+                    latest data.
                   </p>
                 </div>
               ) : (
-                repoMRsList.map((mr, i) => {
+                originalMRs.map((mr, i) => {
                   // Map backend status to frontend display
                   const getStatusDisplay = (status) => {
                     switch (status) {
@@ -393,36 +470,22 @@ const RepoDetails = () => {
                   };
 
                   const statusDisplay = getStatusDisplay(mr.status);
+                  const autoFixMrsForThisMR =
+                    autoFixMRsByOriginal[mr.iid] ||
+                    autoFixMRsByOriginal[mr.gitlab_mr_id] ||
+                    [];
 
                   return (
-                    <div
-                      key={i}
-                      onClick={() => setSelectedMR(mr)}
-                      className={`group p-4 rounded-[1.25rem] bg-white/50 hover:bg-white transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-4 cursor-pointer shadow-sm hover:shadow-md hover:-translate-y-0.5 ${mr.isAutoFix ? "border-[1.5px] border-[#FC6D26]/40 bg-gradient-to-r from-[#FC6D26]/5 to-transparent" : "border border-white/60"}`}
-                    >
-                      <div className="flex items-start sm:items-center gap-4">
-                        {mr.isAutoFix ? (
-                          <div className="w-10 h-10 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-center shrink-0 relative shadow-sm">
-                            <div className="absolute inset-0 bg-[#FC6D26] blur opacity-20 rounded-xl"></div>
-                            {/* AI Spark Icon */}
+                    <div key={i} className="relative group/thread">
+                      {/* Original MR Card */}
+                      <div
+                        onClick={() => setSelectedMR(mr)}
+                        className="group p-4 rounded-2xl bg-white border border-slate-100 hover:border-slate-200 hover:shadow-md transition-all duration-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4 cursor-pointer relative z-10"
+                      >
+                        <div className="flex items-start sm:items-center gap-4 min-w-0 flex-1">
+                          <div className="w-10 h-10 rounded-xl bg-slate-50 border border-slate-100 flex items-center justify-center shrink-0 group-hover:bg-slate-100 transition-colors">
                             <svg
-                              className="w-5 h-5 text-[#FC6D26] relative z-10"
-                              fill="none"
-                              viewBox="0 0 24 24"
-                              stroke="currentColor"
-                            >
-                              <path
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
-                                strokeWidth="2.5"
-                                d="M13 10V3L4 14h7v7l9-11h-7z"
-                              />
-                            </svg>
-                          </div>
-                        ) : (
-                          <div className="w-10 h-10 rounded-xl bg-slate-100 border border-slate-200 flex items-center justify-center shrink-0">
-                            <svg
-                              className="w-5 h-5 text-slate-500 group-hover:text-slate-900 transition-colors"
+                              className="w-5 h-5 text-slate-400 group-hover:text-slate-600 transition-colors"
                               fill="none"
                               viewBox="0 0 24 24"
                               stroke="currentColor"
@@ -435,95 +498,183 @@ const RepoDetails = () => {
                               />
                             </svg>
                           </div>
-                        )}
 
-                        <div>
-                          <p className="text-sm font-bold text-slate-900 mb-1 flex items-center gap-2">
-                            {mr.title}
-                            {mr.isAutoFix && (
-                              <span className="px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-widest bg-[#FC6D26]/10 text-[#FC6D26] rounded-md border border-[#FC6D26]/20">
-                                Auto-Fix
+                          <div className="min-w-0 flex-1">
+                            <div className="text-sm font-bold text-slate-900 mb-1.5 flex flex-wrap items-center gap-2">
+                              <span className="truncate">{mr.title}</span>
+                              {autoFixMrsForThisMR.length > 0 && (
+                                <span className="px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-widest bg-[#FC6D26]/10 text-[#FC6D26] rounded border border-[#FC6D26]/20 shrink-0">
+                                  {autoFixMrsForThisMR.length} Auto-Fix
+                                  {autoFixMrsForThisMR.length > 1 ? "es" : ""}
+                                </span>
+                              )}
+                            </div>
+                            <div className="flex flex-wrap items-center gap-2 text-xs font-mono text-slate-500">
+                              <span
+                                className="bg-slate-100 px-1.5 py-0.5 rounded text-slate-600 border border-slate-200/60 truncate max-w-[120px]"
+                                title={mr.branch}
+                              >
+                                {mr.branch}
                               </span>
-                            )}
-                          </p>
-                          <div className="flex items-center gap-2 text-xs font-mono text-slate-500">
-                            <span className="bg-slate-200/50 px-1.5 py-0.5 rounded text-slate-600">
-                              {mr.branch}
-                            </span>
-                            <svg
-                              className="w-3 h-3 text-slate-400"
-                              fill="none"
-                              viewBox="0 0 24 24"
-                              stroke="currentColor"
-                            >
-                              <path
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
-                                strokeWidth="2"
-                                d="M14 5l7 7m0 0l-7 7m7-7H3"
-                              />
-                            </svg>
-                            <span className="bg-slate-200/50 px-1.5 py-0.5 rounded text-slate-600">
-                              {mr.target}
-                            </span>
+                              <svg
+                                className="w-3 h-3 text-slate-300 shrink-0"
+                                fill="none"
+                                viewBox="0 0 24 24"
+                                stroke="currentColor"
+                              >
+                                <path
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                  strokeWidth="2"
+                                  d="M14 5l7 7m0 0l-7 7m7-7H3"
+                                />
+                              </svg>
+                              <span
+                                className="bg-slate-100 px-1.5 py-0.5 rounded text-slate-600 border border-slate-200/60 truncate max-w-[120px]"
+                                title={mr.target}
+                              >
+                                {mr.target}
+                              </span>
+                            </div>
                           </div>
+                        </div>
+
+                        <div className="flex flex-row sm:flex-col items-center sm:items-end justify-between sm:justify-center gap-2 ml-14 sm:ml-0 shrink-0">
+                          {statusDisplay === "Open" && (
+                            <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide bg-slate-100 text-slate-600 border border-slate-200">
+                              <span className="w-1.5 h-1.5 rounded-full bg-slate-400"></span>{" "}
+                              Open
+                            </span>
+                          )}
+                          {statusDisplay === "Reviewing" && (
+                            <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide bg-blue-50 text-blue-600 border border-blue-100">
+                              <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse"></span>{" "}
+                              Reviewing
+                            </span>
+                          )}
+                          {statusDisplay === "Reviewed" && (
+                            <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide bg-emerald-50 text-emerald-600 border border-emerald-100">
+                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>{" "}
+                              Reviewed
+                            </span>
+                          )}
+                          {statusDisplay === "Merged" && (
+                            <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide bg-purple-50 text-purple-600 border border-purple-100">
+                              <span className="w-1.5 h-1.5 rounded-full bg-purple-500"></span>{" "}
+                              Merged
+                            </span>
+                          )}
+                          <span className="text-[10px] text-slate-400 font-medium whitespace-nowrap">
+                            {mr.id} • {mr.time}
+                          </span>
                         </div>
                       </div>
 
-                      <div className="flex flex-row sm:flex-col items-center sm:items-end justify-between sm:justify-center gap-2 sm:gap-1.5 ml-14 sm:ml-0">
-                        {statusDisplay === "Open" && (
-                          <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide bg-slate-100/80 text-slate-700 border border-slate-200">
-                            <span className="w-1.5 h-1.5 rounded-full bg-slate-500"></span>{" "}
-                            Open
-                          </span>
-                        )}
-                        {statusDisplay === "Reviewing" && (
-                          <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide bg-blue-100/80 text-blue-700 border border-blue-200">
-                            <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-ping"></span>{" "}
-                            Reviewing
-                          </span>
-                        )}
-                        {statusDisplay === "Reviewed" && (
-                          <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide bg-emerald-100/80 text-emerald-700 border border-emerald-200">
-                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>{" "}
-                            Reviewed
-                          </span>
-                        )}
-                        {statusDisplay === "Merged" && (
-                          <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide bg-purple-100/80 text-purple-700 border border-purple-200">
-                            <span className="w-1.5 h-1.5 rounded-full bg-purple-500"></span>{" "}
-                            Merged
-                          </span>
-                        )}
-                        {statusDisplay === "Closed" && (
-                          <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide bg-slate-100/80 text-slate-700 border border-slate-200">
-                            <span className="w-1.5 h-1.5 rounded-full bg-slate-500"></span>{" "}
-                            Closed
-                          </span>
-                        )}
-                        {statusDisplay === "Draft" && (
-                          <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide bg-slate-100/80 text-slate-700 border border-slate-200">
-                            <span className="w-1.5 h-1.5 rounded-full bg-slate-500"></span>{" "}
-                            Draft
-                          </span>
-                        )}
-                        {statusDisplay === "Failed" && (
-                          <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide bg-rose-100/80 text-rose-700 border border-rose-200">
-                            <span className="w-1.5 h-1.5 rounded-full bg-rose-500"></span>{" "}
-                            Failed
-                          </span>
-                        )}
-                        <span className="text-[11px] text-slate-400 font-medium whitespace-nowrap">
-                          {mr.isAutoFix ? (
-                            <span className="text-[#FC6D26] font-semibold">
-                              {mr.author}
-                            </span>
-                          ) : (
-                            mr.id
-                          )}{" "}
-                          • {mr.time}
-                        </span>
-                      </div>
+                      {/* Threaded Auto-Fix MRs Block */}
+                      {autoFixMrsForThisMR.length > 0 && (
+                        <div className="mt-2 ml-5 sm:ml-9 pl-4 border-l-2 border-slate-200/60 space-y-3 relative pb-1">
+                          <div className="absolute top-0 -left-[5px] w-2 h-2 rounded-full bg-slate-200/60"></div>
+
+                          {autoFixMrsForThisMR.map((autoFixMR, idx) => {
+                            const autoFixStatusDisplay = getStatusDisplay(
+                              autoFixMR.status,
+                            );
+                            return (
+                              <div
+                                key={`${i}-autofix-${idx}`}
+                                onClick={() => setSelectedMR(autoFixMR)}
+                                className="group/autofix p-4 rounded-xl bg-slate-900 border border-slate-800 hover:border-slate-700 transition-all flex flex-col md:flex-row md:items-center justify-between gap-4 cursor-pointer shadow-sm relative overflow-hidden"
+                              >
+                                <div className="absolute inset-0 bg-gradient-to-r from-[#FC6D26]/5 to-transparent opacity-0 group-hover/autofix:opacity-100 transition-opacity"></div>
+
+                                {/* Left Segment: Header & Content Wrapper */}
+                                <div className="flex items-start gap-3 relative z-10 flex-1 min-w-0">
+                                  <div className="w-8 h-8 rounded-lg bg-[#FC6D26]/10 border border-[#FC6D26]/20 flex items-center justify-center shrink-0 mt-0.5 md:mt-0">
+                                    <svg
+                                      className="w-4 h-4 text-[#FC6D26]"
+                                      fill="none"
+                                      viewBox="0 0 24 24"
+                                      stroke="currentColor"
+                                    >
+                                      <path
+                                        strokeLinecap="round"
+                                        strokeLinejoin="round"
+                                        strokeWidth="2.5"
+                                        d="M13 10V3L4 14h7v7l9-11h-7z"
+                                      />
+                                    </svg>
+                                  </div>
+
+                                  <div className="min-w-0 flex-1 space-y-2">
+                                    <div className="flex flex-wrap items-center gap-2">
+                                      <p className="text-sm font-semibold text-white truncate max-w-[280px] sm:max-w-[400px]">
+                                        {autoFixMR.title}
+                                      </p>
+                                      <span className="px-1.5 py-0.5 text-[8px] font-bold uppercase tracking-widest bg-[#FC6D26]/20 text-[#FC6D26] rounded border border-[#FC6D26]/30 shrink-0">
+                                        AI Generated
+                                      </span>
+                                    </div>
+
+                                    {/* Clean line layout for branch flow */}
+                                    <div className="flex flex-wrap items-center gap-2 text-xs font-mono text-slate-400">
+                                      <span
+                                        className="bg-slate-800 px-1.5 py-0.5 rounded border border-slate-700 truncate max-w-[150px]"
+                                        title={autoFixMR.branch}
+                                      >
+                                        {autoFixMR.branch}
+                                      </span>
+                                      <svg
+                                        className="w-2.5 h-2.5 text-slate-600 shrink-0"
+                                        fill="none"
+                                        viewBox="0 0 24 24"
+                                        stroke="currentColor"
+                                      >
+                                        <path
+                                          strokeLinecap="round"
+                                          strokeLinejoin="round"
+                                          strokeWidth="2"
+                                          d="M14 5l7 7m0 0l-7 7m7-7H3"
+                                        />
+                                      </svg>
+                                      <span
+                                        className="bg-slate-800 px-1.5 py-0.5 rounded border border-slate-700 truncate max-w-[120px]"
+                                        title={autoFixMR.target}
+                                      >
+                                        {autoFixMR.target}
+                                      </span>
+                                    </div>
+                                  </div>
+                                </div>
+
+                                {/* Right Segment: Status and Meta Authorship */}
+                                <div className="flex flex-row md:flex-col items-center md:items-end justify-between md:justify-center gap-2 pl-11 md:pl-0 shrink-0 relative z-10 border-t md:border-t-0 border-slate-800/60 pt-3 md:pt-0">
+                                  {autoFixStatusDisplay === "Open" && (
+                                    <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider bg-slate-800 text-slate-300 border border-slate-700">
+                                      <span className="w-1.5 h-1.5 rounded-full bg-slate-500"></span>{" "}
+                                      Open
+                                    </span>
+                                  )}
+                                  {autoFixStatusDisplay === "Merged" && (
+                                    <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider bg-purple-500/10 text-purple-400 border border-purple-500/20">
+                                      <span className="w-1.5 h-1.5 rounded-full bg-purple-500"></span>{" "}
+                                      Merged
+                                    </span>
+                                  )}
+                                  <div className="text-[10px] text-slate-500 font-medium whitespace-nowrap truncate max-w-[180px]">
+                                    <span
+                                      className="text-[#FC6D26] font-semibold"
+                                      title={autoFixMR.author}
+                                    >
+                                      {autoFixMR.author}
+                                    </span>{" "}
+                                    • {autoFixMR.time}
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
                     </div>
                   );
                 })
@@ -815,62 +966,87 @@ const RepoDetails = () => {
           <div className="bg-white/70 backdrop-blur-xl rounded-[2rem] border border-white/80 shadow-sm p-6 lg:p-8">
             <div className="flex justify-between items-center mb-5">
               <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-                <svg className="w-5 h-5 text-[#FC6D26]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
+                <svg
+                  className="w-5 h-5 text-[#FC6D26]"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth="2.5"
+                    d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4"
+                  />
                 </svg>
                 Monitored Branches
               </h3>
             </div>
-            
             <p className="text-xs text-slate-500 mb-4 leading-relaxed">
-              Configure custom database credentials per branch for schema drift checks.
+              Configure custom database credentials per branch for schema drift
+              checks.
             </p>
-
+            {console.log("repoData", repoData)}
             <div className="space-y-3">
-              {(repoData.target_branches || ["main", "master", "develop"]).map((branch) => {
-                const branchCreds = repoData.branch_credentials?.[branch];
-                const hasOverride = branchCreds && (
-                  branchCreds.mongodb_uri ||
-                  branchCreds.fivetran_api_key ||
-                  branchCreds.fivetran_api_secret
-                );
-                
-                return (
-                  <div key={branch} className="flex items-center justify-between p-3.5 bg-slate-50/50 border border-slate-100 rounded-2xl">
-                    <div className="flex flex-col gap-1.5">
-                      <span className="text-xs font-mono font-bold text-slate-800">
-                        {branch}
-                      </span>
-                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full inline-block w-fit border uppercase tracking-wider ${
-                        hasOverride 
-                          ? "bg-emerald-50 text-emerald-700 border-emerald-100" 
-                          : "bg-slate-100 text-slate-500 border-slate-200"
-                      }`}>
-                        {hasOverride ? "Override Active" : "Using Defaults"}
-                      </span>
-                    </div>
-                    
-                    <button
-                      onClick={() => {
-                        const currentCreds = repoData.branch_credentials?.[branch] || {};
-                        setBranchCredsModal({
-                          isOpen: true,
-                          branch,
-                          mongodb_uri: currentCreds.mongodb_uri || "",
-                          fivetran_api_key: currentCreds.fivetran_api_key || "",
-                          fivetran_api_secret: currentCreds.fivetran_api_secret || "",
-                          enabled: !!(currentCreds.mongodb_uri || currentCreds.fivetran_api_key || currentCreds.fivetran_api_secret),
-                        });
-                        setShowBranchMongoUriModal(false);
-                        setShowBranchFivetranSecretModal(false);
-                      }}
-                      className="flex items-center gap-1 text-xs font-bold text-slate-600 hover:text-[#FC6D26] bg-white hover:bg-slate-50 px-3 py-1.5 border border-slate-200 rounded-xl shadow-sm transition-colors"
+              {repoData &&
+                repoData.target_branches &&
+                repoData.target_branches.length > 0 &&
+                repoData.target_branches.map((branch) => {
+                  const branchCreds = repoData.branch_credentials?.[branch];
+                  const hasOverride =
+                    branchCreds &&
+                    (branchCreds.mongodb_uri ||
+                      branchCreds.fivetran_api_key ||
+                      branchCreds.fivetran_api_secret);
+
+                  return (
+                    <div
+                      key={branch}
+                      className="flex items-center justify-between p-3.5 bg-slate-50/50 border border-slate-100 rounded-2xl"
                     >
-                      Configure
-                    </button>
-                  </div>
-                );
-              })}
+                      <div className="flex flex-col gap-1.5">
+                        <span className="text-xs font-mono font-bold text-slate-800">
+                          {branch}
+                        </span>
+                        <span
+                          className={`text-[10px] font-bold px-2 py-0.5 rounded-full inline-block w-fit border uppercase tracking-wider ${
+                            hasOverride
+                              ? "bg-emerald-50 text-emerald-700 border-emerald-100"
+                              : "bg-slate-100 text-slate-500 border-slate-200"
+                          }`}
+                        >
+                          {hasOverride ? "Override Active" : "Using Defaults"}
+                        </span>
+                      </div>
+
+                      <button
+                        onClick={() => {
+                          const currentCreds =
+                            repoData.branch_credentials?.[branch] || {};
+                          setBranchCredsModal({
+                            isOpen: true,
+                            branch,
+                            mongodb_uri: currentCreds.mongodb_uri || "",
+                            fivetran_api_key:
+                              currentCreds.fivetran_api_key || "",
+                            fivetran_api_secret:
+                              currentCreds.fivetran_api_secret || "",
+                            enabled: !!(
+                              currentCreds.mongodb_uri ||
+                              currentCreds.fivetran_api_key ||
+                              currentCreds.fivetran_api_secret
+                            ),
+                          });
+                          setShowBranchMongoUriModal(false);
+                          setShowBranchFivetranSecretModal(false);
+                        }}
+                        className="flex items-center gap-1 text-xs font-bold text-slate-600 hover:text-[#FC6D26] bg-white hover:bg-slate-50 px-3 py-1.5 border border-slate-200 rounded-xl shadow-sm transition-colors"
+                      >
+                        Configure
+                      </button>
+                    </div>
+                  );
+                })}
             </div>
           </div>
         </div>
@@ -1197,7 +1373,24 @@ const RepoDetails = () => {
 
                 {/* --- FEEDBACK SYSTEM UI --- */}
                 <div className="bg-slate-950/80 p-4 border-t border-slate-800/80 transition-all duration-300">
-                  {feedback.submitted ? (
+                  {selectedMR.userHasRated ? (
+                    <div className="flex items-center gap-2 text-slate-400 text-sm font-medium py-2">
+                      <svg
+                        className="w-5 h-5"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth="2"
+                          d="M5 13l4 4L19 7"
+                        />
+                      </svg>
+                      You already rated this analysis as {selectedMR.userVote}.
+                    </div>
+                  ) : feedback.submitted ? (
                     <div className="flex items-center gap-2 text-emerald-400 text-sm font-medium py-2">
                       <svg
                         className="w-5 h-5"
@@ -1529,7 +1722,9 @@ const RepoDetails = () => {
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 sm:p-6">
           <div
             className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm transition-opacity"
-            onClick={() => setBranchCredsModal({ ...branchCredsModal, isOpen: false })}
+            onClick={() =>
+              setBranchCredsModal({ ...branchCredsModal, isOpen: false })
+            }
           ></div>
 
           <div className="relative w-full max-w-md bg-white/95 backdrop-blur-2xl border border-white rounded-2xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
@@ -1544,7 +1739,9 @@ const RepoDetails = () => {
                 </span>
               </div>
               <button
-                onClick={() => setBranchCredsModal({ ...branchCredsModal, isOpen: false })}
+                onClick={() =>
+                  setBranchCredsModal({ ...branchCredsModal, isOpen: false })
+                }
                 className="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center text-slate-500 hover:bg-slate-200 hover:text-slate-900 transition-colors"
               >
                 <svg
@@ -1568,16 +1765,22 @@ const RepoDetails = () => {
               {/* Enable Override Toggle */}
               <div className="flex items-center justify-between p-3.5 bg-slate-50 rounded-xl border border-slate-100 mb-2">
                 <div className="flex flex-col">
-                  <span className="text-xs font-bold text-slate-700">Enable Custom Credentials</span>
-                  <span className="text-[10px] text-slate-400">Override repository-level defaults for this branch</span>
+                  <span className="text-xs font-bold text-slate-700">
+                    Enable Custom Credentials
+                  </span>
+                  <span className="text-[10px] text-slate-400">
+                    Override repository-level defaults for this branch
+                  </span>
                 </div>
                 <input
                   type="checkbox"
                   checked={branchCredsModal.enabled}
-                  onChange={(e) => setBranchCredsModal({
-                    ...branchCredsModal,
-                    enabled: e.target.checked,
-                  })}
+                  onChange={(e) =>
+                    setBranchCredsModal({
+                      ...branchCredsModal,
+                      enabled: e.target.checked,
+                    })
+                  }
                   className="w-4 h-4 text-[#FC6D26] focus:ring-[#FC6D26]/30 border-slate-300 rounded cursor-pointer"
                 />
               </div>
@@ -1604,17 +1807,44 @@ const RepoDetails = () => {
                       />
                       <button
                         type="button"
-                        onClick={() => setShowBranchMongoUriModal(!showBranchMongoUriModal)}
+                        onClick={() =>
+                          setShowBranchMongoUriModal(!showBranchMongoUriModal)
+                        }
                         className="absolute right-3.5 top-1/2 transform -translate-y-1/2 text-slate-400 hover:text-slate-600 focus:outline-none transition-colors duration-200"
                       >
                         {showBranchMongoUriModal ? (
-                          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l18 18" />
+                          <svg
+                            className="w-4 h-4"
+                            fill="none"
+                            viewBox="0 0 24 24"
+                            stroke="currentColor"
+                          >
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              strokeWidth="2"
+                              d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l18 18"
+                            />
                           </svg>
                         ) : (
-                          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                          <svg
+                            className="w-4 h-4"
+                            fill="none"
+                            viewBox="0 0 24 24"
+                            stroke="currentColor"
+                          >
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              strokeWidth="2"
+                              d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
+                            />
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              strokeWidth="2"
+                              d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"
+                            />
                           </svg>
                         )}
                       </button>
@@ -1647,7 +1877,9 @@ const RepoDetails = () => {
                     </label>
                     <div className="relative">
                       <input
-                        type={showBranchFivetranSecretModal ? "text" : "password"}
+                        type={
+                          showBranchFivetranSecretModal ? "text" : "password"
+                        }
                         value={branchCredsModal.fivetran_api_secret}
                         onChange={(e) =>
                           setBranchCredsModal({
@@ -1660,17 +1892,46 @@ const RepoDetails = () => {
                       />
                       <button
                         type="button"
-                        onClick={() => setShowBranchFivetranSecretModal(!showBranchFivetranSecretModal)}
+                        onClick={() =>
+                          setShowBranchFivetranSecretModal(
+                            !showBranchFivetranSecretModal,
+                          )
+                        }
                         className="absolute right-3.5 top-1/2 transform -translate-y-1/2 text-slate-400 hover:text-slate-600 focus:outline-none transition-colors duration-200"
                       >
                         {showBranchFivetranSecretModal ? (
-                          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l18 18" />
+                          <svg
+                            className="w-4 h-4"
+                            fill="none"
+                            viewBox="0 0 24 24"
+                            stroke="currentColor"
+                          >
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              strokeWidth="2"
+                              d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l18 18"
+                            />
                           </svg>
                         ) : (
-                          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                          <svg
+                            className="w-4 h-4"
+                            fill="none"
+                            viewBox="0 0 24 24"
+                            stroke="currentColor"
+                          >
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              strokeWidth="2"
+                              d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
+                            />
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              strokeWidth="2"
+                              d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"
+                            />
                           </svg>
                         )}
                       </button>
@@ -1688,16 +1949,21 @@ const RepoDetails = () => {
                   <button
                     onClick={async () => {
                       try {
-                        const remainingBranchCreds = { ...repoData.branch_credentials };
+                        const remainingBranchCreds = {
+                          ...repoData.branch_credentials,
+                        };
                         delete remainingBranchCreds[branchCredsModal.branch];
-                        
+
                         await credentialsMutation.mutateAsync({
                           repoId: id,
                           data: {
                             branch_credentials: remainingBranchCreds,
                           },
                         });
-                        setBranchCredsModal({ ...branchCredsModal, isOpen: false });
+                        setBranchCredsModal({
+                          ...branchCredsModal,
+                          isOpen: false,
+                        });
                       } catch (err) {
                         console.error("Failed to delete branch override:", err);
                       }
@@ -1713,7 +1979,9 @@ const RepoDetails = () => {
               {/* Right side: Save & Cancel */}
               <div className="flex items-center gap-3">
                 <button
-                  onClick={() => setBranchCredsModal({ ...branchCredsModal, isOpen: false })}
+                  onClick={() =>
+                    setBranchCredsModal({ ...branchCredsModal, isOpen: false })
+                  }
                   className="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-900 transition-colors"
                 >
                   Cancel
@@ -1721,24 +1989,29 @@ const RepoDetails = () => {
                 <button
                   onClick={async () => {
                     try {
-                      const currentBranchCreds = { ...repoData.branch_credentials } || {};
+                      const currentBranchCreds =
+                        { ...repoData.branch_credentials } || {};
                       if (branchCredsModal.enabled) {
                         currentBranchCreds[branchCredsModal.branch] = {
                           mongodb_uri: branchCredsModal.mongodb_uri,
                           fivetran_api_key: branchCredsModal.fivetran_api_key,
-                          fivetran_api_secret: branchCredsModal.fivetran_api_secret,
+                          fivetran_api_secret:
+                            branchCredsModal.fivetran_api_secret,
                         };
                       } else {
                         delete currentBranchCreds[branchCredsModal.branch];
                       }
-                      
+
                       await credentialsMutation.mutateAsync({
                         repoId: id,
                         data: {
                           branch_credentials: currentBranchCreds,
                         },
                       });
-                      setBranchCredsModal({ ...branchCredsModal, isOpen: false });
+                      setBranchCredsModal({
+                        ...branchCredsModal,
+                        isOpen: false,
+                      });
                     } catch (err) {
                       console.error("Failed to save branch override:", err);
                     }

@@ -383,7 +383,7 @@ async def get_repository_merge_requests(
             except:
                 pass
 
-        mrs = await repository_service.get_repository_mrs_from_db(repo_id, limit)
+        mrs = await repository_service.get_repository_mrs_from_db(repo_id, limit, user_id=user_id)
         return mrs
     except HTTPException as e:
         raise e
@@ -899,17 +899,17 @@ async def get_billing_usage(authorization: str = Header(None)):
         if not user_id:
             raise HTTPException(status_code=401, detail="Invalid token")
 
-        # Get billing data
-        data = await billing_service.get_billing_dashboard_data(user_id)
+        # Get billing data (using optimized single-document query)
+        data = await billing_service.get_billing_dashboard_data_optimized(user_id)
 
         # Auto-sync if no usage data found (first visit or empty state)
         if data.get("total_tokens", 0) == 0 and data.get("estimated_cost", 0) == 0:
             print(f"[INFO] No billing data found for user {user_id}, triggering auto-sync from Arize...")
-            sync_result = await billing_service.sync_user_usage_from_phoenix(user_id=user_id)
+            sync_result = await billing_service.sync_user_billing_optimized(user_id=user_id)
             if sync_result.get("success"):
                 print(f"[INFO] Auto-sync complete: {sync_result.get('synced', 0)} records synced")
                 # Fetch updated data after sync
-                data = await billing_service.get_billing_dashboard_data(user_id)
+                data = await billing_service.get_billing_dashboard_data_optimized(user_id)
 
         return BillingUsageResponse(**data)
 
@@ -939,8 +939,8 @@ async def sync_billing_data(
 
         print(f"[INFO] /api/billing/sync called with user_id: {user_id} (type: {type(user_id).__name__})")
 
-        # Sync from Arize Cloud
-        result = await billing_service.sync_user_usage_from_phoenix(
+        # Sync from Arize Cloud (using optimized sync)
+        result = await billing_service.sync_user_billing_optimized(
             user_id=user_id,
             force_resync=request.force_resync
         )
@@ -971,7 +971,8 @@ async def get_invoices(
         if not user_id:
             raise HTTPException(status_code=401, detail="Invalid token")
 
-        invoices = await billing_service.get_user_invoices(user_id, limit)
+        # Get invoices (using optimized single-document query)
+        invoices = await billing_service.get_user_invoices_optimized(user_id, limit)
 
         return [InvoiceResponse(**inv) for inv in invoices]
 
@@ -1065,3 +1066,82 @@ async def debug_billing(authorization: str = Header(None)):
     except Exception as e:
         import traceback
         return {"error": str(e), "trace": traceback.format_exc()}
+
+
+@app.post("/api/billing/migrate")
+async def migrate_billing_data(authorization: str = Header(None)):
+    """
+    Migrate legacy billing data to new single-document format.
+
+    This is a one-time migration that should be run during deployment
+    or manually by an admin.
+    """
+    try:
+        # Require admin authorization (simplified - in production use proper admin check)
+        if not authorization:
+            raise HTTPException(status_code=401, detail="Authorization required")
+
+        token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+        user_info = auth_service.verify_token(token)
+
+        if not user_info:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        # Run migration
+        result = await billing_service.migrate_billing_data_to_new_format()
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[ERROR] Failed to migrate billing data: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/billing/summary-debug")
+async def get_billing_summary_debug(authorization: str = Header(None)):
+    """
+    Debug endpoint to view the new billing summary document structure.
+
+    Useful for verifying migration and debugging billing issues.
+    """
+    try:
+        if not authorization:
+            raise HTTPException(status_code=401, detail="Authorization required")
+
+        token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+        user_info = auth_service.verify_token(token)
+        user_id = user_info.get("id")
+
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        # Get billing summary document
+        from services import mongo_client
+        doc = await mongo_client.find_one("billing_summaries", {"user_id": user_id})
+
+        if not doc:
+            return {
+                "user_id": user_id,
+                "message": "No billing summary found - may need to sync or migrate",
+                "document": None
+            }
+
+        # Return clean version without internal _id
+        return {
+            "user_id": user_id,
+            "document": {
+                "sync_state": doc.get("sync_state", {}),
+                "months_count": len(doc.get("months", {})),
+                "months": list(doc.get("months", {}).keys()),
+                "created_at": doc.get("created_at"),
+                "updated_at": doc.get("updated_at")
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[ERROR] Failed to get billing summary debug: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

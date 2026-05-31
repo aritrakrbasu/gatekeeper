@@ -195,6 +195,19 @@ async def orchestrate_review(payload: dict) -> dict:
     # Store MR in MongoDB for frontend retrieval
     analysis_start_time = time.time()  # Track when we received the MR
     try:
+        # Detect if this is an auto-fix MR (branch starts with "gatekeeper/")
+        is_auto_fix = source_branch.startswith("gatekeeper/")
+        auto_fix_for = None
+
+        # If it's an auto-fix MR, try to extract the original MR ID from the branch name
+        # Pattern: gatekeeper/atomic-fix-mr{original_mr_iid}-{timestamp}
+        if is_auto_fix:
+            import re
+            match = re.search(r'gatekeeper/atomic-fix-mr(\d+)', source_branch)
+            if match:
+                auto_fix_for = int(match.group(1))
+                print(f"[INFO] Detected auto-fix MR !{mr_iid_int} for original MR !{auto_fix_for}")
+
         mr_data = {
             "gitlab_mr_id": mr_iid_int,
             "gitlab_mr_internal_id": mr_internal_id,
@@ -214,10 +227,11 @@ async def orchestrate_review(payload: dict) -> dict:
                 "deletions": deletions,
                 "files_changed": files_changed
             },
-            "analysis_status": "pending",
-            "is_auto_fix": False,
-            "auto_fix_for": None,
+            "analysis_status": "skipped" if is_auto_fix else "pending",
+            "is_auto_fix": is_auto_fix,
+            "auto_fix_for": auto_fix_for,
             "auto_fix_mrs": [],
+            "auto_fix_status": "applied" if is_auto_fix else None,
             "progress_logs": [],  # Initialize empty progress logs
             "analysis_started_at": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(analysis_start_time))
         }
@@ -275,7 +289,30 @@ async def orchestrate_review(payload: dict) -> dict:
     # 🔒 Skip audit for Gatekeeper auto-generated branches to prevent infinite loops
     if source_branch.startswith("gatekeeper/"):
         print(f"[⏭️] Skipping audit for auto-generated branch: {source_branch}")
-        return {"status": "skipped_auto_branch"}
+
+        # Add this auto-fix MR to the original MR's auto_fix_mrs list
+        # This ensures the linkage is recorded even if link_auto_fix_to_original_mr hasn't run yet
+        if auto_fix_for:
+            try:
+                from services import mongo_client
+                if mongo_client.CONNECTION_STRING:
+                    await mongo_client.update_one(
+                        collection_name="merge_requests",
+                        filter={
+                            "repository_id": project_id_str,
+                            "gitlab_mr_id": auto_fix_for
+                        },
+                        update={
+                            "$push": {"auto_fix_mrs": mr_iid_int}
+                        }
+                    )
+                    print(f"[OK] Added auto-fix MR !{mr_iid_int} to original MR !{auto_fix_for}'s auto_fix_mrs list")
+                else:
+                    print(f"[INFO] MongoDB not configured - skipping auto_fix_mrs update")
+            except Exception as update_err:
+                print(f"[WARN] Failed to update original MR's auto_fix_mrs list: {update_err}")
+
+        return {"status": "skipped_auto_branch", "auto_fix_for": auto_fix_for}
 
     # 1. Store Request Signature in MongoDB Cluster via MCP
     if mongo_session:
@@ -618,9 +655,41 @@ This may take 30-60 seconds depending on the size of the changes.
 
             # Run Gemini review with user context for usage tracking
             # user_id is extracted from webhook payload at the beginning of the function
+            print(f"[DEBUG] About to call run_gemini_review...")
             gemini_result = await run_gemini_review(raw_diff_content, impact_context, user_config, user_id=user_id, mr_id=mr_iid, repository_id=project_id)
+            print(f"[DEBUG] gemini_result type: {type(gemini_result)}")
+            print(f"[DEBUG] gemini_result: {gemini_result}")
             audit_report = gemini_result.get("review_text", "")
             review_usage = gemini_result.get("usage", {})
+            captured_trace_id = gemini_result.get("trace_id")
+            captured_span_id = gemini_result.get("span_id")  # Capture LLM span ID for Arize annotations
+
+            if captured_span_id:
+                print(f"[INFO] Storing span_id {captured_span_id[:16]}... with MR {mr_iid} for Arize annotations")
+                # Store span_id with MR data for annotations (works with annotate_spans API)
+                try:
+                    await repository_service.update_mr_analysis(
+                        repo_id=str(project_id),
+                        mr_iid=int(mr_iid),
+                        analysis_data={"span_id": captured_span_id}
+                    )
+                    print(f"[OK] Stored span_id with MR {mr_iid}")
+                except Exception as span_err:
+                    print(f"[WARN] Failed to store span_id: {span_err}")
+            elif captured_trace_id:
+                print(f"[INFO] Storing trace_id {captured_trace_id[:16]}... with MR {mr_iid} for feedback linkage (fallback)")
+                # Store trace_id as fallback for backwards compatibility
+                try:
+                    await repository_service.update_mr_analysis(
+                        repo_id=str(project_id),
+                        mr_iid=int(mr_iid),
+                        analysis_data={"trace_id": captured_trace_id}
+                    )
+                    print(f"[OK] Stored trace_id with MR {mr_iid}")
+                except Exception as trace_err:
+                    print(f"[WARN] Failed to store trace_id: {trace_err}")
+            else:
+                print(f"[WARN] No trace_id or span_id returned from Gemini review")
 
             print(f"[OK] Step 4 complete: Gemini analysis compiled ({len(audit_report)} chars)")
             if review_usage:
@@ -797,9 +866,15 @@ This may take 30-60 seconds depending on the size of the changes.
                 patch_summary = create_patch_summary(atomic_patches)
 
                 print("[DEBUG] Requesting fix analysis from Gemini...")
-                fix_result = await asyncio.wait_for(
-                    run_gemini_fix_analysis(audit_report, patch_summary, schema_context=schema_markdown, user_config=user_config, user_id=user_id, mr_id=mr_iid, repository_id=project_id),
-                    timeout=60.0
+                # No timeout - rely on retry logic inside run_gemini_fix_analysis
+                fix_result = await run_gemini_fix_analysis(
+                    audit_report,
+                    patch_summary,
+                    schema_context=schema_markdown,
+                    user_config=user_config,
+                    user_id=user_id,
+                    mr_id=mr_iid,
+                    repository_id=project_id
                 )
 
                 # Extract fix data and usage from result
@@ -820,9 +895,6 @@ This may take 30-60 seconds depending on the size of the changes.
                 )
                 await add_log("auto_fix", "✅ Auto-fix analysis complete - generating fix branches", "completed")
 
-            except asyncio.TimeoutError:
-                print("[⏱️] Fix analysis timed out after 60 seconds - skipping auto-fix")
-                await add_log("auto_fix", "⏱️ Auto-fix analysis timed out - skipping", "completed")
             except json.JSONDecodeError as parse_err:
                 print(f"[ERROR] Failed to parse fix analysis JSON structure: {parse_err}")
                 await add_log("auto_fix", "⚠️ Failed to parse fix analysis - skipping", "completed")
@@ -832,6 +904,8 @@ This may take 30-60 seconds depending on the size of the changes.
 
         except Exception as e:
             print(f"[ERROR] Intelligent Gemini Audit loop failed: {e}")
+            import traceback
+            traceback.print_exc()
 
             # Update MR status to failed
             try:

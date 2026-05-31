@@ -102,11 +102,11 @@ async def track_llm_usage(
     """
     try:
         from services.mongo_client import upsert_one
-        from services.pricing import calculate_cost
         from services.billing_service import _update_billing_cycle_summary
 
-        # Calculate cost
-        estimated_cost = await calculate_cost(model_name, input_tokens, output_tokens)
+        # Cost will be calculated from Arize traces during sync
+        # Set to 0 for local fallback records
+        estimated_cost = 0.0
 
         # Get current billing cycle
         now = datetime.utcnow()
@@ -197,6 +197,7 @@ async def run_gemini_review(raw_diff_content: str, impact_context: str, user_con
 
     # Create a manual span with the baggage context
     token = context.attach(ctx)
+    current_trace_id = None  # Initialize outside the try block
     try:
         with tracer.start_as_current_span("gemini_review_call") as parent_span:
             # Also set directly on span using OpenInference naming conventions
@@ -238,10 +239,12 @@ async def run_gemini_review(raw_diff_content: str, impact_context: str, user_con
             # After the LLM call, find and update the instrumented LLM span with user context
             # The instrumentation creates a child span for the LLM call
             current_span = trace.get_current_span()
+            llm_span_id = None  # Capture the LLM span ID for annotations
             if current_span and current_span.is_recording():
                 # Check if this is the instrumented LLM span (has llm attributes)
                 span_context = current_span.get_span_context()
-                print(f"[INFO] Post-LLM current span: {span_context.span_id[:16]}...")
+                llm_span_id = format(span_context.span_id, 'x')  # Capture span ID as hex string
+                print(f"[INFO] Post-LLM current span: {llm_span_id}...")
 
                 # Set user context on the instrumented span as well
                 # This ensures billing can find user_id on LLM spans
@@ -254,17 +257,38 @@ async def run_gemini_review(raw_diff_content: str, impact_context: str, user_con
                 current_span.set_attribute("operation.type", "review")
                 print(f"[INFO] Set user context on instrumented LLM span")
 
+            # Capture trace_id while span is still active
+            from ai_observability.trace_utils import get_current_trace_id
+            current_trace_id = get_current_trace_id()
+            if current_trace_id:
+                print(f"[INFO] Captured trace_id for MR {mr_id}: {current_trace_id[:16]}...")
+            else:
+                print(f"[WARN] No active trace found during review - feedback linkage may not work")
+
     finally:
         context.detach(token)
 
     # Extract usage metadata from Gemini response
-    usage_metadata = getattr(response, 'usage_metadata', None)
-    usage_data = {
-        "input_tokens": getattr(usage_metadata, 'prompt_token_count', 0) if usage_metadata else 0,
-        "output_tokens": getattr(usage_metadata, 'candidates_token_count', 0) if usage_metadata else 0,
-        "total_tokens": getattr(usage_metadata, 'total_token_count', 0) if usage_metadata else 0,
-        "model_name": model
-    }
+    try:
+        print(f"[DEBUG] response type: {type(response)}")
+        print(f"[DEBUG] response attributes: {dir(response)}")
+        usage_metadata = getattr(response, 'usage_metadata', None)
+        print(f"[DEBUG] usage_metadata type: {type(usage_metadata)}")
+        if usage_metadata:
+            print(f"[DEBUG] usage_metadata attributes: {dir(usage_metadata)}")
+
+        usage_data = {
+            "input_tokens": getattr(usage_metadata, 'prompt_token_count', 0) if usage_metadata else 0,
+            "output_tokens": getattr(usage_metadata, 'candidates_token_count', 0) if usage_metadata else 0,
+            "total_tokens": getattr(usage_metadata, 'total_token_count', 0) if usage_metadata else 0,
+            "model_name": model
+        }
+        print(f"[DEBUG] usage_data: {usage_data}")
+    except Exception as metadata_err:
+        print(f"[ERROR] Error extracting usage metadata: {metadata_err}")
+        import traceback
+        traceback.print_exc()
+        usage_data = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "model_name": model}
 
     # Track usage to MongoDB for billing
     if user_id and usage_data.get("total_tokens", 0) > 0:
@@ -279,9 +303,20 @@ async def run_gemini_review(raw_diff_content: str, impact_context: str, user_con
             repository_id=repository_id
         )
 
+    try:
+        review_text = response.text
+        print(f"[DEBUG] review_text length: {len(review_text)}")
+    except Exception as text_err:
+        print(f"[ERROR] Error accessing response.text: {text_err}")
+        import traceback
+        traceback.print_exc()
+        review_text = "Error: Could not extract review text from Gemini response"
+
     return {
-        "review_text": response.text,
-        "usage": usage_data
+        "review_text": review_text,
+        "usage": usage_data,
+        "trace_id": current_trace_id,
+        "span_id": llm_span_id  # Include LLM span ID for Arize annotations
     }
 
 
@@ -400,9 +435,11 @@ async def run_gemini_fix_analysis(audit_report: str, patch_summary: str, schema_
 
             # After the LLM call, find and update the instrumented LLM span with user context
             current_span = trace.get_current_span()
+            llm_span_id = None  # Capture the LLM span ID for annotations
             if current_span and current_span.is_recording():
                 span_context = current_span.get_span_context()
-                print(f"[INFO] Post-LLM current span: {span_context.span_id[:16]}...")
+                llm_span_id = format(span_context.span_id, 'x')  # Capture span ID as hex string
+                print(f"[INFO] Post-LLM current span: {llm_span_id}...")
 
                 # Set user context on the instrumented span as well
                 if user_id:
@@ -418,13 +455,24 @@ async def run_gemini_fix_analysis(audit_report: str, patch_summary: str, schema_
         context.detach(token)
 
     # Extract usage metadata from Gemini response
-    usage_metadata = getattr(fix_analysis, 'usage_metadata', None)
-    usage_data = {
-        "input_tokens": getattr(usage_metadata, 'prompt_token_count', 0) if usage_metadata else 0,
-        "output_tokens": getattr(usage_metadata, 'candidates_token_count', 0) if usage_metadata else 0,
-        "total_tokens": getattr(usage_metadata, 'total_token_count', 0) if usage_metadata else 0,
-        "model_name": model
-    }
+    try:
+        usage_metadata = getattr(fix_analysis, 'usage_metadata', None)
+        print(f"[DEBUG] usage_metadata type: {type(usage_metadata)}")
+        if usage_metadata:
+            print(f"[DEBUG] usage_metadata attributes: {dir(usage_metadata)}")
+
+        usage_data = {
+            "input_tokens": getattr(usage_metadata, 'prompt_token_count', 0) if usage_metadata else 0,
+            "output_tokens": getattr(usage_metadata, 'candidates_token_count', 0) if usage_metadata else 0,
+            "total_tokens": getattr(usage_metadata, 'total_token_count', 0) if usage_metadata else 0,
+            "model_name": model
+        }
+        print(f"[DEBUG] usage_data: {usage_data}")
+    except Exception as metadata_err:
+        print(f"[ERROR] Error extracting usage metadata: {metadata_err}")
+        import traceback
+        traceback.print_exc()
+        usage_data = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "model_name": model}
 
     # Track usage to MongoDB for billing
     if user_id and usage_data.get("total_tokens", 0) > 0:
@@ -439,15 +487,31 @@ async def run_gemini_fix_analysis(audit_report: str, patch_summary: str, schema_
             repository_id=repository_id
         )
 
-    response_text = fix_analysis.text.strip()
-    if response_text.startswith("```"):
-        response_text = response_text.split("```")[1]
-        if response_text.startswith("json"):
-            response_text = response_text[4:]
-    response_text = response_text.strip()
+    try:
+        print(f"[DEBUG] fix_analysis type: {type(fix_analysis)}")
+        print(f"[DEBUG] fix_analysis attributes: {dir(fix_analysis)}")
+        response_text = fix_analysis.text.strip()
+        print(f"[DEBUG] response_text length: {len(response_text)}")
+        if response_text.startswith("```"):
+            response_text = response_text.split("```")[1]
+            if response_text.startswith("json"):
+                response_text = response_text[4:]
+        response_text = response_text.strip()
 
-    # Parse JSON and add usage data
-    fix_result = json.loads(response_text)
-    fix_result["usage"] = usage_data
+        # Parse JSON and add usage data
+        fix_result = json.loads(response_text)
+        fix_result["usage"] = usage_data
+        fix_result["span_id"] = llm_span_id  # Include LLM span ID for Arize annotations
 
-    return fix_result
+        return fix_result
+    except Exception as parse_err:
+        print(f"[ERROR] Error parsing fix analysis response: {parse_err}")
+        import traceback
+        traceback.print_exc()
+        # Return a safe default if parsing fails
+        return {
+            "fixable": False,
+            "fixes": [],
+            "usage": usage_data,
+            "error": str(parse_err)
+        }

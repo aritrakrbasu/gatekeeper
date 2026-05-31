@@ -4,6 +4,7 @@ import base64
 import asyncio
 from pathlib import Path
 from atomic_patches import AtomicPatchManager
+from services import repository_service
 
 async def apply_auto_fixes(
     project_id: str,
@@ -289,7 +290,8 @@ async def apply_auto_fixes(
         fix_mr_title = f"🔧 Gatekeeper Auto-Fix for MR !{mr_iid}"
         fix_mr_description = f"### 🛡️ Gatekeeper Auto-Fix\n\nThis MR was automatically created by **The Gatekeeper** to resolve auditing issues found in MR !{mr_iid}.\n\n**Original MR:** {mr_title}\n**Source Branch:** {source_branch}\n\n**Remediations Applied:**\n{formatted_fixes_list}\n\n---\n*This patch was generated autonomously by the Gatekeeper Schema Enforced Remediation Core.*"
 
-        await gitlab_session.call_tool(
+        # Create the auto-fix MR and capture its IID
+        create_mr_result = await gitlab_session.call_tool(
             name="create_merge_request",
             arguments={
                 "project_id": str(project_id),
@@ -300,6 +302,31 @@ async def apply_auto_fixes(
             }
         )
         print("[OK] Auto-fix MR created!")
+
+        # Extract the new MR's IID from the response
+        auto_fix_mr_iid = None
+        if hasattr(create_mr_result, 'content') and create_mr_result.content:
+            try:
+                mr_response = json.loads(create_mr_result.content[0].text)
+                auto_fix_mr_iid = mr_response.get('iid')
+                print(f"[INFO] Auto-fix MR IID: {auto_fix_mr_iid}")
+            except (json.JSONDecodeError, AttributeError, IndexError) as parse_err:
+                print(f"[WARN] Failed to parse auto-fix MR response: {parse_err}")
+
+        # Link the auto-fix MR to the original MR in MongoDB
+        if auto_fix_mr_iid:
+            try:
+                await repository_service.link_auto_fix_to_original_mr(
+                    repo_id=str(project_id),
+                    original_mr_iid=mr_iid,
+                    auto_fix_mr_iid=auto_fix_mr_iid,
+                    auto_fix_branch=fix_branch_name
+                )
+                print(f"[OK] Linked auto-fix MR !{auto_fix_mr_iid} to original MR !{mr_iid}")
+            except Exception as link_err:
+                print(f"[WARN] Failed to link auto-fix MR to original MR: {link_err}")
+        else:
+            print("[WARN] Could not extract auto-fix MR IID - skipping database linkage")
 
         original_mr_comment = f"### 🤖 Gatekeeper Auto-Fix Created\n\nI found functional remediation paths for the issues flagged during my audit. A separate layout patch has been opened against your branch.\n\n**Target Branch:** `{fix_branch_name}`\n\n**Remediations Applied:**\n{formatted_fixes_list}\n\nPlease merge the tracking correction PR if the structural alterations match your specification layout."
         

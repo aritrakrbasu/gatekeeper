@@ -425,6 +425,67 @@ class PhoenixMCPBridge:
             "error_count": error_count,
         }
 
+    async def submit_annotation(
+        self,
+        trace_id: str,
+        annotation_name: str,
+        score: float,
+        label: str,
+        explanation: str,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        """
+        Submit an annotation/feedback for a trace.
+
+        Args:
+            trace_id: The trace ID to annotate
+            annotation_name: Name of the annotation (e.g., "user_feedback")
+            score: Numeric score (0.0 to 1.0)
+            label: Text label (e.g., "positive", "negative")
+            explanation: Text explanation of the annotation
+            metadata: Optional metadata dictionary
+
+        Returns:
+            True if annotation submitted successfully, False otherwise
+        """
+        if not self._connected:
+            await self.connect()
+
+        if not self._connected:
+            return False
+
+        try:
+            # Phoenix uses a specific endpoint for annotations
+            # The endpoint structure depends on whether it's cloud or self-hosted
+            if get_phoenix_mode() == "cloud":
+                # Cloud mode: uses the annotations endpoint
+                url = f"/traces/{trace_id}/annotations"
+            else:
+                # Self-hosted mode: might use a different endpoint
+                url = f"/traces/{trace_id}/annotations"
+
+            annotation_data = {
+                "name": annotation_name,
+                "score": score,
+                "label": label,
+                "explanation": explanation,
+                "metadata": metadata or {}
+            }
+
+            response = await self._client.post(url, json=annotation_data)
+
+            if response.status_code in (200, 201, 202):
+                logger.info(f"[OK] Submitted annotation '{annotation_name}' for trace {trace_id[:16]}...")
+                return True
+            else:
+                logger.warning(f"[WARN] Failed to submit annotation: {response.status_code}")
+                logger.debug(f"[DEBUG] Response: {response.text[:200]}")
+                return False
+
+        except Exception as e:
+            logger.error(f"[ERROR] Failed to submit annotation: {e}")
+            return False
+
     def is_connected(self) -> bool:
         """Check if the bridge is connected."""
         return self._connected

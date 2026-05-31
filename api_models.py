@@ -79,6 +79,14 @@ class RepositoryStatus(str, Enum):
     PENDING = "pending"
 
 
+class RepositoryMetrics(BaseModel):
+    """Repository metrics for analytics."""
+    mrs_analyzed: int = 0
+    avg_review_time: str = "0s"
+    auto_fixes_proposed: int = 0
+    fixes_merged: int = 0
+
+
 class RepositoryResponse(BaseModel):
     """Repository information response."""
     id: str
@@ -91,6 +99,7 @@ class RepositoryResponse(BaseModel):
     status: RepositoryStatus
     description: Optional[str] = None
     created_at: datetime
+    metrics: Optional[RepositoryMetrics] = None
 
 
 # ============================================================================
@@ -223,7 +232,11 @@ class BillingUsageResponse(BaseModel):
     current_cycle_end: datetime
     total_tokens: int
     total_mrs_processed: int
-    estimated_cost: float
+    estimated_cost: float  # Actual cost accumulated so far
+    projected_monthly_cost: float = 0.0  # Projected cost for full month
+    average_daily_cost: float = 0.0  # Average daily cost
+    days_elapsed: int = 0  # Days with usage
+    remaining_days: int = 0  # Remaining days in month
     model_usage: List[ModelUsage]
     daily_usage: List[DailyUsage] = []
 
