@@ -191,11 +191,12 @@ async def _aggregate_trace_to_monthly_data(trace: Dict, user_id: str, monthly_da
 
     # Track MRs
     mr_id = attributes.get("mr_id")
-    if mr_id and mr_id not in month.get("_mr_set", set()):
-        if "_mr_set" not in month:
-            month["_mr_set"] = set()
-        month["_mr_set"].add(mr_id)
-        month["summary"]["mrs_count"] += 1
+    if mr_id:
+        if "mr_ids" not in month:
+            month["mr_ids"] = []
+        if mr_id not in month["mr_ids"]:
+            month["mr_ids"].append(mr_id)
+            month["summary"]["mrs_count"] += 1
 
     # Update model breakdown
     if model_name not in month["models"]:
@@ -217,14 +218,14 @@ async def _aggregate_trace_to_monthly_data(trace: Dict, user_id: str, monthly_da
             "tokens": 0,
             "cost": 0.0,
             "mrs": 0,
-            "_mr_set": set()
+            "mr_ids": []
         }
 
     month["days"][day_key]["tokens"] += total_tokens
     month["days"][day_key]["cost"] += estimated_cost
 
-    if mr_id and mr_id not in month["days"][day_key]["_mr_set"]:
-        month["days"][day_key]["_mr_set"].add(mr_id)
+    if mr_id and mr_id not in month["days"][day_key]["mr_ids"]:
+        month["days"][day_key]["mr_ids"].append(mr_id)
         month["days"][day_key]["mrs"] += 1
 
 
@@ -289,8 +290,27 @@ async def sync_user_billing_optimized(
 
         print(f"[INFO] Sync window: {start_date} to {end_date}")
 
-        # Initialize in-memory aggregation structure
+        # Get existing months for deduplication BEFORE aggregation starts
+        existing_months = billing_doc.get("months", {})
+
+        # Initialize in-memory aggregation structure with existing MR data for deduplication
         monthly_aggregates = {}
+        for month_key, month_data in existing_months.items():
+            # Pre-populate with existing MR IDs so deduplication works during aggregation
+            monthly_aggregates[month_key] = {
+                "mr_ids": month_data.get("mr_ids", []).copy(),
+                "days": {
+                    day_key: {
+                        "mr_ids": day_data.get("mr_ids", []).copy()
+                    }
+                    for day_key, day_data in month_data.get("days", {}).items()
+                }
+            }
+
+        # Log existing MR IDs for debugging
+        total_existing_mrs = sum(len(m.get("mr_ids", [])) for m in monthly_aggregates.values())
+        print(f"[DEBUG] Loaded {total_existing_mrs} existing MR IDs from {len(monthly_aggregates)} months for deduplication")
+
         total_synced = 0
         total_skipped = 0
         last_trace_id = None
@@ -357,8 +377,6 @@ async def sync_user_billing_optimized(
                 window_size_hours = 6
 
         # Merge aggregated data into existing monthly data
-        existing_months = billing_doc.get("months", {})
-
         print(f"[DEBUG] Merging {len(monthly_aggregates)} months into existing {len(existing_months)} months")
         for month_key, month_data in monthly_aggregates.items():
             # Merge with existing month data
@@ -366,42 +384,63 @@ async def sync_user_billing_optimized(
                 existing = existing_months[month_key]
                 prev_tokens = existing["summary"]["total_tokens"]
                 prev_cost = existing["summary"]["total_cost"]
-                existing["summary"]["total_tokens"] += month_data["summary"]["total_tokens"]
-                existing["summary"]["total_cost"] += month_data["summary"]["total_cost"]
-                existing["summary"]["mrs_count"] += month_data["summary"]["mrs_count"]
-                print(f"[DEBUG] Merged existing month {month_key}: {prev_tokens} -> {existing['summary']['total_tokens']} tokens, {prev_cost:.6f} -> {existing['summary']['total_cost']:.6f} cost")
 
-                # Merge models
-                for model, stats in month_data["models"].items():
-                    if model not in existing["models"]:
-                        existing["models"][model] = stats.copy()
-                    else:
-                        existing["models"][model]["input_tokens"] += stats["input_tokens"]
-                        existing["models"][model]["output_tokens"] += stats["output_tokens"]
-                        existing["models"][model]["total_tokens"] += stats["total_tokens"]
-                        existing["models"][model]["cost"] += stats["cost"]
+                # Initialize mr_ids if not present (backward compatibility)
+                if "mr_ids" not in existing:
+                    existing["mr_ids"] = []
+
+                # Merge mr_ids at monthly level
+                new_mr_ids = [mr_id for mr_id in month_data.get("mr_ids", [])
+                              if mr_id not in existing["mr_ids"]]
+                existing["mr_ids"].extend(new_mr_ids)
+                # Update mrs_count to only count NEW MRs (deduplication)
+                existing["summary"]["mrs_count"] += len(new_mr_ids)
+
+                # Only add tokens/cost if there were new traces in this month
+                if "summary" in month_data:
+                    existing["summary"]["total_tokens"] += month_data["summary"]["total_tokens"]
+                    existing["summary"]["total_cost"] += month_data["summary"]["total_cost"]
+                    print(f"[DEBUG] Merged existing month {month_key}: {prev_tokens} -> {existing['summary']['total_tokens']} tokens, {prev_cost:.6f} -> {existing['summary']['total_cost']:.6f} cost, +{len(new_mr_ids)} new MRs")
+
+                    # Merge models
+                    for model, stats in month_data.get("models", {}).items():
+                        if model not in existing["models"]:
+                            existing["models"][model] = stats.copy()
+                        else:
+                            existing["models"][model]["input_tokens"] += stats["input_tokens"]
+                            existing["models"][model]["output_tokens"] += stats["output_tokens"]
+                            existing["models"][model]["total_tokens"] += stats["total_tokens"]
+                            existing["models"][model]["cost"] += stats["cost"]
 
                 # Merge days
-                for day, day_stats in month_data["days"].items():
-                    # Clean up _mr_set before storing
-                    day_stats_clean = {k: v for k, v in day_stats.items() if k != "_mr_set"}
+                for day, day_stats in month_data.get("days", {}).items():
+                    # Skip if day_stats only has mr_ids (pre-populated, no new traces)
+                    if "tokens" not in day_stats:
+                        continue
+
                     if day not in existing["days"]:
-                        existing["days"][day] = day_stats_clean
+                        # New day - copy directly (mr_ids already included)
+                        existing["days"][day] = day_stats.copy()
                     else:
-                        existing["days"][day]["tokens"] += day_stats_clean["tokens"]
-                        existing["days"][day]["cost"] += day_stats_clean["cost"]
-                        existing["days"][day]["mrs"] += day_stats_clean["mrs"]
+                        # Existing day - merge with deduplication
+                        existing_day = existing["days"][day]
+                        # Initialize mr_ids if not present (backward compatibility)
+                        if "mr_ids" not in existing_day:
+                            existing_day["mr_ids"] = []
+
+                        # Merge mr_ids at daily level
+                        new_day_mr_ids = [mr_id for mr_id in day_stats.get("mr_ids", [])
+                                          if mr_id not in existing_day["mr_ids"]]
+                        existing_day["mr_ids"].extend(new_day_mr_ids)
+                        # Update mrs to only count NEW MRs (deduplication)
+                        existing_day["mrs"] += len(new_day_mr_ids)
+
+                        existing_day["tokens"] += day_stats["tokens"]
+                        existing_day["cost"] += day_stats["cost"]
             else:
-                # New month - clean up _mr_set before storing
-                month_data_clean = {}
-                month_data_clean["summary"] = month_data["summary"].copy()
-                month_data_clean["models"] = month_data["models"].copy()
-                # Remove _mr_set from each day
-                month_data_clean["days"] = {
-                    day: {k: v for k, v in day_stats.items() if k != "_mr_set"}
-                    for day, day_stats in month_data["days"].items()
-                }
-                existing_months[month_key] = month_data_clean
+                # New month - only add if it has actual trace data (not just pre-populated)
+                if "summary" in month_data and "models" in month_data:
+                    existing_months[month_key] = month_data.copy()
 
         # Update billing summary document with single atomic write
         print(f"[DEBUG] Writing to MongoDB: {len(existing_months)} months")
