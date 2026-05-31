@@ -1,14 +1,21 @@
 import os
 import asyncio
+import time
+import json
+import re
 from typing import Optional
 from fastapi import FastAPI, Request, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
+from google.genai import types
 
 load_dotenv()
 
 # Import Gatekeeper Services
-from services import mcp_service, review_service, auth_service, repository_service, mongo_client, user_service, billing_service
+from services import (
+    mcp_service, review_service, auth_service, repository_service,
+    mongo_client, user_service, billing_service, incident_service
+)
 from api_models import (
     OAuthCallbackRequest, TokenResponse, UserResponse,
     VerifyTokenRequest, VerifyTokenResponse, LogoutResponse,
@@ -165,22 +172,24 @@ async def test_mongodb_connection():
 
 
 @app.post("/webhooks/gitlab")
-async def gitlab_webhook(request: Request, x_gitlab_event: str = Header(None)):
-    """API endpoint to receive and delegate GitLab webhook payloads."""
+async def gitlab_webhook(request: Request, x_gitlab_event: Optional[str] = Header(None)):
+    """API endpoint to receive and delegate webhook payloads (GitLab events & Dynatrace production crashes)."""
     # Check if MCP sessions are ready
     if not mcp_service.mcp_ready or not mcp_service.gitlab_session:
         print("[⚠️] MCP sessions not ready yet - cannot process webhook")
         print("[ℹ️] Please wait a few seconds for the MCP bridge to initialize")
         return {"status": "mcp_not_ready", "message": "MCP sessions still initializing. Please retry in a few seconds."}
 
-    if not x_gitlab_event:
-        raise HTTPException(status_code=400, detail="Missing X-GitLab-Event header")
-
     payload = await request.json()
 
+    # 1. Handle GitLab Merge Request Event
     if x_gitlab_event == "Merge Request Hook":
-        # Run review pipeline
         return await review_service.orchestrate_review(payload)
+
+    # 2. Handle Dynatrace Incident/Production Crash Event
+    if not x_gitlab_event:
+        if isinstance(payload, dict) and "problem_id" in payload:
+            return await incident_service.process_production_crash(payload)
 
     return {"status": "event_ignored", "event": x_gitlab_event}
 
