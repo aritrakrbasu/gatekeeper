@@ -1,14 +1,21 @@
 import os
 import asyncio
+import time
+import json
+import re
 from typing import Optional
 from fastapi import FastAPI, Request, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
+from google.genai import types
 
 load_dotenv()
 
 # Import Gatekeeper Services
-from services import mcp_service, review_service, auth_service, repository_service, mongo_client, user_service, fivetran_service
+from services import (
+    mcp_service, review_service, auth_service, repository_service,
+    mongo_client, user_service, billing_service, incident_service
+), fivetran_service
 from api_models import (
     OAuthCallbackRequest, TokenResponse, UserResponse,
     VerifyTokenRequest, VerifyTokenResponse, LogoutResponse,
@@ -17,6 +24,7 @@ from api_models import (
     GeminiSettingsResponse, ValidateTokenRequest, ValidateTokenResponse,
     PolicySettingsResponse, UpdateGeminiSettingsRequest, UpdatePolicySettingsRequest,
     UpdateUserProfileRequest, IntegrationStatusResponse,
+    SyncRequest, BillingUsageResponse, InvoiceResponse,
     FivetranActionRequest, FivetranActionResponse
 )
 
@@ -75,6 +83,30 @@ async def startup_event():
         print("[ℹ️] Install GitNexus for enhanced analysis: npm install -g gitnexus")
     except Exception as e:
         print(f"[ℹ️] Could not check GitNexus status: {e}")
+
+    # Initialize Arize observability for LLM usage tracking
+    try:
+        from config.arize_config import init_arize, instrument_google_genai, init_phoenix_client
+
+        print("[*] Initializing Arize observability...")
+        if init_arize(project_name="gatekeeper"):
+            print("[✅] Arize observability initialized successfully")
+            # Instrument Google GenAI for automatic tracing
+            if instrument_google_genai():
+                print("[✅] Google GenAI instrumentor registered")
+            else:
+                print("[⚠️] Failed to instrument Google GenAI")
+        else:
+            print("[⚠️] Arize initialization failed - LLM usage tracking disabled")
+
+        # Initialize Phoenix client for querying traces
+        if init_phoenix_client():
+            print("[✅] Phoenix client initialized for billing sync")
+        else:
+            print("[⚠️] Phoenix client initialization failed")
+    except Exception as e:
+        print(f"[⚠️] Failed to initialize Arize/Phoenix: {e}")
+        print("[ℹ️] LLM usage tracking will be unavailable")
 
     # Launch Stdio MCP pipes in the background
     asyncio.create_task(mcp_service.boot_mcp_bridge())
@@ -142,22 +174,24 @@ async def test_mongodb_connection():
 
 
 @app.post("/webhooks/gitlab")
-async def gitlab_webhook(request: Request, x_gitlab_event: str = Header(None)):
-    """API endpoint to receive and delegate GitLab webhook payloads."""
+async def gitlab_webhook(request: Request, x_gitlab_event: Optional[str] = Header(None)):
+    """API endpoint to receive and delegate webhook payloads (GitLab events & Dynatrace production crashes)."""
     # Check if MCP sessions are ready
     if not mcp_service.mcp_ready or not mcp_service.gitlab_session:
         print("[⚠️] MCP sessions not ready yet - cannot process webhook")
         print("[ℹ️] Please wait a few seconds for the MCP bridge to initialize")
         return {"status": "mcp_not_ready", "message": "MCP sessions still initializing. Please retry in a few seconds."}
 
-    if not x_gitlab_event:
-        raise HTTPException(status_code=400, detail="Missing X-GitLab-Event header")
-
     payload = await request.json()
 
+    # 1. Handle GitLab Merge Request Event
     if x_gitlab_event == "Merge Request Hook":
-        # Run review pipeline
         return await review_service.orchestrate_review(payload)
+
+    # 2. Handle Dynatrace Incident/Production Crash Event
+    if not x_gitlab_event:
+        if isinstance(payload, dict) and "problem_id" in payload:
+            return await incident_service.process_production_crash(payload)
 
     return {"status": "event_ignored", "event": x_gitlab_event}
 
@@ -360,7 +394,7 @@ async def get_repository_merge_requests(
             except:
                 pass
 
-        mrs = await repository_service.get_repository_mrs_from_db(repo_id, limit)
+        mrs = await repository_service.get_repository_mrs_from_db(repo_id, limit, user_id=user_id)
         return mrs
     except HTTPException as e:
         raise e
@@ -890,4 +924,270 @@ async def disconnect_gitlab_integration(authorization: str = Header(None)):
         raise e
     except Exception as e:
         print(f"[ERROR] Failed to disconnect GitLab integration: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Billing Endpoints
+# ============================================================================
+
+@app.get("/api/billing/usage", response_model=BillingUsageResponse)
+async def get_billing_usage(authorization: str = Header(None)):
+    """Get billing usage statistics for current user."""
+    try:
+        if not authorization:
+            raise HTTPException(status_code=401, detail="Authorization required")
+
+        token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+        user_info = auth_service.verify_token(token)
+        user_id = user_info.get("id")
+
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        # Get billing data (using optimized single-document query)
+        data = await billing_service.get_billing_dashboard_data_optimized(user_id)
+
+        # Auto-sync if no usage data found (first visit or empty state)
+        if data.get("total_tokens", 0) == 0 and data.get("estimated_cost", 0) == 0:
+            print(f"[INFO] No billing data found for user {user_id}, triggering auto-sync from Arize...")
+            sync_result = await billing_service.sync_user_billing_optimized(user_id=user_id)
+            if sync_result.get("success"):
+                print(f"[INFO] Auto-sync complete: {sync_result.get('synced', 0)} records synced")
+                # Fetch updated data after sync
+                data = await billing_service.get_billing_dashboard_data_optimized(user_id)
+
+        return BillingUsageResponse(**data)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[ERROR] Failed to get billing usage: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/billing/sync")
+async def sync_billing_data(
+    request: SyncRequest,
+    authorization: str = Header(None)
+):
+    """Sync billing data from Arize Cloud."""
+    try:
+        if not authorization:
+            raise HTTPException(status_code=401, detail="Authorization required")
+
+        token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+        user_info = auth_service.verify_token(token)
+        user_id = user_info.get("id")
+
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        print(f"[INFO] /api/billing/sync called with user_id: {user_id} (type: {type(user_id).__name__})")
+
+        # Sync from Arize Cloud (using optimized sync)
+        result = await billing_service.sync_user_billing_optimized(
+            user_id=user_id,
+            force_resync=request.force_resync
+        )
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[ERROR] Failed to sync billing data: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/billing/invoices")
+async def get_invoices(
+    limit: int = 12,
+    authorization: str = Header(None)
+):
+    """Get invoice history."""
+    try:
+        if not authorization:
+            raise HTTPException(status_code=401, detail="Authorization required")
+
+        token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+        user_info = auth_service.verify_token(token)
+        user_id = user_info.get("id")
+
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        # Get invoices (using optimized single-document query)
+        invoices = await billing_service.get_user_invoices_optimized(user_id, limit)
+
+        return [InvoiceResponse(**inv) for inv in invoices]
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[ERROR] Failed to get invoices: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/billing/debug")
+async def debug_billing(authorization: str = Header(None)):
+    """Debug endpoint to check Phoenix connection and trace data."""
+    try:
+        if not authorization:
+            raise HTTPException(status_code=401, detail="Authorization required")
+
+        token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+        user_info = auth_service.verify_token(token)
+        user_id = user_info.get("id")
+
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        # Check Arize status
+        from config.arize_config import is_arize_initialized, is_phoenix_configured
+        arize_status = {
+            "arize_initialized": is_arize_initialized(),
+            "phoenix_configured": is_phoenix_configured()
+        }
+
+        # Try to get Arize Cloud traces
+        arize_data = {}
+        try:
+            from config.arize_client import get_arize_client
+            client = await get_arize_client()
+            arize_data["connected"] = client.is_connected()
+
+            if client.is_connected():
+                # Get recent traces
+                traces = await client.get_recent_traces(limit=10, hours_ago=24)
+                arize_data["trace_count"] = len(traces)
+                arize_data["sample_traces"] = []
+
+                for trace in traces[:3]:  # First 3 traces as samples
+                    trace_id = trace.get("trace_id", "")
+                    attributes = trace.get("attributes", {})
+                    arize_data["sample_traces"].append({
+                        "trace_id": trace_id[:16] + "..." if trace_id else "unknown",
+                        "user_id": attributes.get("user_id"),
+                        "mr_id": attributes.get("mr_id"),
+                        "repository_id": attributes.get("repository_id"),
+                        "operation_type": attributes.get("operation_type"),
+                        "has_llm_input_tokens": "llm_input_tokens" in attributes,
+                        "llm_input_tokens": attributes.get("llm_input_tokens"),
+                        "llm_output_tokens": attributes.get("llm_output_tokens"),
+                        "llm_model_name": attributes.get("llm_model_name"),
+                        "attribute_keys": list(attributes.keys())
+                    })
+        except Exception as e:
+            arize_data["error"] = str(e)
+
+        # Check MongoDB for existing data
+        mongo_data = {}
+        try:
+            from services import mongo_client
+            cycles = await mongo_client.find(
+                "billing_cycles",
+                {"user_id": user_id},
+                limit=5
+            )
+            mongo_data["billing_cycles_found"] = len(cycles)
+            mongo_data["cycles"] = cycles
+
+            usage_records = await mongo_client.find(
+                "llm_usage_records",
+                {"user_id": user_id},
+                limit=5
+            )
+            mongo_data["usage_records_found"] = len(usage_records)
+        except Exception as e:
+            mongo_data["error"] = str(e)
+
+        return {
+            "user_id": user_id,
+            "arize_status": arize_status,
+            "arize_data": arize_data,
+            "mongo_data": mongo_data
+        }
+
+    except Exception as e:
+        import traceback
+        return {"error": str(e), "trace": traceback.format_exc()}
+
+
+@app.post("/api/billing/migrate")
+async def migrate_billing_data(authorization: str = Header(None)):
+    """
+    Migrate legacy billing data to new single-document format.
+
+    This is a one-time migration that should be run during deployment
+    or manually by an admin.
+    """
+    try:
+        # Require admin authorization (simplified - in production use proper admin check)
+        if not authorization:
+            raise HTTPException(status_code=401, detail="Authorization required")
+
+        token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+        user_info = auth_service.verify_token(token)
+
+        if not user_info:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        # Run migration
+        result = await billing_service.migrate_billing_data_to_new_format()
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[ERROR] Failed to migrate billing data: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/billing/summary-debug")
+async def get_billing_summary_debug(authorization: str = Header(None)):
+    """
+    Debug endpoint to view the new billing summary document structure.
+
+    Useful for verifying migration and debugging billing issues.
+    """
+    try:
+        if not authorization:
+            raise HTTPException(status_code=401, detail="Authorization required")
+
+        token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+        user_info = auth_service.verify_token(token)
+        user_id = user_info.get("id")
+
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        # Get billing summary document
+        from services import mongo_client
+        doc = await mongo_client.find_one("billing_summaries", {"user_id": user_id})
+
+        if not doc:
+            return {
+                "user_id": user_id,
+                "message": "No billing summary found - may need to sync or migrate",
+                "document": None
+            }
+
+        # Return clean version without internal _id
+        return {
+            "user_id": user_id,
+            "document": {
+                "sync_state": doc.get("sync_state", {}),
+                "months_count": len(doc.get("months", {})),
+                "months": list(doc.get("months", {}).keys()),
+                "created_at": doc.get("created_at"),
+                "updated_at": doc.get("updated_at")
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[ERROR] Failed to get billing summary debug: {e}")
         raise HTTPException(status_code=500, detail=str(e))

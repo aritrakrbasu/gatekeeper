@@ -287,6 +287,16 @@ export const api = {
   downloadInvoice: (id) =>
     apiRequest(`/api/billing/invoices/${id}/download`, { method: "POST" }),
 
+  /**
+   * Sync billing data from Arize Cloud
+   * Called after login to fetch usage data
+   */
+  syncBilling: (forceResync = false) =>
+    apiRequest("/api/billing/sync", {
+      method: "POST",
+      body: JSON.stringify({ force_resync: forceResync }),
+    }),
+
   // ============================================================================
   // Settings
   // ============================================================================

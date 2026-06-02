@@ -4,6 +4,7 @@ import base64
 import asyncio
 from pathlib import Path
 from atomic_patches import AtomicPatchManager
+from services import repository_service
 
 async def apply_auto_fixes(
     project_id: str,
@@ -38,7 +39,7 @@ async def apply_auto_fixes(
     timestamp = int(time.time())
     fix_branch_name = f"gatekeeper/atomic-fix-mr{mr_iid}-{timestamp}"
 
-    print(f"[*] Creating atomic fix branch: {fix_branch_name}")
+    print(f"[INFO] Creating atomic fix branch: {fix_branch_name}")
     await asyncio.wait_for(
         gitlab_session.call_tool(
             name="create_branch",
@@ -50,7 +51,7 @@ async def apply_auto_fixes(
         ),
         timeout=30.0
     )
-    print(f"[+] Branch {fix_branch_name} created!")
+    print(f"[OK] Branch {fix_branch_name} created!")
 
     # Create patch manager for this MR
     patch_manager = AtomicPatchManager(
@@ -80,7 +81,7 @@ async def apply_auto_fixes(
                 break
 
         if not original_hunk:
-            print(f"[⚠️] Could not find hunk {hunk_id}, skipping fix")
+            print(f"[WARN] Could not find hunk {hunk_id}, skipping fix")
             continue
 
         # Collect environment variables from this fix
@@ -103,10 +104,10 @@ async def apply_auto_fixes(
         })
 
         fixes_applied.append(f"- ✅ **{file_path}:{original_hunk.old_start}**: {fix_description}")
-        print(f"[+] Queued atomic fix for {file_path} hunk {hunk_id}")
+        print(f"[OK] Queued atomic fix for {file_path} hunk {hunk_id}")
 
     # Apply all fixes file by file using atomic patch application
-    print(f"[*] Applying {len(modified_files)} file(s) with atomic hunk fixes...")
+    print(f"[INFO] Applying {len(modified_files)} file(s) with atomic hunk fixes...")
 
     for file_path, file_fixes in modified_files.items():
         try:
@@ -193,12 +194,12 @@ async def apply_auto_fixes(
                                 break
 
                     if found_index == -1:
-                        print(f"[⚠️] Could not find matching lines for {file_path}, skipping atomic fix")
+                        print(f"[WARN] Could not find matching lines for {file_path}, skipping atomic fix")
                         print(f"[DEBUG] Looking for: {original_lines}")
                         continue
 
                     file_lines[found_index:found_index + len(original_lines)] = fixed_lines
-                    print(f"[+] Applied atomic fix to {file_path}:{found_index + 1}")
+                    print(f"[OK] Applied atomic fix to {file_path}:{found_index + 1}")
 
             if file_lines and file_lines[-1] == '':
                 file_lines = file_lines[:-1]
@@ -220,10 +221,10 @@ async def apply_auto_fixes(
                     "commit_message": f"🔧 Gatekeeper atomic fix: {len(file_fixes)} hunk(s) in {file_path}"
                 }
             )
-            print(f"[+] Committed atomic fixes to {file_path}")
+            print(f"[OK] Committed atomic fixes to {file_path}")
 
         except Exception as file_err:
-            print(f"[x] Failed to apply atomic fixes to {file_path}: {file_err}")
+            print(f"[ERROR] Failed to apply atomic fixes to {file_path}: {file_err}")
 
     # Create or update .env file with extracted secrets
     if all_env_vars:
@@ -245,10 +246,10 @@ async def apply_auto_fixes(
                 }
             )
             fixes_applied.append(f"- 🔐 **.env**: Created with {len(all_env_vars)} environment variable(s)")
-            print(f"[+] Created .env file with environment variables")
+            print(f"[OK] Created .env file with environment variables")
 
             # Also ensure .env is in .gitignore
-            print(f"[*] Ensuring .env is in .gitignore...")
+            print(f"[INFO] Ensuring .env is in .gitignore...")
             try:
                 gitignore_result = await gitlab_session.call_tool(
                     name="get_file_contents",
@@ -275,21 +276,22 @@ async def apply_auto_fixes(
                     }
                 )
                 fixes_applied.append("- 🔒 **.gitignore**: Added .env to prevent secret leaks")
-                print(f"[+] Added .env to .gitignore")
+                print(f"[OK] Added .env to .gitignore")
             else:
                 print(f"[ℹ] .env already in .gitignore")
 
         except Exception as env_err:
-            print(f"[x] Failed to create .env file: {env_err}")
+            print(f"[ERROR] Failed to create .env file: {env_err}")
 
     if fixes_applied:
         formatted_fixes_list = "\n".join(fixes_applied)
         
-        print(f"[*] Creating MR with auto-fixes...")
+        print(f"[INFO] Creating MR with auto-fixes...")
         fix_mr_title = f"🔧 Gatekeeper Auto-Fix for MR !{mr_iid}"
         fix_mr_description = f"### 🛡️ Gatekeeper Auto-Fix\n\nThis MR was automatically created by **The Gatekeeper** to resolve auditing issues found in MR !{mr_iid}.\n\n**Original MR:** {mr_title}\n**Source Branch:** {source_branch}\n\n**Remediations Applied:**\n{formatted_fixes_list}\n\n---\n*This patch was generated autonomously by the Gatekeeper Schema Enforced Remediation Core.*"
 
-        await gitlab_session.call_tool(
+        # Create the auto-fix MR and capture its IID
+        create_mr_result = await gitlab_session.call_tool(
             name="create_merge_request",
             arguments={
                 "project_id": str(project_id),
@@ -299,7 +301,32 @@ async def apply_auto_fixes(
                 "description": fix_mr_description
             }
         )
-        print("[+] Auto-fix MR created!")
+        print("[OK] Auto-fix MR created!")
+
+        # Extract the new MR's IID from the response
+        auto_fix_mr_iid = None
+        if hasattr(create_mr_result, 'content') and create_mr_result.content:
+            try:
+                mr_response = json.loads(create_mr_result.content[0].text)
+                auto_fix_mr_iid = mr_response.get('iid')
+                print(f"[INFO] Auto-fix MR IID: {auto_fix_mr_iid}")
+            except (json.JSONDecodeError, AttributeError, IndexError) as parse_err:
+                print(f"[WARN] Failed to parse auto-fix MR response: {parse_err}")
+
+        # Link the auto-fix MR to the original MR in MongoDB
+        if auto_fix_mr_iid:
+            try:
+                await repository_service.link_auto_fix_to_original_mr(
+                    repo_id=str(project_id),
+                    original_mr_iid=mr_iid,
+                    auto_fix_mr_iid=auto_fix_mr_iid,
+                    auto_fix_branch=fix_branch_name
+                )
+                print(f"[OK] Linked auto-fix MR !{auto_fix_mr_iid} to original MR !{mr_iid}")
+            except Exception as link_err:
+                print(f"[WARN] Failed to link auto-fix MR to original MR: {link_err}")
+        else:
+            print("[WARN] Could not extract auto-fix MR IID - skipping database linkage")
 
         original_mr_comment = f"### 🤖 Gatekeeper Auto-Fix Created\n\nI found functional remediation paths for the issues flagged during my audit. A separate layout patch has been opened against your branch.\n\n**Target Branch:** `{fix_branch_name}`\n\n**Remediations Applied:**\n{formatted_fixes_list}\n\nPlease merge the tracking correction PR if the structural alterations match your specification layout."
         
@@ -311,7 +338,7 @@ async def apply_auto_fixes(
                 "body": original_mr_comment
             }
         )
-        print("[+] Notified original MR about auto-fix!")
+        print("[OK] Notified original MR about auto-fix!")
         return True
 
     return False

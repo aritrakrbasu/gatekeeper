@@ -16,9 +16,45 @@ if (-not (Test-Path .env)) {
     Copy-Item .env.example .env
 }
 
+# Clean up any existing localtunnel processes from previous runs
+Write-Host "[*] Checking for existing localtunnel processes..." -ForegroundColor Gray
+$existingLtProcesses = Get-Process node -ErrorAction SilentlyContinue | Where-Object {
+    $cmdLine = (Get-WmiObject Win32_Process -Filter "ProcessId=$($_.Id)" -ErrorAction SilentlyContinue).CommandLine
+    $cmdLine -and ($cmdLine -match 'localtunnel' -or $cmdLine -match 'lt\.js' -or $cmdLine -match '--port 8000')
+}
+
+if ($existingLtProcesses) {
+    Write-Host "[i] Found $($existingLtProcesses.Count) stale localtunnel process(es), terminating..." -ForegroundColor Yellow
+    foreach ($proc in $existingLtProcesses) {
+        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+    }
+    Start-Sleep -Milliseconds 500  # Give processes time to terminate
+}
+
 # Create temp file for localtunnel output
 $ltOutputFile = "lt-output.txt"
-if (Test-Path $ltOutputFile) { Remove-Item $ltOutputFile }
+
+# Try to remove the output file with retries if it's locked
+if (Test-Path $ltOutputFile) {
+    $maxRetries = 3
+    $retry = 0
+    $removed = $false
+
+    while (-not $removed -and $retry -lt $maxRetries) {
+        try {
+            Remove-Item $ltOutputFile -Force -ErrorAction Stop
+            $removed = $true
+        } catch {
+            $retry++
+            if ($retry -lt $maxRetries) {
+                Write-Host "[i] File locked, retrying... ($retry/$maxRetries)" -ForegroundColor Yellow
+                Start-Sleep -Milliseconds 500
+            } else {
+                Write-Host "[!] Could not remove $ltOutputFile, will try to overwrite it" -ForegroundColor Yellow
+            }
+        }
+    }
+}
 
 Write-Host "[*] Starting localtunnel on port 8000..." -ForegroundColor Cyan
 
@@ -34,7 +70,7 @@ if (-not $ltProcess) {
 # Wait for localtunnel to initialize and get URL
 Write-Host "[*] Waiting for tunnel URL..." -ForegroundColor Gray
 $publicUrl = $null
-$maxAttempts = 15
+$maxAttempts = 40  # Increased from 15 to 40 (20 seconds total for slow connections)
 $attempt = 0
 
 while ($attempt -lt $maxAttempts -and -not $publicUrl) {
@@ -48,7 +84,10 @@ while ($attempt -lt $maxAttempts -and -not $publicUrl) {
         }
     }
 
-    Write-Host "." -NoNewline -ForegroundColor Gray
+    # Show progress every 5 attempts
+    if ($attempt % 5 -eq 0) {
+        Write-Host "." -NoNewline -ForegroundColor Gray
+    }
 }
 
 Write-Host ""

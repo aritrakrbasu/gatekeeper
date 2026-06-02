@@ -29,11 +29,11 @@ GITLAB_PERSONAL_ACCESS_TOKEN = os.getenv("GITLAB_PERSONAL_ACCESS_TOKEN", "")
 # MongoDB configuration check
 MONGO_CONNECTION_STRING = os.getenv("MDB_MCP_CONNECTION_STRING", "")
 if not MONGO_CONNECTION_STRING:
-    print("[⚠️] MDB_MCP_CONNECTION_STRING not set in environment variables")
-    print("[ℹ️] Repository data will be stored in memory only")
-    print("[ℹ️] To enable MongoDB storage, set MDB_MCP_CONNECTION_STRING in .env file")
+    print("[WARN] MDB_MCP_CONNECTION_STRING not set in environment variables")
+    print("[INFO] Repository data will be stored in memory only")
+    print("[INFO] To enable MongoDB storage, set MDB_MCP_CONNECTION_STRING in .env file")
 else:
-    print(f"[✅] MongoDB connection string configured: {MONGO_CONNECTION_STRING[:20]}...{MONGO_CONNECTION_STRING[-10:]}")
+    print(f"[OK] MongoDB connection string configured: {MONGO_CONNECTION_STRING[:20]}...{MONGO_CONNECTION_STRING[-10:]}")
 
 
 # ============================================================================
@@ -181,28 +181,28 @@ async def _store_repository(user_id: str, repo_data: Dict):
                     collection_name=REPOS_COLLECTION,
                     document=repo_data
                 )
-                print(f"[✅] Successfully stored repository {repo_data['name']} in MongoDB with ID: {doc_id}")
+                print(f"[OK] Successfully stored repository {repo_data['name']} in MongoDB with ID: {doc_id}")
             except Exception as mongo_err:
-                print(f"[⚠️] MongoDB insert failed: {mongo_err}")
-                print(f"[ℹ️] Falling back to in-memory storage for repository {repo_data['name']}")
+                print(f"[WARN] MongoDB insert failed: {mongo_err}")
+                print(f"[INFO] Falling back to in-memory storage for repository {repo_data['name']}")
                 # Store in memory as fallback
                 _repositories[repo_data["id"]] = repo_data
         else:
-            print(f"[⚠️] MongoDB connection string not configured - repository {repo_data['name']} stored in memory only")
-            print(f"[ℹ️] Set MDB_MCP_CONNECTION_STRING in .env to enable MongoDB storage")
+            print(f"[WARN] MongoDB connection string not configured - repository {repo_data['name']} stored in memory only")
+            print(f"[INFO] Set MDB_MCP_CONNECTION_STRING in .env to enable MongoDB storage")
 
             # Store in memory as fallback
             _repositories[repo_data["id"]] = repo_data
-            print(f"[✅] Repository {repo_data['name']} stored in in-memory cache")
+            print(f"[OK] Repository {repo_data['name']} stored in in-memory cache")
     except Exception as e:
-        print(f"[❌] Failed to store repository: {e}")
-        print(f"[ℹ️] Repository data: {repo_data.get('name', 'unknown')}")
+        print(f"[ERROR] Failed to store repository: {e}")
+        print(f"[INFO] Repository data: {repo_data.get('name', 'unknown')}")
         import traceback
         traceback.print_exc()
 
         # Fallback to in-memory storage
         _repositories[repo_data["id"]] = repo_data
-        print(f"[ℹ️] Repository stored in in-memory cache as fallback")
+        print(f"[INFO] Repository stored in in-memory cache as fallback")
 
 
 async def _find_repository(user_id: str, repo_id: str) -> Optional[Dict]:
@@ -231,10 +231,10 @@ async def _get_user_repositories(user_id: str, limit: Optional[int] = None) -> L
             print(f"[INFO] Retrieved {len(documents)} repositories from MongoDB for user {user_id}")
             return documents
         else:
-            print(f"[⚠️] MongoDB connection string not configured - using in-memory cache for user {user_id}")
+            print(f"[WARN] MongoDB connection string not configured - using in-memory cache for user {user_id}")
     except Exception as e:
         print(f"[ERROR] Failed to get user repositories from MongoDB: {e}")
-        print(f"[ℹ️] Falling back to in-memory cache")
+        print(f"[INFO] Falling back to in-memory cache")
 
     # Fallback to in-memory cache
     print(f"[INFO] Returning repositories from in-memory cache")
@@ -275,6 +275,7 @@ async def get_all_repositories(user_id: Optional[str] = None, limit: Optional[in
 
                 # Format for response
                 for repo in user_repos:
+                    avg_time = repo.get("avg_review_time", 0)
                     repos.append({
                         "id": repo.get("id", ""),
                         "name": repo.get("name", ""),
@@ -286,8 +287,13 @@ async def get_all_repositories(user_id: Optional[str] = None, limit: Optional[in
                         "status": repo.get("status", "active"),
                         "description": repo.get("description", ""),
                         "created_at": repo.get("created_at", datetime.now().isoformat()),
-                        "executive_summary": repo.get("executive_summary", ""),
-                        "vector_analysis": repo.get("vector_analysis", {})
+                        "target_branches": repo.get("target_branches", []),
+                        "metrics": {
+                            "mrs_analyzed": repo.get("mrs_reviewed", 0),
+                            "avg_review_time": format_avg_review_time(avg_time),
+                            "auto_fixes_proposed": repo.get("auto_fixes_proposed", 0),
+                            "fixes_merged": repo.get("fixes_merged", 0),
+                        }
                     })
 
                 print(f"[INFO] Loaded {len(repos)} repositories from MongoDB for user {user_id}")
@@ -298,42 +304,43 @@ async def get_all_repositories(user_id: Optional[str] = None, limit: Optional[in
     # Fallback to in-memory repositories (for development/testing)
     print("[INFO] Using in-memory repository cache")
     for repo_id, repo_data in _repositories.items():
+        # Handle both enum instances and plain strings
+        visibility = repo_data["visibility"]
+        if hasattr(visibility, "value"):
+            visibility = visibility.value
+
+        repo_status = repo_data["status"]
+        if hasattr(repo_status, "value"):
+            repo_status = repo_status.value
+
+        # Handle datetime objects and ISO strings
+        last_sync = repo_data["last_sync"]
+        if hasattr(last_sync, "isoformat"):
+            last_sync = last_sync.isoformat()
+
+        created_at = repo_data["created_at"]
+        if hasattr(created_at, "isoformat"):
+            created_at = created_at.isoformat()
+
+        avg_time = repo_data.get("avg_review_time", 0)
         repos.append({
             "id": repo_data["id"],
             "name": repo_data["name"],
             "full_name": repo_data["full_name"],
-            "visibility": repo_data["visibility"].value,
+            "visibility": visibility,
             "url": repo_data["url"],
-            "last_sync": repo_data["last_sync"].isoformat(),
+            "last_sync": last_sync,
             "health_score": repo_data["health_score"],
-            "status": repo_data["status"].value,
+            "status": repo_status,
             "description": repo_data.get("description"),
-            "created_at": repo_data["created_at"].isoformat(),
-            "executive_summary": repo_data.get("executive_summary", ""),
-            "vector_analysis": repo_data.get("vector_analysis", {})
+            "created_at": created_at,
+            "metrics": {
+                "mrs_analyzed": repo_data.get("mrs_reviewed", 0),
+                "avg_review_time": format_avg_review_time(avg_time),
+                "auto_fixes_proposed": repo_data.get("auto_fixes_proposed", 0),
+                "fixes_merged": repo_data.get("fixes_merged", 0),
+            }
         })
-
-    return repos
-
-    # Return formatted repositories
-    repos = []
-    for repo_id, repo_data in _repositories.items():
-        # Format for response
-        repo = {
-            "id": repo_data["id"],
-            "name": repo_data["name"],
-            "full_name": repo_data["full_name"],
-            "visibility": repo_data["visibility"].value,
-            "url": repo_data["url"],
-            "last_sync": repo_data["last_sync"].isoformat(),
-            "health_score": repo_data["health_score"],
-            "status": repo_data["status"].value,
-            "description": repo_data.get("description"),
-            "created_at": repo_data["created_at"].isoformat(),
-            "executive_summary": repo_data.get("executive_summary", ""),
-            "vector_analysis": repo_data.get("vector_analysis", {})
-        }
-        repos.append(repo)
 
     return repos
 
@@ -353,6 +360,30 @@ def _get_enum_value(enum_or_string) -> str:
     if hasattr(enum_or_string, 'value'):
         return enum_or_string.value
     return enum_or_string
+
+
+def format_avg_review_time(minutes: float) -> str:
+    """
+    Format average review time in minutes to a human-readable string.
+
+    Args:
+        minutes: Average time in minutes
+
+    Returns:
+        Formatted string like "2.5m", "45s", "1h 30m"
+    """
+    if minutes < 1:
+        seconds = int(minutes * 60)
+        return f"{seconds}s"
+    elif minutes < 60:
+        # Remove trailing zeros for cleaner display
+        return f"{minutes:g}m"
+    else:
+        hours = int(minutes // 60)
+        mins = int(minutes % 60)
+        if mins > 0:
+            return f"{hours}h {mins}m"
+        return f"{hours}h"
 
 
 async def get_repository_avg_review_time(repo_id: str) -> float:
@@ -475,8 +506,8 @@ async def get_repository(repo_id: str) -> Dict:
                     except:
                         created_at = datetime.now()
 
-                mr_count = len(_merge_requests.get(repo_id, []))
-                avg_time = await get_repository_avg_review_time(repo_id)
+                mr_count = mongo_repo.get("mrs_reviewed", 0)
+                avg_time = mongo_repo.get("avg_review_time", 0)
 
                 return {
                     "id": mongo_repo.get("id", repo_id),
@@ -489,19 +520,19 @@ async def get_repository(repo_id: str) -> Dict:
                     "status": _get_enum_value(mongo_repo.get("status", "active")),
                     "description": mongo_repo.get("description", ""),
                     "created_at": created_at.isoformat() if hasattr(created_at, 'isoformat') else str(created_at),
-                    "executive_summary": mongo_repo.get("executive_summary", ""),
-                    "vector_analysis": mongo_repo.get("vector_analysis", {}),
-                    "stats": {
-                        "mrs_reviewed": mr_count,
-                        "avg_review_time": avg_time,
-                        "auto_fixes_applied": mongo_repo.get("auto_fixes_applied", 0),
-                        "test_coverage": mongo_repo.get("test_coverage", "0%")
+                    "metrics": {
+                        "mrs_analyzed": mr_count,
+                        "avg_review_time": format_avg_review_time(avg_time),
+                        "auto_fixes_proposed": mongo_repo.get("auto_fixes_proposed", 0),
+                        "fixes_merged": mongo_repo.get("fixes_merged", 0),
                     },
                     # Credential status fields (don't return actual values, just indicate presence)
                     "mongodb_uri": mongo_repo.get("mongodb_uri", ""),
                     "fivetran_api_key": mongo_repo.get("fivetran_api_key", ""),
                     "fivetran_api_secret": mongo_repo.get("fivetran_api_secret", ""),
-                    "credentials_encrypted": mongo_repo.get("credentials_encrypted", False)
+                    "credentials_encrypted": mongo_repo.get("credentials_encrypted", False),
+                    "target_branches": mongo_repo.get("target_branches", []),
+                    "branch_credentials": mongo_repo.get("branch_credentials", {}),
                 }
     except Exception as e:
         print(f"[ERROR] Failed to fetch repository from MongoDB: {e}")
@@ -537,12 +568,6 @@ async def get_repository(repo_id: str) -> Dict:
                     "status": RepositoryStatus.ACTIVE,
                     "description": project.get("description", ""),
                     "created_at": datetime.fromisoformat(project.get("created_at", datetime.now().isoformat()).replace("Z", "+00:00")),
-                    "executive_summary": "Repository imported from GitLab.",
-                    "vector_analysis": {
-                        "security": "0.0%",
-                        "performance": "0.0%",
-                        "complexity": "0.0%"
-                    }
                 }
                 print(f"[INFO] Fetched repository {repo_id} from GitLab")
 
@@ -557,9 +582,9 @@ async def get_repository(repo_id: str) -> Dict:
 
     repo_data = _repositories[repo_id]
 
-    # Get MR count
+    # Get MR count and metrics
     mr_count = len(_merge_requests.get(repo_id, []))
-    avg_time = await get_repository_avg_review_time(repo_id)
+    avg_time = repo_data.get("avg_review_time", 0)
 
     return {
         "id": repo_data["id"],
@@ -572,13 +597,11 @@ async def get_repository(repo_id: str) -> Dict:
         "status": _get_enum_value(repo_data["status"]),
         "description": repo_data.get("description"),
         "created_at": repo_data["created_at"].isoformat() if hasattr(repo_data["created_at"], 'isoformat') else str(repo_data["created_at"]),
-        "executive_summary": repo_data.get("executive_summary", ""),
-        "vector_analysis": repo_data.get("vector_analysis", {}),
-        "stats": {
-            "mrs_reviewed": mr_count,
-            "avg_review_time": avg_time,
-            "auto_fixes_applied": 12,
-            "test_coverage": 87.3
+        "metrics": {
+            "mrs_analyzed": mr_count,
+            "avg_review_time": format_avg_review_time(avg_time),
+            "auto_fixes_proposed": repo_data.get("auto_fixes_proposed", 0),
+            "fixes_merged": repo_data.get("fixes_merged", 0),
         },
         # Credential status fields (default empty for in-memory repos)
         "mongodb_uri": repo_data.get("mongodb_uri", ""),
@@ -793,12 +816,6 @@ async def import_repository(gitlab_path: str, user_id: Optional[str] = None) -> 
         "status": RepositoryStatus.SYNCING,
         "description": f"Imported from {gitlab_path}",
         "created_at": datetime.now(),
-        "executive_summary": "Repository imported. Initial analysis in progress...",
-        "vector_analysis": {
-            "security": "0.0%",
-            "performance": "0.0%",
-            "complexity": "0.0%"
-        }
     }
 
     _repositories[new_id] = new_repo
@@ -923,9 +940,9 @@ async def install_gitlab_webhook(repo_id: str, gitlab_token: str) -> Dict:
     webhook_url = os.getenv("GATEKEEPER_WEBHOOK_URL", "")
 
     if not webhook_url:
-        print("[⚠️] GATEKEEPER_WEBHOOK_URL not set in environment variables")
-        print("[ℹ️] Webhook will not be installed. Please set GATEKEEPER_WEBHOOK_URL in .env file")
-        print("[ℹ️] For local development, use ngrok: https://your-domain.ngrok.io/webhooks/gitlab")
+        print("[WARN] GATEKEEPER_WEBHOOK_URL not set in environment variables")
+        print("[INFO] Webhook will not be installed. Please set GATEKEEPER_WEBHOOK_URL in .env file")
+        print("[INFO] For local development, use ngrok: https://your-domain.ngrok.io/webhooks/gitlab")
         return {
             "status": "skipped_no_url",
             "message": "Webhook URL not configured. Set GATEKEEPER_WEBHOOK_URL in environment."
@@ -933,8 +950,8 @@ async def install_gitlab_webhook(repo_id: str, gitlab_token: str) -> Dict:
 
     # Warn if using localhost
     if "localhost" in webhook_url or "127.0.0.1" in webhook_url:
-        print("[⚠️] WARNING: Using localhost webhook URL - GitLab cannot reach your local machine")
-        print("[ℹ️] Use ngrok for local development: https://ngrok.com")
+        print("[WARN] WARNING: Using localhost webhook URL - GitLab cannot reach your local machine")
+        print("[INFO] Use ngrok for local development: https://ngrok.com")
 
     print(f"[INFO] Installing webhook with URL: {webhook_url}")
 
@@ -988,8 +1005,8 @@ async def install_gitlab_webhook(repo_id: str, gitlab_token: str) -> Dict:
             response.raise_for_status()
             webhook = response.json()
 
-            print(f"[✅] Installed Gatekeeper webhook for repo {repo_id}")
-            print(f"[ℹ️] Webhook ID: {webhook.get('id')}, URL: {webhook.get('url')}")
+            print(f"[OK] Installed Gatekeeper webhook for repo {repo_id}")
+            print(f"[INFO] Webhook ID: {webhook.get('id')}, URL: {webhook.get('url')}")
             return {
                 "webhook_id": webhook.get("id"),
                 "url": webhook.get("url"),
@@ -1090,7 +1107,7 @@ async def connect_repository(user_id: str, repo_id: str, target_branches: Option
         # Try to install webhook anyway (it will check if already exists)
         try:
             webhook_result = await install_gitlab_webhook(repo_id, gitlab_token)
-            print(f"[✅] Webhook check complete for existing repo {repo_id}: {webhook_result.get('status')}")
+            print(f"[OK] Webhook check complete for existing repo {repo_id}: {webhook_result.get('status')}")
 
             # Update existing repository with webhook info and target branches
             if target_branches:
@@ -1103,9 +1120,9 @@ async def connect_repository(user_id: str, repo_id: str, target_branches: Option
                         "updated_at": datetime.now().isoformat() if MONGO_CONNECTION_STRING else datetime.now()
                     }}
                 )
-                print(f"[✅] Updated target branches for existing repo: {target_branches}")
+                print(f"[OK] Updated target branches for existing repo: {target_branches}")
         except Exception as webhook_err:
-            print(f"[⚠️] Failed to check/install webhook: {webhook_err}")
+            print(f"[WARN] Failed to check/install webhook: {webhook_err}")
 
         # Return existing repository info
         return {
@@ -1157,14 +1174,10 @@ async def connect_repository(user_id: str, repo_id: str, target_branches: Option
         "description": project.get("description", ""),
         "created_at": datetime.fromisoformat(project.get("created_at", datetime.now().isoformat()).replace("Z", "+00:00")),
         "avatar_url": project.get("avatar_url"),
-        "executive_summary": "Repository connected. Initial analysis in progress...",
-        "vector_analysis": {
-            "security": "0.0%",
-            "performance": "0.0%",
-            "complexity": "0.0%"
-        },
-        "avg_review_time": 2.5,
-        "mrs_reviewed": 0
+        "avg_review_time": 0,
+        "mrs_reviewed": 0,
+        "auto_fixes_proposed": 0,
+        "fixes_merged": 0
     }
 
     # Store in memory
@@ -1178,9 +1191,9 @@ async def connect_repository(user_id: str, repo_id: str, target_branches: Option
         new_repo["webhook_id"] = webhook_result.get("webhook_id")
         new_repo["webhook_url"] = webhook_result.get("url")
         new_repo["webhook_status"] = webhook_result.get("status")
-        print(f"[✅] Webhook status for {new_repo['name']}: {webhook_result.get('status')}")
+        print(f"[OK] Webhook status for {new_repo['name']}: {webhook_result.get('status')}")
     except Exception as webhook_err:
-        print(f"[⚠️] Failed to install webhook: {webhook_err}")
+        print(f"[WARN] Failed to install webhook: {webhook_err}")
         # Don't fail connection if webhook installation fails
         new_repo["webhook_status"] = "failed"
 
@@ -1229,7 +1242,7 @@ async def disconnect_repository(user_id: str, repo_id: str) -> Dict:
             if deleted:
                 print(f"[INFO] Disconnected repository {repo_id} for user {user_id} from MongoDB")
             else:
-                print(f"[ℹ️] Repository {repo_id} not found in MongoDB for user {user_id}")
+                print(f"[INFO] Repository {repo_id} not found in MongoDB for user {user_id}")
 
         # Remove from memory
         if repo_id in _repositories:
@@ -1267,8 +1280,6 @@ def get_repository_summary(repo_id: str) -> Dict:
     return {
         "repository_id": repo["id"],
         "repository_name": repo["name"],
-        "executive_summary": repo.get("executive_summary", ""),
-        "vector_analysis": repo.get("vector_analysis", {}),
         "health_score": repo.get("health_score", 0),
         "last_updated": repo.get("last_sync", "")
     }
@@ -1339,7 +1350,7 @@ async def store_mr_in_mongodb(mr_data: Dict) -> str:
     """
     try:
         if not MONGO_CONNECTION_STRING:
-            print("[⚠️] MongoDB connection string not configured - MR stored in memory only")
+            print("[WARN] MongoDB connection string not configured - MR stored in memory only")
             # Store in in-memory cache as fallback
             repo_id = mr_data.get("repository_id")
             if repo_id not in _merge_requests:
@@ -1371,11 +1382,11 @@ async def store_mr_in_mongodb(mr_data: Dict) -> str:
                 collection_name=MRS_COLLECTION,
                 document=mr_data
             )
-            print(f"[✅] Stored MR {mr_data.get('gitlab_mr_id')} in MongoDB with ID: {doc_id}")
+            print(f"[OK] Stored MR {mr_data.get('gitlab_mr_id')} in MongoDB with ID: {doc_id}")
             return doc_id
 
     except Exception as e:
-        print(f"[❌] Failed to store MR in MongoDB: {e}")
+        print(f"[ERROR] Failed to store MR in MongoDB: {e}")
         # Fallback to in-memory storage
         repo_id = mr_data.get("repository_id")
         if repo_id not in _merge_requests:
@@ -1387,7 +1398,8 @@ async def store_mr_in_mongodb(mr_data: Dict) -> str:
 async def get_repository_mrs_from_db(
     repo_id: str,
     limit: int = 50,
-    status_filter: Optional[str] = None
+    status_filter: Optional[str] = None,
+    user_id: Optional[str] = None
 ) -> List[Dict]:
     """
     Get merge requests for a repository from MongoDB.
@@ -1396,9 +1408,10 @@ async def get_repository_mrs_from_db(
         repo_id: Repository ID
         limit: Maximum number of MRs to return
         status_filter: Optional status filter (open, closed, merged, draft)
+        user_id: Optional user ID to check if they've already rated each MR
 
     Returns:
-        List of merge requests with AI analysis and auto-fix data
+        List of merge requests with AI analysis, auto-fix data, and user rating status
 
     Raises:
         HTTPException: If repository not found
@@ -1431,7 +1444,7 @@ async def get_repository_mrs_from_db(
                 print(f"[DEBUG] Sample MRs in collection: {[mr.get('repository_id', 'no_repo_id') for mr in all_mrs]}")
         else:
             # Fallback to in-memory cache
-            print(f"[⚠️] MongoDB not configured - using in-memory MR cache")
+            print(f"[WARN] MongoDB not configured - using in-memory MR cache")
             documents = _merge_requests.get(repo_id, [])
 
         # Format for frontend response
@@ -1453,6 +1466,17 @@ async def get_repository_mrs_from_db(
                 additions = 0
                 deletions = 0
                 files_changed = 0
+
+            # Check if user has already rated this MR
+            user_has_rated = False
+            user_vote = None
+            if user_id:
+                user_feedback_list = doc.get("user_feedback", [])
+                for feedback_entry in user_feedback_list:
+                    if feedback_entry.get("user_id") == user_id:
+                        user_has_rated = True
+                        user_vote = feedback_entry.get("vote")
+                        break
 
             result.append({
                 "id": f"#{doc.get('gitlab_mr_id', doc.get('iid', ''))}",
@@ -1476,6 +1500,7 @@ async def get_repository_mrs_from_db(
                 },
                 # AI Analysis Data
                 "aiSummary": doc.get("ai_summary"),
+                "description": doc.get("description"),
                 "aiIssues": doc.get("ai_issues", []),
                 "healthScore": doc.get("health_score"),
                 "analysisStatus": doc.get("analysis_status", "pending"),
@@ -1485,6 +1510,10 @@ async def get_repository_mrs_from_db(
                 "autoFixFor": doc.get("auto_fix_for"),
                 "autoFixMrs": doc.get("auto_fix_mrs", []),
                 "autoFixStatus": doc.get("auto_fix_status"),
+
+                # User Rating Data
+                "userHasRated": user_has_rated,
+                "userVote": user_vote,
             })
 
         return result
@@ -1519,7 +1548,7 @@ async def link_auto_fix_to_original_mr(
     """
     try:
         if not MONGO_CONNECTION_STRING:
-            print("[⚠️] MongoDB not configured - auto-fix link stored in memory only")
+            print("[WARN] MongoDB not configured - auto-fix link stored in memory only")
             # Update in-memory cache
             for mr in _merge_requests.get(repo_id, []):
                 if mr.get("gitlab_mr_id") == auto_fix_mr_iid:
@@ -1566,7 +1595,7 @@ async def link_auto_fix_to_original_mr(
             }
         )
 
-        print(f"[✅] Linked auto-fix MR {auto_fix_mr_iid} to original MR {original_mr_iid}")
+        print(f"[OK] Linked auto-fix MR {auto_fix_mr_iid} to original MR {original_mr_iid}")
 
         return {
             "status": "linked",
@@ -1594,7 +1623,10 @@ async def submit_mr_feedback(
     """
     Store feedback on AI analysis for a merge request.
 
-    Feedback is stored in a separate collection for analytics.
+    Feedback is stored directly in the MR document's user_feedback array
+    and also submitted as an annotation to Arize Phoenix.
+
+    Duplicate prevention: A user can only rate a particular MR once.
 
     Args:
         repo_id: Repository ID
@@ -1607,38 +1639,347 @@ async def submit_mr_feedback(
         Success response
 
     Raises:
-        HTTPException: If storage fails
+        HTTPException: If storage fails or user has already rated this MR
     """
     try:
-        feedback_doc = {
-            "repo_id": repo_id,
-            "mr_id": mr_id,
+        # Handle mr_id - it might be string or int
+        mr_id_filter = int(mr_id) if isinstance(mr_id, str) and mr_id.isdigit() else (
+            int(mr_id) if isinstance(mr_id, (int, float)) else mr_id
+        )
+
+        # Fetch MR document to check for existing feedback and get span_id
+        span_id = None
+        trace_id = None  # Keep for backwards compatibility
+        existing_feedback = None
+        has_already_rated = False
+
+        if MONGO_CONNECTION_STRING:
+            try:
+                mr_data = await mongo_client.find_one(
+                    collection_name=MRS_COLLECTION,
+                    filter={
+                        "repository_id": repo_id,
+                        "gitlab_mr_id": mr_id_filter
+                    }
+                )
+                if mr_data:
+                    span_id = mr_data.get("span_id")  # Try to get span_id first
+                    trace_id = mr_data.get("trace_id")  # Fallback for backwards compatibility
+
+                    # Check if user has already provided feedback for this MR
+                    user_feedback_list = mr_data.get("user_feedback", [])
+                    for existing_feedback_entry in user_feedback_list:
+                        if existing_feedback_entry.get("user_id") == user_id:
+                            has_already_rated = True
+                            existing_feedback = existing_feedback_entry
+                            break
+
+                    if span_id:
+                        print(f"[INFO] Found span_id for MR {mr_id}: {span_id[:16]}...")
+                    elif trace_id:
+                        print(f"[INFO] Found trace_id (fallback) for MR {mr_id}: {trace_id[:16]}...")
+                    else:
+                        print(f"[WARN] No span_id or trace_id found for MR {mr_id}")
+            except Exception as fetch_err:
+                print(f"[WARN] Failed to fetch MR for span_id: {fetch_err}")
+
+        # Check for duplicate rating
+        if has_already_rated:
+            print(f"[INFO] User {user_id} has already rated MR {mr_id} with vote: {existing_feedback.get('vote')}")
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"You have already rated this MR as {existing_feedback.get('vote')}. You cannot rate it again."
+            )
+
+        # Prepare feedback entry
+        feedback_entry = {
+            "user_id": user_id,
             "vote": vote,
             "comment": comment,
-            "user_id": user_id,
             "created_at": datetime.now().isoformat()
         }
 
+        # Store feedback in MR document instead of separate collection
         if MONGO_CONNECTION_STRING:
-            doc_id = await mongo_client.insert_one(
-                collection_name="ai_feedback",
-                document=feedback_doc
+            # Update MR document with new feedback entry
+            result = await mongo_client.update_one(
+                collection_name=MRS_COLLECTION,
+                filter={
+                    "repository_id": repo_id,
+                    "gitlab_mr_id": mr_id_filter
+                },
+                update={
+                    "$push": {"user_feedback": feedback_entry}
+                }
             )
-            print(f"[✅] Stored feedback for MR {mr_id} with ID: {doc_id}")
+
+            if result:
+                print(f"[OK] Stored feedback for MR {mr_id} from user {user_id} in MR document")
+            else:
+                print(f"[WARN] Failed to store feedback - MR not found")
         else:
-            print("[⚠️] MongoDB not configured - feedback not stored")
+            print("[WARN] MongoDB not configured - feedback not stored")
+
+        # Submit annotation to Arize if span_id is available (preferred) or trace_id (fallback)
+        record_id = span_id or trace_id
+        if record_id:
+            try:
+                annotation_success = await submit_arize_annotation(
+                    record_id=record_id,
+                    vote=vote,
+                    comment=comment,
+                    mr_id=mr_id,
+                    repo_id=repo_id,
+                    user_id=user_id
+                )
+                if annotation_success:
+                    print(f"[OK] Submitted feedback annotation to Arize")
+                else:
+                    print(f"[WARN] Failed to submit annotation to Arize")
+            except Exception as arize_err:
+                print(f"[WARN] Arize annotation error (non-critical): {arize_err}")
+        else:
+            print(f"[INFO] Skipping Arize annotation - no span_id or trace_id available")
 
         return {
             "status": "recorded",
             "message": "Feedback recorded successfully"
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"[ERROR] Failed to submit feedback: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e)
         )
+
+
+async def submit_arize_annotation(
+    record_id: str,
+    vote: str,
+    comment: Optional[str] = None,
+    mr_id: Optional[str] = None,
+    repo_id: Optional[str] = None,
+    user_id: Optional[str] = None
+) -> bool:
+    """
+    Submit user feedback as an annotation to Arize Phoenix.
+
+    This links human feedback to the original AI analysis span/trace,
+    enabling continuous improvement and evaluation of model performance.
+
+    Args:
+        record_id: The span ID (preferred) or trace ID from the original AI analysis
+        vote: User vote ("helpful" or "unhelpful")
+        comment: Optional user comment explaining their vote
+        mr_id: Optional merge request ID for context
+        repo_id: Optional repository ID for context
+        user_id: Optional user ID who submitted feedback
+
+    Returns:
+        True if annotation was submitted successfully, False otherwise
+    """
+    try:
+        import os
+        from ai_observability.trace_utils import link_evaluation_to_trace
+
+        # Get Arize configuration
+        space_id = os.getenv("ARIZE_SPACE_ID", "")
+        api_key = os.getenv("ARIZE_API_KEY", "")
+        project_name = os.getenv("ARIZE_PROJECT_NAME", "gatekeeper")
+
+        if not space_id or not api_key:
+            print("[WARN] Arize credentials not configured - skipping annotation")
+            return False
+
+        if not record_id:
+            print("[WARN] No record_id provided - cannot link annotation to span/trace")
+            return False
+
+        # Convert vote to score (helpful = 1.0, unhelpful = 0.0)
+        score = 1.0 if vote == "helpful" else 0.0
+        label = "positive" if vote == "helpful" else "negative"
+
+        # Prepare annotation data
+        explanation = comment or f"User rated this analysis as {label}"
+
+        # Link to trace for local context (stores in OpenTelemetry context)
+        link_evaluation_to_trace({
+            "score": score,
+            "label": label,
+            "explanation": explanation,
+            "metadata": {
+                "source": "gatekeeper_feedback",
+                "vote": vote,
+                "mr_id": str(mr_id) if mr_id else None,
+                "repo_id": str(repo_id) if repo_id else None,
+                "user_id": str(user_id) if user_id else None,
+            }
+        }, record_id)
+
+        # Initialize Arize client
+        from arize import ArizeClient
+        client = ArizeClient(api_key=api_key)
+
+        # Check if 'user_feedback' annotation config exists, create if not
+        annotation_config_name = "user_feedback"
+        config_exists = False
+
+        try:
+            # List existing annotation configs
+            configs_response = client.annotation_configs.list(space=space_id)
+
+            # Extract configs from response (Arize SDK returns a response object with an annotation_configs attribute)
+            configs = []
+            if hasattr(configs_response, 'annotation_configs'):
+                configs = configs_response.annotation_configs
+            elif hasattr(configs_response, 'configs'):
+                configs = configs_response.configs
+            else:
+                # Try to iterate directly on the response
+                try:
+                    configs = list(configs_response)
+                except:
+                    pass
+
+            config_names = []
+            for c in configs:
+                # Handle both object and tuple formats
+                if hasattr(c, 'name'):
+                    config_names.append(c.name)
+                elif isinstance(c, (tuple, list)) and len(c) > 0:
+                    # If it's a tuple, the name might be the first element or accessible by index
+                    config_names.append(str(c[0]))
+
+            if annotation_config_name in config_names:
+                config_exists = True
+                print(f"[INFO] Using existing annotation config: {annotation_config_name}")
+            else:
+                print(f"[INFO] Annotation config '{annotation_config_name}' not found, creating...")
+
+                # Create the annotation config programmatically
+                from arize.annotation_configs.types import AnnotationConfigType, CategoricalAnnotationValue
+
+                create_response = client.annotation_configs.create(
+                    name=annotation_config_name,
+                    space=space_id,
+                    config_type=AnnotationConfigType.CATEGORICAL,
+                    values=[
+                        CategoricalAnnotationValue(label="positive", score=1),
+                        CategoricalAnnotationValue(label="negative", score=0),
+                    ],
+                    optimization_direction="maximize",
+                )
+
+                if create_response:
+                    print(f"[OK] Created annotation config '{annotation_config_name}' in Arize")
+                    config_exists = True
+                else:
+                    print(f"[WARN] Failed to create annotation config")
+
+        except Exception as config_err:
+            print(f"[WARN] Error checking/creating annotation config: {config_err}")
+            # Try to proceed anyway
+
+        if not config_exists:
+            print("[WARN] No annotation config available - cannot submit to Arize")
+            return False
+
+        # Now submit the annotation using the config
+        from arize.spans.types import AnnotateRecordInput
+        from arize.annotation_queues.types import AnnotationInput
+
+        # Submit annotation to Arize (annotation succeeds if no exception is raised)
+        try:
+            client.spans.annotate_spans(
+                project=project_name,
+                space=space_id,
+                annotations=[
+                    AnnotateRecordInput(
+                        record_id=record_id,  # Use span_id (preferred) or trace_id as record_id
+                        values=[
+                            AnnotationInput(
+                                name=annotation_config_name,
+                                label=label,
+                                explanation=explanation
+                            ),
+                        ],
+                    ),
+                ],
+            )
+            print(f"[OK] Submitted feedback annotation to Arize for record {record_id[:16]}...")
+        except Exception as annotate_err:
+            print(f"[WARN] Failed to submit annotation to Arize: {annotate_err}")
+            return False
+
+        # Add the annotated span to the appropriate dataset for future model fine-tuning
+        # Using Phoenix client to add examples to datasets
+        try:
+            import os
+            from phoenix.client import Client
+
+            # Get Arize/Phoenix configuration
+            px_api_key = os.getenv("ARIZE_API_KEY", "")
+            # Use the Phoenix-specific base URL for Arize-hosted instances
+            px_base_url = os.getenv("PHOENIX_BASE_URL", "https://app.phoenix.arize.com")
+
+            if px_api_key:
+                # Initialize Phoenix client with authentication via headers
+                # Phoenix client may require Bearer token format
+                px_client = Client(
+                    base_url=px_base_url,
+                    headers={"Authorization": f"Bearer {px_api_key}"}
+                )
+
+                # Dataset IDs
+                positive_dataset_id = "RGF0YXNldDozNDgxODg6TzI2TA=="
+                negative_dataset_id = "RGF0YXNldDozNDgxODk6RElXZQ=="
+
+                # Select appropriate dataset based on vote
+                dataset_id = positive_dataset_id if vote == "helpful" else negative_dataset_id
+
+                # Import timezone for datetime operations
+                from datetime import timezone
+
+                # Create a simple example structure from the feedback annotation
+                example = {
+                    "span_id": record_id,
+                    "input": {"record_id": record_id},
+                    "output": {"label": label, "vote": vote},
+                    "metadata": {
+                        "annotation_label": label,
+                        "user_vote": vote,
+                        "user_comment": comment or "",
+                        "explanation": explanation,
+                        "created_at": datetime.now(timezone.utc).isoformat()
+                    }
+                }
+
+                # Add example to dataset using Phoenix API
+                px_client.datasets.add_examples_to_dataset(
+                    dataset=dataset_id,
+                    examples=[example]
+                )
+
+                print(f"[OK] Added {label} example to dataset for fine-tuning (span: {record_id[:16]}...)")
+            else:
+                print("[WARN] ARIZE_API_KEY not configured - skipping dataset append")
+
+        except Exception as dataset_err:
+            print(f"[WARN] Error adding span to dataset (non-critical): {dataset_err}")
+            import traceback
+            traceback.print_exc()
+
+        return True
+
+    except Exception as e:
+        error_detail = str(e)
+        print(f"[WARN] Failed to submit Arize annotation: {e}")
+        import traceback
+        print(f"[DEBUG] Traceback: {traceback.format_exc()}")
+        return False
 
 
 async def update_mr_analysis(
@@ -1673,10 +2014,10 @@ async def update_mr_analysis(
             )
 
             if result:
-                print(f"[✅] Updated MR {mr_iid} analysis in MongoDB")
+                print(f"[OK] Updated MR {mr_iid} analysis in MongoDB")
                 return True
             else:
-                print(f"[⚠️] No MR found to update: repo_id={repo_id}, mr_iid={mr_iid}")
+                print(f"[WARN] No MR found to update: repo_id={repo_id}, mr_iid={mr_iid}")
                 # Try to find the MR to debug
                 existing = await mongo_client.find_one(
                     collection_name=MRS_COLLECTION,
@@ -1692,7 +2033,7 @@ async def update_mr_analysis(
             for mr in _merge_requests.get(repo_id, []):
                 if mr.get("gitlab_mr_id") == mr_iid:
                     mr.update(analysis_data)
-                    print(f"[✅] Updated MR {mr_iid} analysis in memory")
+                    print(f"[OK] Updated MR {mr_iid} analysis in memory")
                     return True
             return False
 
@@ -1847,7 +2188,7 @@ async def _get_file_content_from_gitlab(gitlab_session, project_id: str, file_pa
                 return base64.b64decode(content).decode('utf-8', errors='replace')
             return content
     except Exception as e:
-        print(f"[⚠️] Failed to fetch file content for {file_path} on ref {ref}: {e}")
+        print(f"[WARN] Failed to fetch file content for {file_path} on ref {ref}: {e}")
     return ""
 
 
@@ -2128,12 +2469,6 @@ async def onboard_repository(user_id: str, repo_id: str, data: Dict) -> Dict:
         "description": project.get("description", ""),
         "created_at": datetime.fromisoformat(project.get("created_at", datetime.now().isoformat()).replace("Z", "+00:00")) if "created_at" in project else datetime.now(),
         "avatar_url": project.get("avatar_url"),
-        "executive_summary": "Repository onboarded successfully.",
-        "vector_analysis": {
-            "security": "100.0%",
-            "performance": "100.0%",
-            "complexity": "100.0%"
-        },
         # Credential fields
         "mongodb_uri": mongodb_uri,
         "fivetran_api_key": fivetran_api_key,
@@ -2142,8 +2477,10 @@ async def onboard_repository(user_id: str, repo_id: str, data: Dict) -> Dict:
         "target_branches": data.get("branches", []),
         "branch_credentials": branch_credentials,
         "onboarded": True,
-        "avg_review_time": 2.5,
-        "mrs_reviewed": 0
+        "avg_review_time": 0,
+        "mrs_reviewed": 0,
+        "auto_fixes_proposed": 0,
+        "fixes_merged": 0
     }
 
     # Check if document already exists
@@ -2167,7 +2504,7 @@ async def onboard_repository(user_id: str, repo_id: str, data: Dict) -> Dict:
                 filter={"user_id": user_id, "id": str(repo_id)},
                 update={"$set": new_repo}
             )
-            print(f"[✅] Onboarded/Updated repository {new_repo['name']} in MongoDB")
+            print(f"[OK] Onboarded/Updated repository {new_repo['name']} in MongoDB")
     else:
         # Save new repository in memory and db
         _repositories[new_repo["id"]] = new_repo
@@ -2285,7 +2622,7 @@ async def update_repository_credentials(repo_id: str, data: Dict) -> Dict:
         update={"$set": update_data}
     )
 
-    print(f"[✅] Updated credentials for repository {repo_id}")
+    print(f"[OK] Updated credentials for repository {repo_id}")
 
     # 6. Get updated repository
     updated_repo = await mongo_client.find_one(

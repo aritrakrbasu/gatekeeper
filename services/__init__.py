@@ -7,6 +7,7 @@ from services import (
     repository_service,
     mongo_client,
     user_service,
+    incident_service,
     fivetran_service
 )
 
@@ -17,5 +18,6 @@ __all__ = [
     "repository_service",
     "mongo_client",
     "user_service",
+    "incident_service",
     "fivetran_service"
 ]

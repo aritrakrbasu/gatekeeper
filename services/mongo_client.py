@@ -6,7 +6,7 @@ Provides CRUD operations that bypass the limited MCP server.
 """
 
 import os
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 from dotenv import load_dotenv
 
@@ -40,7 +40,7 @@ async def get_mongo_client() -> AsyncIOMotorClient:
         )
 
     if _mongo_client is None:
-        print("[✅] Creating MongoDB Motor client...")
+        print("[OK] Creating MongoDB Motor client...")
         _mongo_client = AsyncIOMotorClient(
             CONNECTION_STRING,
             serverSelectionTimeoutMS=5000,
@@ -48,7 +48,7 @@ async def get_mongo_client() -> AsyncIOMotorClient:
         )
         # Test connection
         await _mongo_client.admin.command('ping')
-        print("[✅] MongoDB connection successful (ping succeeded)")
+        print("[OK] MongoDB connection successful (ping succeeded)")
 
     return _mongo_client
 
@@ -65,7 +65,7 @@ async def get_database() -> AsyncIOMotorDatabase:
     if _database is None:
         client = await get_mongo_client()
         _database = client[DB_NAME]
-        print(f"[✅] Using database: {DB_NAME}")
+        print(f"[OK] Using database: {DB_NAME}")
 
     return _database
 
@@ -76,7 +76,7 @@ async def close_mongo_connection():
 
     if _mongo_client:
         _mongo_client.close()
-        print("[✅] MongoDB connection closed")
+        print("[OK] MongoDB connection closed")
         _mongo_client = None
         _database = None
 
@@ -99,20 +99,21 @@ async def insert_one(collection_name: str, document: Dict[str, Any]) -> str:
         db = await get_database()
         collection = db[collection_name]
         result = await collection.insert_one(document)
-        print(f"[✅] Document inserted into {collection_name} with ID: {result.inserted_id}")
+        print(f"[OK] Document inserted into {collection_name} with ID: {result.inserted_id}")
         return str(result.inserted_id)
     except Exception as e:
-        print(f"[❌] Failed to insert document: {e}")
+        print(f"[ERROR] Failed to insert document: {e}")
         raise
 
 
-async def find_one(collection_name: str, filter: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+async def find_one(collection_name: str, filter: Dict[str, Any], projection: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
     """
     Find a single document in a collection.
 
     Args:
         collection_name: Name of the collection
         filter: Query filter
+        projection: Optional projection to limit returned fields
 
     Returns:
         Dict if found, None otherwise
@@ -120,10 +121,13 @@ async def find_one(collection_name: str, filter: Dict[str, Any]) -> Optional[Dic
     try:
         db = await get_database()
         collection = db[collection_name]
-        document = await collection.find_one(filter)
+        if projection:
+            document = await collection.find_one(filter, projection)
+        else:
+            document = await collection.find_one(filter)
         return document
     except Exception as e:
-        print(f"[❌] Failed to find document: {e}")
+        print(f"[ERROR] Failed to find document: {e}")
         return None
 
 
@@ -153,7 +157,7 @@ async def find(collection_name: str, filter: Dict[str, Any], limit: Optional[int
         documents = await cursor.to_list(length=limit or 1000)
         return documents
     except Exception as e:
-        print(f"[❌] Failed to find documents: {e}")
+        print(f"[ERROR] Failed to find documents: {e}")
         return []
 
 
@@ -175,7 +179,56 @@ async def update_one(collection_name: str, filter: Dict[str, Any], update: Dict[
         result = await collection.update_one(filter, update)
         return result.modified_count > 0
     except Exception as e:
-        print(f"[❌] Failed to update document: {e}")
+        print(f"[ERROR] Failed to update document: {e}")
+        return False
+
+
+async def upsert_one(collection_name: str, filter: Dict[str, Any], document: Dict[str, Any]) -> bool:
+    """
+    Update a document if it exists, or insert it if it doesn't.
+
+    Args:
+        collection_name: Name of the collection
+        filter: Query filter to find the document
+        document: The document to insert or update with
+
+    Returns:
+        bool: True if operation was successful
+    """
+    try:
+        db = await get_database()
+        collection = db[collection_name]
+        result = await collection.update_one(
+            filter,
+            {"$set": document},
+            upsert=True
+        )
+        return result.acknowledged
+    except Exception as e:
+        print(f"[ERROR] Failed to upsert document: {e}")
+        return False
+
+
+async def create_index(collection_name: str, keys: List[Tuple[str, int]], unique: bool = False) -> bool:
+    """
+    Create an index on a collection.
+
+    Args:
+        collection_name: Name of the collection
+        keys: List of (field_name, direction) tuples, e.g., [("user_id", 1), ("trace_id", 1)]
+        unique: Whether the index should enforce uniqueness
+
+    Returns:
+        bool: True if index was created successfully
+    """
+    try:
+        db = await get_database()
+        collection = db[collection_name]
+        await collection.create_index(keys, unique=unique)
+        print(f"[OK] Created index on {collection_name}: {keys}")
+        return True
+    except Exception as e:
+        print(f"[ERROR] Failed to create index: {e}")
         return False
 
 
@@ -196,7 +249,7 @@ async def delete_one(collection_name: str, filter: Dict[str, Any]) -> bool:
         result = await collection.delete_one(filter)
         return result.deleted_count > 0
     except Exception as e:
-        print(f"[❌] Failed to delete document: {e}")
+        print(f"[ERROR] Failed to delete document: {e}")
         return False
 
 
@@ -212,7 +265,7 @@ async def list_collections() -> List[str]:
         collections = await db.list_collection_names()
         return collections
     except Exception as e:
-        print(f"[❌] Failed to list collections: {e}")
+        print(f"[ERROR] Failed to list collections: {e}")
         return []
 
 

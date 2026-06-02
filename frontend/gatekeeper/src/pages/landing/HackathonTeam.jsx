@@ -41,14 +41,13 @@ const Gitlab = (props) => (
 
 export const HackathonTeam = () => {
   return (
-    <section 
-      id="team" 
+    <section
+      id="team"
       className="py-24 px-6 md:px-12 bg-gk-bg relative overflow-hidden z-10"
     >
       <div className="max-w-4xl mx-auto w-full text-center space-y-16">
-        
         {/* Hackathon Badge Card */}
-        <motion.div 
+        <motion.div
           initial={{ rotate: -2, scale: 0.95 }}
           whileInView={{ scale: 1 }}
           transition={{ type: "spring", stiffness: 100 }}
@@ -77,12 +76,16 @@ export const HackathonTeam = () => {
           </h3>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             {HACKATHON_TEAM_CONTENT.team.map((member, idx) => (
-              <div 
+              <div
                 key={idx}
                 className="p-5 rounded-2xl border border-gk-border/40 bg-gk-surface/20 hover:border-gk-accent/40 transition-colors duration-300 flex flex-col justify-center items-center text-center gap-2"
               >
-                <span className="font-bold text-gk-primary font-syne">{member.name}</span>
-                <span className="text-[10px] text-gk-muted uppercase font-bold tracking-wider leading-snug">{member.role}</span>
+                <span className="font-bold text-gk-primary font-syne">
+                  {member.name}
+                </span>
+                <span className="text-[10px] text-gk-muted uppercase font-bold tracking-wider leading-snug">
+                  {member.role}
+                </span>
               </div>
             ))}
           </div>

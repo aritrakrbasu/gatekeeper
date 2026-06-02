@@ -98,7 +98,7 @@ def init_arize(
 
     if not is_arize_configured():
         logger.warning(
-            "[⚠️] Arize credentials not configured. "
+            "[WARN] Arize credentials not configured. "
             "Set ARIZE_SPACE_ID and ARIZE_API_KEY in .env to enable observability."
         )
         return False
@@ -114,18 +114,18 @@ def init_arize(
 
         if tracer_provider:
             arize_initialized = True
-            logger.info(f"[✅] Arize observability initialized for project: {project_name}")
+            logger.info(f"[OK] Arize observability initialized for project: {project_name}")
             return True
         else:
-            logger.warning("[⚠️] Arize registration returned None")
+            logger.warning("[WARN] Arize registration returned None")
             return False
 
     except ImportError as e:
-        logger.error(f"[x] Arize-otel package not installed: {e}")
+        logger.error(f"[ERROR] Arize-otel package not installed: {e}")
         logger.info("[i] Install with: pip install arize-otel")
         return False
     except Exception as e:
-        logger.error(f"[x] Failed to initialize Arize: {e}")
+        logger.error(f"[ERROR] Failed to initialize Arize: {e}")
         return False
 
 
@@ -139,7 +139,7 @@ def init_phoenix_client() -> bool:
     global phoenix_client
 
     if not is_phoenix_configured():
-        logger.warning("[⚠️] Phoenix not configured - skipping Phoenix client initialization")
+        logger.warning("[WARN] Phoenix not configured - skipping Phoenix client initialization")
         return False
 
     try:
@@ -153,23 +153,23 @@ def init_phoenix_client() -> bool:
                     base_url=PHOENIX_BASE_URL,
                     api_key=PHOENIX_API_KEY,
                 )
-                logger.info(f"[✅] Phoenix Cloud client initialized: {PHOENIX_BASE_URL}")
+                logger.info(f"[OK] Phoenix Cloud client initialized: {PHOENIX_BASE_URL}")
             else:
-                logger.warning("[⚠️] Phoenix Cloud mode but no API key provided")
+                logger.warning("[WARN] Phoenix Cloud mode but no API key provided")
                 return False
         else:
             # Self-hosted Phoenix
             phoenix_client = PhoenixClient(base_url=PHOENIX_BASE_URL)
-            logger.info(f"[✅] Phoenix client initialized (self-hosted): {PHOENIX_BASE_URL}")
+            logger.info(f"[OK] Phoenix client initialized (self-hosted): {PHOENIX_BASE_URL}")
 
         return True
 
     except ImportError as e:
-        logger.warning(f"[⚠️] Phoenix package not installed: {e}")
+        logger.warning(f"[WARN] Phoenix package not installed: {e}")
         logger.info("[i] Install with: pip install arize-phoenix")
         return False
     except Exception as e:
-        logger.error(f"[x] Failed to initialize Phoenix client: {e}")
+        logger.error(f"[ERROR] Failed to initialize Phoenix client: {e}")
         return False
 
 
@@ -183,22 +183,22 @@ def instrument_google_genai() -> bool:
         True if instrumentation was successful, False otherwise
     """
     if not arize_initialized:
-        logger.warning("[⚠️] Arize not initialized - skipping Google GenAI instrumentation")
+        logger.warning("[WARN] Arize not initialized - skipping Google GenAI instrumentation")
         return False
 
     try:
         from openinference.instrumentation.google_genai import GoogleGenAIInstrumentor
 
         GoogleGenAIInstrumentor().instrument(tracer_provider=tracer_provider)
-        logger.info("[✅] Google GenAI instrumentor registered")
+        logger.info("[OK] Google GenAI instrumentor registered")
         return True
 
     except ImportError:
-        logger.warning("[⚠️] openinference-instrumentation-google-genai not installed")
+        logger.warning("[WARN] openinference-instrumentation-google-genai not installed")
         logger.info("[i] Install with: pip install openinference-instrumentation-google-genai")
         return False
     except Exception as e:
-        logger.error(f"[x] Failed to instrument Google GenAI: {e}")
+        logger.error(f"[ERROR] Failed to instrument Google GenAI: {e}")
         return False
 
 
@@ -247,11 +247,11 @@ def set_span_attributes(**attributes):
 
         if current_span and current_span.is_recording():
             current_span.set_attributes(attributes)
-            logger.info(f"[✅] Set {len(attributes)} span attributes: {list(attributes.keys())[:5]}...")
+            logger.info(f"[OK] Set {len(attributes)} span attributes: {list(attributes.keys())[:5]}...")
         else:
-            logger.warning(f"[⚠️] No active/recording span - cannot set attributes: {list(attributes.keys())}")
+            logger.warning(f"[WARN] No active/recording span - cannot set attributes: {list(attributes.keys())}")
     except Exception as e:
-        logger.warning(f"[⚠️] Failed to set span attributes: {e}")
+        logger.warning(f"[WARN] Failed to set span attributes: {e}")
         import traceback
         logger.debug(f"[DEBUG] Traceback: {traceback.format_exc()}")
 
@@ -278,9 +278,9 @@ def shutdown():
     if tracer_provider:
         try:
             tracer_provider.shutdown()
-            logger.info("[✅] Arize tracer provider shut down")
+            logger.info("[OK] Arize tracer provider shut down")
         except Exception as e:
-            logger.warning(f"[⚠️] Error shutting down tracer provider: {e}")
+            logger.warning(f"[WARN] Error shutting down tracer provider: {e}")
         finally:
             tracer_provider = None
             arize_initialized = False
@@ -288,8 +288,8 @@ def shutdown():
     if phoenix_client:
         try:
             phoenix_client.close()
-            logger.info("[✅] Phoenix client closed")
+            logger.info("[OK] Phoenix client closed")
         except Exception as e:
-            logger.warning(f"[⚠️] Error closing Phoenix client: {e}")
+            logger.warning(f"[WARN] Error closing Phoenix client: {e}")
         finally:
             phoenix_client = None

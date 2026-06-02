@@ -176,9 +176,25 @@ def validate_oauth_state(state: str) -> bool:
         del _oauth_states[state]
         return False
 
-    # Clean up used state
-    del _oauth_states[state]
+    # State is valid - DON'T delete it yet
+    # It will be deleted after the entire OAuth flow succeeds
     return True
+
+
+def consume_oauth_state(state: str) -> bool:
+    """
+    Consume (delete) an OAuth state parameter after successful OAuth flow.
+
+    Args:
+        state: State string to consume
+
+    Returns:
+        True if state was found and deleted, False otherwise
+    """
+    if state in _oauth_states:
+        del _oauth_states[state]
+        return True
+    return False
 
 
 # ============================================================================
@@ -237,102 +253,116 @@ async def handle_oauth_callback(code: str, state: str) -> Dict:
     # Check if we already have a cached result for this code (idempotency)
     cache_key = f"{code}:{state}"
     if cache_key in _oauth_results:
+        print(f"[INFO] Returning cached OAuth result for {cache_key[:20]}...")
         return _oauth_results[cache_key]
 
-    # Validate state
+    # Validate state (but don't consume it yet)
     if not validate_oauth_state(state):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid or expired OAuth state"
         )
 
-    # Exchange authorization code for access token
-    async with httpx.AsyncClient() as client:
-        try:
-            token_response = await client.post(
-                f"{GITLAB_BASE_URL}/oauth/token",
-                data={
-                    "client_id": GITLAB_CLIENT_ID,
-                    "client_secret": GITLAB_CLIENT_SECRET,
-                    "code": code,
-                    "grant_type": "authorization_code",
-                    "redirect_uri": GITLAB_REDIRECT_URI
-                },
-                headers={"Accept": "application/json"}
-            )
-            token_response.raise_for_status()
-            token_data = token_response.json()
-
-            # Fetch user information
-            user_response = await client.get(
-                f"{GITLAB_BASE_URL}/api/v4/user",
-                headers={"Authorization": f"Bearer {token_data['access_token']}"}
-            )
-            user_response.raise_for_status()
-            user_data = user_response.json()
-
-        except httpx.HTTPStatusError as e:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Failed to exchange authorization code: {e.response.text}"
-            )
-        except httpx.RequestError as e:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to connect to GitLab: {str(e)}"
-            )
-
-    # Create user session
-    user_info = {
-        "id": str(user_data["id"]),
-        "name": user_data.get("name", ""),
-        "username": user_data.get("username", ""),
-        "email": user_data.get("email", ""),
-        "avatar_url": user_data.get("avatar_url"),
-        "created_at": user_data.get("created_at", datetime.utcnow().isoformat())
-    }
-
-    # Store GitLab access token for later use
-    gitlab_tokens = {
-        "access_token": token_data.get("access_token"),
-        "refresh_token": token_data.get("refresh_token")
-    }
-    _user_sessions[user_info["id"]] = {
-        "user": user_info,
-        "gitlab_access_token": gitlab_tokens["access_token"],
-        "gitlab_refresh_token": gitlab_tokens["refresh_token"],
-        "gitlab_token_expires_at": datetime.utcnow() + timedelta(seconds=token_data.get("expires_in", 7200))
-    }
-
-    # Create user in MongoDB (if not exists)
     try:
-        from services.user_service import ensure_user_exists
-        await ensure_user_exists(user_info["id"], user_info, gitlab_tokens)
-        print(f"[✅] User {user_info['id']} ensured in MongoDB")
+        # Exchange authorization code for access token
+        # Use longer timeout for GitLab OAuth (30 seconds)
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                token_response = await client.post(
+                    f"{GITLAB_BASE_URL}/oauth/token",
+                    data={
+                        "client_id": GITLAB_CLIENT_ID,
+                        "client_secret": GITLAB_CLIENT_SECRET,
+                        "code": code,
+                        "grant_type": "authorization_code",
+                        "redirect_uri": GITLAB_REDIRECT_URI
+                    },
+                    headers={"Accept": "application/json"}
+                )
+                token_response.raise_for_status()
+                token_data = token_response.json()
+
+                # Fetch user information
+                user_response = await client.get(
+                    f"{GITLAB_BASE_URL}/api/v4/user",
+                    headers={"Authorization": f"Bearer {token_data['access_token']}"}
+                )
+                user_response.raise_for_status()
+                user_data = user_response.json()
+
+            except httpx.HTTPStatusError as e:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Failed to exchange authorization code: {e.response.text}"
+                )
+            except httpx.RequestError as e:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to connect to GitLab: {str(e)}"
+                )
+
+        # Create user session
+        user_info = {
+            "id": str(user_data["id"]),
+            "name": user_data.get("name", ""),
+            "username": user_data.get("username", ""),
+            "email": user_data.get("email", ""),
+            "avatar_url": user_data.get("avatar_url"),
+            "created_at": user_data.get("created_at", datetime.utcnow().isoformat())
+        }
+
+        # Store GitLab access token for later use
+        gitlab_tokens = {
+            "access_token": token_data.get("access_token"),
+            "refresh_token": token_data.get("refresh_token")
+        }
+        _user_sessions[user_info["id"]] = {
+            "user": user_info,
+            "gitlab_access_token": gitlab_tokens["access_token"],
+            "gitlab_refresh_token": gitlab_tokens["refresh_token"],
+            "gitlab_token_expires_at": datetime.utcnow() + timedelta(seconds=token_data.get("expires_in", 7200))
+        }
+
+        # Create user in MongoDB (if not exists)
+        try:
+            from services.user_service import ensure_user_exists
+            await ensure_user_exists(user_info["id"], user_info, gitlab_tokens)
+            print(f"[OK] User {user_info['id']} ensured in MongoDB")
+        except Exception as e:
+            # Don't block login if MongoDB fails
+            print(f"[WARN] Failed to create user in MongoDB: {e}")
+
+        # Create JWT tokens
+        access_token = create_access_token(user_info)
+        refresh_token = create_refresh_token(user_info)
+
+        result = {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer",
+            "expires_in": JWT_ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+            "user": user_info
+        }
+
+        # Cache the result for idempotency (expires in 5 minutes)
+        _oauth_results[cache_key] = result
+        # Clean up old cache entries
+        for key in list(_oauth_results.keys()):
+            if key != cache_key:  # Keep only current, remove old ones
+                del _oauth_results[key]
+
+        # Consume the OAuth state only after everything succeeds
+        consume_oauth_state(state)
+        print(f"[INFO] OAuth flow completed successfully for user {user_info['id']}")
+
+        return result
+
     except Exception as e:
-        # Don't block login if MongoDB fails
-        print(f"[⚠️] Failed to create user in MongoDB: {e}")
-
-    # Create JWT tokens
-    access_token = create_access_token(user_info)
-    refresh_token = create_refresh_token(user_info)
-
-    result = {
-        "access_token": access_token,
-        "refresh_token": refresh_token,
-        "token_type": "bearer",
-        "expires_in": JWT_ACCESS_TOKEN_EXPIRE_MINUTES * 60,
-        "user": user_info
-    }
-
-    # Cache the result for idempotency (expires in 5 minutes)
-    _oauth_results[cache_key] = result
-    # Clean up old cache entries
-    for key in list(_oauth_results.keys()):
-        if key != cache_key:  # Keep only current, remove old ones
-            del _oauth_results[key]
-
-    return result
+        # Log the error for debugging
+        print(f"[ERROR] OAuth callback failed: {e}")
+        import traceback
+        print(f"[ERROR] Traceback: {traceback.format_exc()}")
+        raise
 
 
 # ============================================================================
