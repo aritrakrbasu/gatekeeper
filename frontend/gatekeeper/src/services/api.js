@@ -399,6 +399,9 @@ export const api = {
 
   /**
    * Get MR progress logs
+   *
+   * @deprecated This endpoint has been removed. Use useWebSocketProgress hook instead.
+   * The /api/repositories/{repoId}/mrs/{mrIid}/progress endpoint no longer exists.
    */
   getMRProgressLogs: (repoId, mrIid) =>
     apiRequest(`/api/repositories/${repoId}/mrs/${mrIid}/progress`),

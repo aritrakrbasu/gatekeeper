@@ -22,20 +22,22 @@ export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [token, setToken] = useState(null);
 
   /**
    * Check if user has a valid token on mount
    */
   useEffect(() => {
     const checkAuth = async () => {
-      const token = localStorage.getItem("access_token");
+      const storedToken = localStorage.getItem("access_token");
       const storedUser = localStorage.getItem("user");
 
-      if (token && storedUser) {
+      if (storedToken && storedUser) {
         try {
           // Verify token is still valid
-          await api.verifyToken(token);
+          await api.verifyToken(storedToken);
           setUser(JSON.parse(storedUser));
+          setToken(storedToken);
           setIsAuthenticated(true);
         } catch (error) {
           // Token invalid, clear storage
@@ -43,6 +45,7 @@ export const AuthProvider = ({ children }) => {
           localStorage.removeItem("access_token");
           localStorage.removeItem("refresh_token");
           localStorage.removeItem("user");
+          setToken(null);
           setIsAuthenticated(false);
         }
       }
@@ -82,6 +85,7 @@ export const AuthProvider = ({ children }) => {
 
       // Update state
       setUser(response.user);
+      setToken(response.access_token);
       setIsAuthenticated(true);
 
       return response.user;
@@ -95,10 +99,10 @@ export const AuthProvider = ({ children }) => {
    * Logout user and clear session
    */
   const logout = async () => {
-    const token = localStorage.getItem("access_token");
+    const storedToken = localStorage.getItem("access_token");
     try {
-      if (token) {
-        await api.logout(token);
+      if (storedToken) {
+        await api.logout(storedToken);
       }
     } catch (error) {
       console.error("Logout error:", error);
@@ -108,6 +112,7 @@ export const AuthProvider = ({ children }) => {
       localStorage.removeItem("refresh_token");
       localStorage.removeItem("user");
       setUser(null);
+      setToken(null);
       setIsAuthenticated(false);
       // Redirect to login
       window.location.href = "/login";
@@ -127,6 +132,7 @@ export const AuthProvider = ({ children }) => {
     user,
     loading,
     isAuthenticated,
+    token,
     login,
     logout,
     handleCallback,

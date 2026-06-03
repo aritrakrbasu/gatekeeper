@@ -17,6 +17,9 @@ ai_client = genai.Client()
 # Timeout for MCP tool calls
 MCP_TIMEOUT = 30
 
+# GitNexus HTTP server config
+GITNEXUS_SERVER_URL = os.getenv("GITNEXUS_SERVER_URL", "http://localhost:3000")
+
 
 def create_user_client(api_token: str) -> genai.Client:
     """Create a Gemini client with user's API token."""
@@ -75,6 +78,50 @@ def load_prompt(prompt_name: str) -> str:
     else:
         print(f"[WARN] Prompt file not found: {prompt_path}, using fallback")
         return "You are a senior code reviewer. Analyze the provided code changes for security, quality, and performance issues."
+
+
+async def _send_progress_update(
+    progress_callback: Optional[callable],
+    step: str,
+    message: str = None,
+    status: str = "running",
+    **kwargs
+):
+    """
+    Helper function to send progress updates via callback.
+
+    Args:
+        progress_callback: Optional async callback function
+        step: Progress step identifier
+        message: Optional custom message (uses get_user_friendly_message if not provided)
+        status: Status (running, completed, error)
+        **kwargs: Additional parameters for message formatting
+    """
+    if progress_callback:
+        try:
+            from services.progress_messages import (
+                get_user_friendly_message,
+                TOOL_PROGRESS_MESSAGES,
+                CI_STEP_MESSAGES,
+                CI_COMPLETED_MESSAGES
+            )
+
+            # Map tool names to progress messages
+            mapped_step = TOOL_PROGRESS_MESSAGES.get(step, step)
+
+            # Use provided message or get user-friendly message
+            if message is None:
+                # Use CI/CD style messages for better logging
+                if status == "completed" and mapped_step in CI_COMPLETED_MESSAGES:
+                    message = CI_COMPLETED_MESSAGES[mapped_step]
+                elif status == "running" and mapped_step in CI_STEP_MESSAGES:
+                    message = CI_STEP_MESSAGES[mapped_step]
+                else:
+                    message = get_user_friendly_message(mapped_step, **kwargs)
+
+            await progress_callback(step, message, status)
+        except Exception as e:
+            print(f"[WARN] Failed to send progress update: {e}")
 
 
 async def track_llm_usage(
@@ -156,7 +203,7 @@ async def track_llm_usage(
         # Don't raise - tracking failures shouldn't break the main flow
 
 
-async def run_gemini_review(raw_diff_content: str, impact_context: str, user_config: Dict = None, user_id: str = None, mr_id: str = None, repository_id: str = None) -> dict:
+async def run_gemini_review(raw_diff_content: str, impact_context: str, user_config: Dict = None, user_id: str = None, mr_id: str = None, repository_id: str = None, progress_callback: Optional[callable] = None) -> dict:
     """
     Sends MR unified diff stream to Gemini for automated security/quality review.
 
@@ -168,6 +215,7 @@ async def run_gemini_review(raw_diff_content: str, impact_context: str, user_con
         user_id: Optional user ID for usage tracking and Arize tracing
         mr_id: Optional MR ID for trace attribution
         repository_id: Optional repository ID for trace attribution
+        progress_callback: Optional async function(step, message, status) for progress updates
 
     Returns:
         dict with "review_text" (str) and "usage" (dict with token counts and model)
@@ -216,6 +264,9 @@ async def run_gemini_review(raw_diff_content: str, impact_context: str, user_con
 
             print(f"[INFO] Set parent span attributes: user_id={user_id}, mr_id={mr_id}, repository_id={repository_id}")
 
+            # Send starting progress
+            await _send_progress_update(progress_callback, "ai_analysis_starting", status="running")
+
             # Use user's config if provided, otherwise use defaults
             client = ai_client
             model = 'gemini-3.5-flash'  # Default model
@@ -240,6 +291,9 @@ async def run_gemini_review(raw_diff_content: str, impact_context: str, user_con
                     temperature=0.1
                 )
             )
+
+            # Send thinking progress during analysis
+            await _send_progress_update(progress_callback, "ai_analysis_thinking", status="running")
 
             # After the LLM call, find and update the instrumented LLM span with user context
             # The instrumentation creates a child span for the LLM call
@@ -304,6 +358,14 @@ async def run_gemini_review(raw_diff_content: str, impact_context: str, user_con
 
     try:
         review_text = response.text
+
+        # Send completion with character count
+        await _send_progress_update(
+            progress_callback,
+            "ai_analysis_completed",
+            status="completed",
+            char_count=len(review_text)
+        )
     except Exception as text_err:
         print(f"[ERROR] Error accessing response.text: {text_err}")
         import traceback
@@ -430,6 +492,240 @@ def map_json_type_to_gemini(json_type: str) -> str:
     return type_map.get(json_type, "string")
 
 
+async def call_gitnexus_grep(
+    pattern: str,
+    repo: Optional[str] = None,
+    limit: int = 50,
+    server_url: str = GITNEXUS_SERVER_URL
+) -> dict:
+    """
+    Call GitNexus HTTP /api/grep endpoint to search for a pattern across indexed files.
+
+    Args:
+        pattern: Search pattern (literal substring search)
+        repo: Optional repository name (uses default if only one indexed)
+        limit: Max results (default: 50, max: 200)
+        server_url: GitNexus server URL (default: http://localhost:3000)
+
+    Returns:
+        dict with 'results' list containing {filePath, line, text} for each match
+    """
+    from urllib import request
+    from urllib.parse import urlencode
+    from urllib.error import HTTPError, URLError
+
+    print(f"[DEBUG][GitNexus Grep] Starting grep call", flush=True)
+    print(f"[DEBUG][GitNexus Grep]   - pattern: '{pattern}'", flush=True)
+    print(f"[DEBUG][GitNexus Grep]   - repo: {repo or 'default'}", flush=True)
+    print(f"[DEBUG][GitNexus Grep]   - limit: {limit}", flush=True)
+    print(f"[DEBUG][GitNexus Grep]   - server_url: {server_url}", flush=True)
+
+    params = {
+        "pattern": pattern,
+        "limit": str(min(limit, 200))
+    }
+    if repo:
+        params["repo"] = repo
+
+    url = f"{server_url}/api/grep?{urlencode(params)}"
+    print(f"[DEBUG][GitNexus Grep]   - full URL: {url}", flush=True)
+
+    try:
+        print(f"[DEBUG][GitNexus Grep] Making HTTP request...", flush=True)
+        # Run blocking HTTP call in thread pool to avoid blocking event loop
+        data = await asyncio.to_thread(request.urlopen, url, timeout=30)
+
+        response_text = data.read().decode('utf-8')
+        print(f"[DEBUG][GitNexus Grep] Response received, parsing JSON...", flush=True)
+
+        parsed_data = json.loads(response_text)
+        results_count = len(parsed_data.get('results', []))
+        print(f"[OK][GitNexus Grep] Found {results_count} matches for pattern: '{pattern}'", flush=True)
+
+        # Log first few results for debugging
+        if results_count > 0:
+            sample = parsed_data.get('results', [])[:3]
+            for i, r in enumerate(sample):
+                print(f"[DEBUG][GitNexus Grep]   [{i+1}] {r['filePath']}:{r['line']} - {r['text'][:60]}...", flush=True)
+            if results_count > 3:
+                print(f"[DEBUG][GitNexus Grep]   ... and {results_count - 3} more matches", flush=True)
+
+        return parsed_data
+
+    except HTTPError as e:
+        print(f"[WARN][GitNexus Grep] HTTP error: {e.code}", flush=True)
+        if e.code == 404:
+            print(f"[WARN][GitNexus Grep] Repository not found: {repo}", flush=True)
+            return {"error": "Repository not found", "results": []}
+        else:
+            error_text = e.read().decode('utf-8', errors='ignore')[:100]
+            print(f"[WARN][GitNexus Grep] HTTP {e.code}: {error_text}", flush=True)
+            return {"error": f"HTTP {e.code}", "results": []}
+    except URLError as e:
+        print(f"[ERROR][GitNexus Grep] URL error: {e.reason}", flush=True)
+        return {"error": f"Connection error: {e.reason}", "results": []}
+    except Exception as e:
+        print(f"[ERROR][GitNexus Grep] Request failed: {type(e).__name__}: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+        return {"error": str(e), "results": []}
+
+
+async def call_gitnexus_file(
+    file_path: str,
+    repo: Optional[str] = None,
+    start_line: Optional[int] = None,
+    end_line: Optional[int] = None,
+    server_url: str = GITNEXUS_SERVER_URL
+) -> dict:
+    """
+    Call GitNexus HTTP /api/file endpoint to read the full content of a file.
+
+    Args:
+        file_path: File path relative to repo root (e.g., "src/main.js")
+        repo: Optional repository name (uses default if only one indexed)
+        start_line: Optional start line number (0-indexed)
+        end_line: Optional end line number (0-indexed)
+        server_url: GitNexus server URL (default: http://localhost:3000)
+
+    Returns:
+        dict with 'content' (str), 'totalLines' (int), and optionally 'startLine', 'endLine'
+    """
+    from urllib import request
+    from urllib.parse import urlencode
+    from urllib.error import HTTPError, URLError
+
+    print(f"[DEBUG][GitNexus File] Starting file read call", flush=True)
+    print(f"[DEBUG][GitNexus File]   - file_path: '{file_path}'", flush=True)
+    print(f"[DEBUG][GitNexus File]   - repo: {repo or 'default'}", flush=True)
+    print(f"[DEBUG][GitNexus File]   - start_line: {start_line}", flush=True)
+    print(f"[DEBUG][GitNexus File]   - end_line: {end_line}", flush=True)
+
+    params = {
+        "path": file_path
+    }
+    if repo:
+        params["repo"] = repo
+    if start_line is not None:
+        params["startLine"] = str(start_line)
+    if end_line is not None:
+        params["endLine"] = str(end_line)
+
+    url = f"{server_url}/api/file?{urlencode(params)}"
+    print(f"[DEBUG][GitNexus File]   - full URL: {url}", flush=True)
+
+    try:
+        print(f"[DEBUG][GitNexus File] Making HTTP request...", flush=True)
+        # Run blocking HTTP call in thread pool to avoid blocking event loop
+        data = await asyncio.to_thread(request.urlopen, url, timeout=30)
+
+        response_text = data.read().decode('utf-8')
+        print(f"[DEBUG][GitNexus File] Response received, parsing JSON...", flush=True)
+
+        parsed_data = json.loads(response_text)
+        content = parsed_data.get('content', '')
+        total_lines = parsed_data.get('totalLines', 0)
+
+        print(f"[OK][GitNexus File] Read {len(content)} chars ({total_lines} lines) from '{file_path}'", flush=True)
+
+        # Log first few lines for debugging
+        if content:
+            lines = content.split('\n')[:3]
+            for i, line in enumerate(lines):
+                print(f"[DEBUG][GitNexus File]   [{i}] {line[:80]}", flush=True)
+            line_count = len(content.split('\n'))
+            if line_count > 3:
+                print(f"[DEBUG][GitNexus File]   ... ({line_count - 3} more lines)", flush=True)
+
+        return parsed_data
+
+    except HTTPError as e:
+        print(f"[WARN][GitNexus File] HTTP error: {e.code}", flush=True)
+        if e.code == 404:
+            print(f"[WARN][GitNexus File] File not found: {file_path}", flush=True)
+            return {"error": "File not found"}
+        elif e.code == 403:
+            print(f"[WARN][GitNexus File] Path traversal denied", flush=True)
+            return {"error": "Path traversal denied"}
+        else:
+            error_text = e.read().decode('utf-8', errors='ignore')[:100]
+            print(f"[WARN][GitNexus File] HTTP {e.code}: {error_text}", flush=True)
+            return {"error": f"HTTP {e.code}"}
+    except URLError as e:
+        print(f"[ERROR][GitNexus File] URL error: {e.reason}", flush=True)
+        return {"error": f"Connection error: {e.reason}"}
+    except Exception as e:
+        print(f"[ERROR][GitNexus File] Request failed: {type(e).__name__}: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+        return {"error": str(e)}
+
+
+def create_gitnexus_grep_tool() -> types.FunctionDeclaration:
+    """
+    Create a Gemini FunctionDeclaration for the GitNexus grep tool.
+    This is a fallback tool for when detect_changes or impact analysis is uncertain.
+    """
+    return types.FunctionDeclaration(
+        name="gitnexus_grep",
+        description=(
+            "Fallback grep search across all indexed files in the repository. "
+            "Use this tool when you are NOT confident about the results from detect_changes or impact analysis, "
+            "or when those tools fail to provide sufficient context. "
+            "Returns file paths, line numbers, and matching text for all occurrences of a pattern. "
+            "This is a literal substring search (not regex) and scans all files in the indexed repo."
+        ),
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "pattern": types.Schema(
+                    type="STRING",
+                    description="Search pattern - literal substring to find in files (max 200 chars)"
+                ),
+                "limit": types.Schema(
+                    type="INTEGER",
+                    description="Max number of results to return (default: 50, max: 200)"
+                )
+            },
+            required=["pattern"]
+        )
+    )
+
+
+def create_gitnexus_file_tool() -> types.FunctionDeclaration:
+    """
+    Create a Gemini FunctionDeclaration for the GitNexus file read tool.
+    This reads the full content of a file from the indexed repository.
+    """
+    return types.FunctionDeclaration(
+        name="gitnexus_file",
+        description=(
+            "Read the full content of a file from the indexed repository. "
+            "Use this tool after gitnexus_grep finds matching files, when you need to read "
+            "the complete content of a specific file to understand the context or implementation. "
+            "Returns the file content with metadata (total lines, optional line range)."
+        ),
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "file_path": types.Schema(
+                    type="STRING",
+                    description="File path relative to repository root (e.g., 'src/main.js')"
+                ),
+                "start_line": types.Schema(
+                    type="INTEGER",
+                    description="Optional start line number (0-indexed) for partial read"
+                ),
+                "end_line": types.Schema(
+                    type="INTEGER",
+                    description="Optional end line number (0-indexed) for partial read"
+                )
+            },
+            required=["file_path"]
+        )
+    )
+
+
 async def run_gemini_review_with_gitnexus(
     raw_diff_content: str,
     impact_context: str,
@@ -440,7 +736,8 @@ async def run_gemini_review_with_gitnexus(
     user_config: Dict = None,
     user_id: str = None,
     mr_id: str = None,
-    repository_id: str = None
+    repository_id: str = None,
+    progress_callback: Optional[callable] = None
 ) -> dict:
     """
     Sends MR diff to Gemini with GitNexus MCP tools for dynamic impact analysis.
@@ -464,6 +761,7 @@ async def run_gemini_review_with_gitnexus(
         user_id: Optional user ID for usage tracking and Arize tracing
         mr_id: Optional MR ID for trace attribution
         repository_id: Optional repository ID for trace attribution
+        progress_callback: Optional async function(step, message, status) for progress updates
 
     Returns:
         dict with "review_text" (str), "usage" (dict), and "tools_called" (list)
@@ -481,6 +779,8 @@ You have access to GitNexus tools for advanced code intelligence:
 - detect_changes: Map changed lines to affected processes
 - context: Get 360-degree symbol view
 - query: Search the codebase
+- gitnexus_grep: Fallback literal text search across all indexed files
+- gitnexus_file: Read the full content of a specific file
 
 Use these tools when you need more context about dependencies, call chains,
 or the broader impact of the changes.
@@ -488,8 +788,15 @@ or the broader impact of the changes.
 CRITICAL INSTRUCTION FOR THIS REVIEW:
 You have access to the `detect_changes` tool. Because this is a raw pull request diff stream, you MUST execute `detect_changes(scope: "compare")` first to map the git diff against the codebase's existing architectural processes and blast radius. Do not rely on `impact()` for renamed or deleted exports, as the definition anchors will be missing on disk. Use `detect_changes` to see what will break.
 
+IMPORTANT - Fallback to gitnexus_grep and gitnexus_file:
+If you are NOT confident about the results from `detect_changes` or `impact` analysis (e.g., missing symbols, unclear impact, or tool failures):
+1. First, call `gitnexus_grep` with relevant symbol names or patterns to get the complete impacted file list
+2. Then, use `gitnexus_file` to read the full content of specific files you need to examine
+
+The grep tool searches across ALL indexed files and will find references that graph-based tools might miss. The file tool then lets you read the complete content of any file to understand the full context.
+
 IMPORTANT - Dual-Branch Tool Execution:
-For all tools EXCEPT `detect_changes`, results will be gathered from BOTH branches:
+For all tools EXCEPT `detect_changes`, `gitnexus_grep`, and `gitnexus_file`, results will be gathered from BOTH branches:
 - Target branch (base/main): Shows current production state
 - Source branch (feature): Shows proposed changes
 
@@ -549,14 +856,15 @@ This allows you to compare architectural impact between the current state and pr
             if repository_id: parent_span.set_attribute("repository.id", str(repository_id))
             parent_span.set_attribute("operation.type", "review")
 
-            print(f"[INFO] Initializing GitNexus MCP integration...")
+            print(f"[INFO] Initializing GitNexus MCP integration...", flush=True)
+            await _send_progress_update(progress_callback, "ai_analysis_starting", status="running")
 
             # Save current directory and change to repo directory
             # GitNexus MCP needs to run from within the repository
             original_cwd = os.getcwd()
             repo_dir = str(repo_path)
             os.chdir(repo_dir)
-            print(f"[INFO] Changed working directory to: {repo_dir}")
+            print(f"[INFO] Changed working directory to: {repo_dir}", flush=True)
 
             mcp_directory_restored = False
 
@@ -575,10 +883,28 @@ This allows you to compare architectural impact between the current state and pr
 
                         # 2. Extract tools manifest from GitNexus
                         gitnexus_manifest = await mcp_session.list_tools()
-                        print(f"[INFO] GitNexus tools available: {len(gitnexus_manifest.tools)}")
+                        print(f"[INFO] GitNexus tools available: {len(gitnexus_manifest.tools)}", flush=True)
+                        await _send_progress_update(progress_callback, "ai_analysis_running", status="running")
 
                         # 3. Convert to Gemini's Function Declarations format
-                        gemini_tools = [convert_mcp_tools_to_gemini(gitnexus_manifest.tools)]
+                        gemini_mcp_tools = convert_mcp_tools_to_gemini(gitnexus_manifest.tools)
+
+                        # 4. Add gitnexus_grep and gitnexus_file as fallback tools
+                        grep_tool = create_gitnexus_grep_tool()
+                        file_tool = create_gitnexus_file_tool()
+                        print(f"[DEBUG] Created gitnexus_grep tool: {grep_tool.name}", flush=True)
+                        print(f"[DEBUG] Created gitnexus_file tool: {file_tool.name}", flush=True)
+
+                        # Combine MCP tools with grep and file tools
+                        all_declarations = list(gemini_mcp_tools.function_declarations) + [grep_tool, file_tool]
+                        print(f"[DEBUG] Total tools registered: {len(all_declarations)}", flush=True)
+                        print(f"[DEBUG] Tool names: {[d.name for d in all_declarations]}", flush=True)
+
+                        gemini_tools = [
+                            types.Tool(
+                                function_declarations=all_declarations
+                            )
+                        ]
 
                         # 4. Construct Agent Conversation History
                         history = [
@@ -591,6 +917,14 @@ This allows you to compare architectural impact between the current state and pr
 
                         while iteration < max_iterations:
                             iteration += 1
+
+                            # Send iteration progress (Step X of Y)
+                            await _send_progress_update(
+                                progress_callback,
+                                "ai_analysis_thinking",
+                                message=f"🔄 Analysis step {iteration}/{max_iterations} - Processing code changes...",
+                                status="running"
+                            )
 
                             response = await call_gemini_with_retry(
                                 client.models.generate_content,
@@ -631,10 +965,19 @@ This allows you to compare architectural impact between the current state and pr
                                     func_call = part.function_call
                                     break
 
+                            # DEBUG: Log what we found
+                            print(f"[DEBUG] Checking for function call... func_call={func_call.name if func_call else None}", flush=True)
+
                             if func_call:
-                                print(f"[INFO] Gemini calling GitNexus tool: {func_call.name}")
+                                print(f"[INFO] Gemini calling GitNexus tool: {func_call.name}", flush=True)
 
                                 tools_called.append(func_call.name)
+
+                                # Send detailed CI/CD-style progress update for this tool call
+                                await _send_progress_update(progress_callback, func_call.name, status="running")
+
+                                # Send progress update for tool call
+                                await _send_progress_update(progress_callback, func_call.name, status="running")
 
                                 # Inject repo parameter automatically - don't let Gemini choose
                                 tool_args = dict(func_call.args)
@@ -646,26 +989,175 @@ This allows you to compare architectural impact between the current state and pr
                                     }
                                     if func_call.name in repo_supported_tools:
                                         tool_args['repo'] = repo_name
-                                        print(f"[INFO] Auto-injected repo='{repo_name}' into {func_call.name} call")
+                                        print(f"[INFO] Auto-injected repo='{repo_name}' into {func_call.name} call", flush=True)
                                 elif func_call.name in repo_supported_tools:
-                                    print(f"[WARN] GitNexus tool {func_call.name} needs repo but none provided!")
+                                    print(f"[WARN] GitNexus tool {func_call.name} needs repo but none provided!", flush=True)
 
                                 # Inject base_ref for detect_changes when scope is "compare"
                                 if func_call.name == 'detect_changes' and tool_args.get('scope') == 'compare' and target_branch_name:
                                     tool_args['base_ref'] = target_branch_name
-                                    print(f"[INFO] Auto-injected base_ref='{target_branch_name}' into detect_changes call")
+                                    print(f"[INFO] Auto-injected base_ref='{target_branch_name}' into detect_changes call", flush=True)
+
+                                # Handle gitnexus_grep tool (HTTP API call, not MCP)
+                                if func_call.name == 'gitnexus_grep':
+                                    try:
+                                        pattern = tool_args.get('pattern', '')
+                                        print(f"[INFO][GitNexus Grep] Tool called by Gemini", flush=True)
+                                        print(f"[INFO][GitNexus Grep]   - pattern: '{pattern}'", flush=True)
+                                        print(f"[INFO][GitNexus Grep]   - repo: {repo_name or 'default'}", flush=True)
+                                        print(f"[INFO][GitNexus Grep]   - limit: {tool_args.get('limit', 50)}", flush=True)
+
+                                        grep_result = await call_gitnexus_grep(
+                                            pattern=pattern,
+                                            repo=repo_name,
+                                            limit=tool_args.get('limit', 50),
+                                            server_url=GITNEXUS_SERVER_URL
+                                        )
+
+                                        # Format results for Gemini
+                                        if 'error' in grep_result:
+                                            tool_result_text = f"Error: {grep_result['error']}"
+                                            print(f"[WARN][GitNexus Grep] Returning error to Gemini: {grep_result['error']}", flush=True)
+                                        else:
+                                            results = grep_result.get('results', [])
+                                            if results:
+                                                formatted_results = [
+                                                    f"- {r['filePath']}:{r['line']}: {r['text']}"
+                                                    for r in results
+                                                ]
+                                                tool_result_text = f"Found {len(results)} matches:\n" + "\n".join(formatted_results)
+                                            else:
+                                                tool_result_text = "No matches found for the given pattern."
+
+                                            print(f"[INFO][GitNexus Grep] Returning {len(results)} matches to Gemini ({len(tool_result_text)} chars)", flush=True)
+
+                                        # Feed back to Gemini
+                                        tool_response = types.Content(
+                                            role="tool",
+                                            parts=[types.Part.from_function_response(
+                                                name=func_call.name,
+                                                response={"result": tool_result_text}
+                                            )]
+                                        )
+                                        history.append(tool_response)
+                                        print(f"[DEBUG][GitNexus Grep] Tool response added to history", flush=True)
+
+                                        # Send completion for this tool
+                                        await _send_progress_update(progress_callback, func_call.name, status="completed")
+
+                                        continue  # Continue to next iteration
+
+                                    except Exception as grep_err:
+                                        error_msg = f"Grep tool failed: {str(grep_err)}"
+                                        print(f"[ERROR][GitNexus Grep] {error_msg}", flush=True)
+                                        import traceback
+                                        traceback.print_exc()
+                                        history.append(types.Content(
+                                            role="tool",
+                                            parts=[types.Part.from_function_response(
+                                                name=func_call.name,
+                                                response={"error": error_msg}
+                                            )]
+                                        ))
+                                        # Continue to final response
+                                        try:
+                                            review_text = response.text
+                                        except:
+                                            review_text = f"Error: {error_msg}"
+                                        break
+
+                                # Handle gitnexus_file tool (HTTP API call, not MCP)
+                                if func_call.name == 'gitnexus_file':
+                                    try:
+                                        file_path_arg = tool_args.get('file_path', '')
+                                        start_line = tool_args.get('start_line')
+                                        end_line = tool_args.get('end_line')
+
+                                        print(f"[INFO][GitNexus File] Tool called by Gemini", flush=True)
+                                        print(f"[INFO][GitNexus File]   - file_path: '{file_path_arg}'", flush=True)
+                                        print(f"[INFO][GitNexus File]   - start_line: {start_line}", flush=True)
+                                        print(f"[INFO][GitNexus File]   - end_line: {end_line}", flush=True)
+
+                                        file_result = await call_gitnexus_file(
+                                            file_path=file_path_arg,
+                                            repo=repo_name,
+                                            start_line=start_line,
+                                            end_line=end_line,
+                                            server_url=GITNEXUS_SERVER_URL
+                                        )
+
+                                        # Format results for Gemini
+                                        if 'error' in file_result:
+                                            tool_result_text = f"Error: {file_result['error']}"
+                                            print(f"[WARN][GitNexus File] Returning error to Gemini: {file_result['error']}", flush=True)
+                                        else:
+                                            content = file_result.get('content', '')
+                                            total_lines = file_result.get('totalLines', 0)
+
+                                            # Check if line range was requested
+                                            if start_line is not None or end_line is not None:
+                                                returned_start = file_result.get('startLine', start_line or 0)
+                                                returned_end = file_result.get('endLine', end_line or total_lines - 1)
+                                                tool_result_text = (
+                                                    f"File: {file_path_arg} (lines {returned_start}-{returned_end} of {total_lines})\n\n"
+                                                    f"{content}"
+                                                )
+                                            else:
+                                                tool_result_text = (
+                                                    f"File: {file_path_arg} ({total_lines} lines)\n\n"
+                                                    f"{content}"
+                                                )
+
+                                            print(f"[INFO][GitNexus File] Returning {len(content)} chars to Gemini", flush=True)
+
+                                        # Feed back to Gemini
+                                        tool_response = types.Content(
+                                            role="tool",
+                                            parts=[types.Part.from_function_response(
+                                                name=func_call.name,
+                                                response={"result": tool_result_text}
+                                            )]
+                                        )
+                                        history.append(tool_response)
+                                        print(f"[DEBUG][GitNexus File] Tool response added to history", flush=True)
+
+                                        # Send completion for this tool
+                                        await _send_progress_update(progress_callback, func_call.name, status="completed")
+
+                                        continue  # Continue to next iteration
+
+                                    except Exception as file_err:
+                                        error_msg = f"File tool failed: {str(file_err)}"
+                                        print(f"[ERROR][GitNexus File] {error_msg}", flush=True)
+                                        import traceback
+                                        traceback.print_exc()
+                                        history.append(types.Content(
+                                            role="tool",
+                                            parts=[types.Part.from_function_response(
+                                                name=func_call.name,
+                                                response={"error": error_msg}
+                                            )]
+                                        ))
+                                        # Continue to final response
+                                        try:
+                                            review_text = response.text
+                                        except:
+                                            review_text = f"Error: {error_msg}"
+                                        break
 
                                 # Execute via MCP
                                 try:
-                                    # For non-detect_changes tools, run on both branches if branch names provided
+                                    # For non-detect_changes, non-grep, and non-file tools, run on both branches if branch names provided
                                     is_dual_branch_tool = (
                                         func_call.name != 'detect_changes' and
+                                        func_call.name != 'gitnexus_grep' and
+                                        func_call.name != 'gitnexus_file' and
                                         source_branch_name and
                                         target_branch_name
                                     )
 
                                     if is_dual_branch_tool:
-                                        print(f"[INFO] Running {func_call.name} on both branches for comparison")
+                                        print(f"[INFO] Running {func_call.name} on both branches for comparison", flush=True)
 
                                         # Get current branch for restoration
                                         import subprocess
@@ -678,7 +1170,7 @@ This allows you to compare architectural impact between the current state and pr
                                         original_branch = current_branch_result.stdout.strip()
 
                                         # Run on target branch (base)
-                                        print(f"[INFO] Checking out target branch: {target_branch_name}")
+                                        print(f"[INFO] Checking out target branch: {target_branch_name}", flush=True)
                                         subprocess.run(
                                             ["git", "checkout", target_branch_name],
                                             capture_output=True,
@@ -697,10 +1189,10 @@ This allows you to compare architectural impact between the current state and pr
                                             block.text for block in target_output.content
                                             if hasattr(block, 'text')
                                         ])
-                                        print(f"[INFO] Target branch result: {len(target_result_text)} chars")
+                                        print(f"[INFO] Target branch result: {len(target_result_text)} chars", flush=True)
 
                                         # Run on source branch (feature)
-                                        print(f"[INFO] Checking out source branch: {source_branch_name}")
+                                        print(f"[INFO] Checking out source branch: {source_branch_name}", flush=True)
                                         subprocess.run(
                                             ["git", "checkout", source_branch_name],
                                             capture_output=True,
@@ -719,7 +1211,7 @@ This allows you to compare architectural impact between the current state and pr
                                             block.text for block in source_output.content
                                             if hasattr(block, 'text')
                                         ])
-                                        print(f"[INFO] Source branch result: {len(source_result_text)} chars")
+                                        print(f"[INFO] Source branch result: {len(source_result_text)} chars", flush=True)
 
                                         # Restore original branch
                                         if original_branch and original_branch != "HEAD":
@@ -728,7 +1220,7 @@ This allows you to compare architectural impact between the current state and pr
                                                 capture_output=True,
                                                 cwd=repo_dir
                                             )
-                                            print(f"[INFO] Restored to branch: {original_branch}")
+                                            print(f"[INFO] Restored to branch: {original_branch}", flush=True)
 
                                         # Combine results for Gemini
                                         combined_result = f"""## Target Branch ({target_branch_name}) - Current State:
@@ -740,7 +1232,7 @@ This allows you to compare architectural impact between the current state and pr
 {source_result_text}
 """
                                         tool_result_text = combined_result
-                                        print(f"[INFO] Combined dual-branch result: {len(tool_result_text)} chars")
+                                        print(f"[INFO] Combined dual-branch result: {len(tool_result_text)} chars", flush=True)
 
                                     else:
                                         # Single branch execution (detect_changes or no branch info)
@@ -758,7 +1250,7 @@ This allows you to compare architectural impact between the current state and pr
                                             if hasattr(block, 'text')
                                         ])
 
-                                        print(f"[INFO] Tool result: {len(tool_result_text)} chars")
+                                        print(f"[INFO] Tool result: {len(tool_result_text)} chars", flush=True)
 
                                     # Feed back to Gemini
                                     tool_response = types.Content(
@@ -770,9 +1262,12 @@ This allows you to compare architectural impact between the current state and pr
                                     )
                                     history.append(tool_response)
 
+                                    # Send completion for this tool
+                                    await _send_progress_update(progress_callback, func_call.name, status="completed")
+
                                 except asyncio.TimeoutError:
                                     error_msg = f"Tool call timed out after {MCP_TIMEOUT}s"
-                                    print(f"[WARN] {error_msg}")
+                                    print(f"[WARN] {error_msg}", flush=True)
                                     history.append(types.Content(
                                         role="tool",
                                         parts=[types.Part.from_function_response(
@@ -788,7 +1283,7 @@ This allows you to compare architectural impact between the current state and pr
                                     break
                                 except Exception as e:
                                     error_msg = f"Tool call failed: {str(e)}"
-                                    print(f"[WARN] {error_msg}")
+                                    print(f"[WARN] {error_msg}", flush=True)
                                     history.append(types.Content(
                                         role="tool",
                                         parts=[types.Part.from_function_response(
@@ -804,45 +1299,63 @@ This allows you to compare architectural impact between the current state and pr
                                     break
                             else:
                                 # No more tool calls - get final response
+                                print(f"[DEBUG] No function call detected, getting final response", flush=True)
+
+                                # Send synthesizing progress
+                                await _send_progress_update(progress_callback, "ai_analysis_synthesizing", status="running")
+
                                 try:
                                     review_text = response.text
+                                    print(f"[DEBUG] Final response received: {len(review_text)} chars", flush=True)
+
+                                    # Send completion with character count
+                                    await _send_progress_update(
+                                        progress_callback,
+                                        "ai_analysis_completed",
+                                        status="completed",
+                                        char_count=len(review_text)
+                                    )
                                 except Exception as text_err:
                                     print(f"[ERROR] Error accessing final response.text: {text_err}")
                                     review_text = "Error: Could not extract final review text"
                                 break
 
+                        # Add "thinking" message between iterations
+                        if iteration < max_iterations:
+                            await _send_progress_update(progress_callback, "ai_analysis_thinking", status="running")
+
                         if iteration >= max_iterations:
-                            print(f"[WARN] Reached max iterations ({max_iterations})")
+                            print(f"[WARN] Reached max iterations ({max_iterations})", flush=True)
 
                 # Restore original working directory after MCP operations complete
                 os.chdir(original_cwd)
                 mcp_directory_restored = True
-                print(f"[INFO] Restored working directory to: {original_cwd}")
+                print(f"[INFO] Restored working directory to: {original_cwd}", flush=True)
 
             finally:
                 # Ensure directory is restored even if an error occurred
                 if not mcp_directory_restored:
                     try:
                         os.chdir(original_cwd)
-                        print(f"[INFO] Restored working directory in finally block: {original_cwd}")
+                        print(f"[INFO] Restored working directory in finally block: {original_cwd}", flush=True)
                     except Exception as restore_err:
-                        print(f"[ERROR] Failed to restore working directory: {restore_err}")
+                        print(f"[ERROR] Failed to restore working directory: {restore_err}", flush=True)
 
             # Capture trace_id while span context is still attached
             from ai_observability.trace_utils import get_current_trace_id
             current_trace_id = get_current_trace_id()
             if current_trace_id:
-                print(f"[INFO] Captured trace_id for MR {mr_id}: {current_trace_id[:16]}...")
+                print(f"[INFO] Captured trace_id for MR {mr_id}: {current_trace_id[:16]}...", flush=True)
             else:
-                print(f"[WARN] No active trace found during review")
+                print(f"[WARN] No active trace found during review", flush=True)
 
     except Exception as e:
-        print(f"[ERROR] GitNexus integration failed: {e}")
+        print(f"[ERROR] GitNexus integration failed: {e}", flush=True)
         import traceback
         traceback.print_exc()
 
         # Fallback to basic review without tools
-        print(f"[INFO] Falling back to basic review without GitNexus tools")
+        print(f"[INFO] Falling back to basic review without GitNexus tools", flush=True)
         try:
             response = await call_gemini_with_retry(
                 client.models.generate_content,

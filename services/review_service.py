@@ -18,6 +18,7 @@ from services import mcp_service, repository_service, user_service, mongo_client
 from services.gemini_service import run_gemini_review, run_gemini_review_with_gitnexus, run_gemini_fix_analysis
 from services.remediation_service import apply_auto_fixes
 from services.encryption_service import decrypt_value
+from services.websocket_manager import repository_manager
 
 
 # ============================================================================
@@ -478,19 +479,35 @@ async def orchestrate_review(payload: dict) -> dict:
 
     object_attrs = payload.get("object_attributes", {})
 
-    # Helper function to add progress logs
-    async def add_log(step: str, message: str, status: str = "running"):
-        """Add a progress log entry to the MR document"""
+    # Helper function to broadcast progress logs via WebSocket
+    async def add_log(step: str, message: str = None, status: str = "running", **kwargs):
+        """Broadcast progress log via WebSocket (no MongoDB storage)"""
         try:
-            await repository_service.add_mr_progress_log(
+            from services.websocket_manager import manager
+            from services.progress_messages import get_user_friendly_message, get_message_category
+
+            # Use provided message or get user-friendly message
+            if message is None:
+                message = get_user_friendly_message(step, **kwargs)
+
+            category = get_message_category(step)
+
+            await manager.broadcast_progress(
                 repo_id=str(project_id),
                 mr_iid=int(mr_iid),
-                step=step,
-                message=message,
-                status=status
+                event={
+                    "type": "progress",
+                    "data": {
+                        "step": step,
+                        "message": message,
+                        "status": status,
+                        "category": category,
+                        "timestamp": time.time()
+                    }
+                }
             )
         except Exception as log_err:
-            print(f"[WARN] Failed to add progress log: {log_err}")
+            print(f"[WARN] Failed to broadcast progress log: {log_err}")
     state = object_attrs.get("state")
 
     if state != "opened":
@@ -615,6 +632,26 @@ async def orchestrate_review(payload: dict) -> dict:
         # Add initial log
         await add_log("received", "Merge request received and queued for analysis", "completed")
         print(f"[OK] MR {mr_iid} stored in MongoDB with changes data")
+
+        # Broadcast MR created event to repository subscribers
+        await repository_manager.broadcast_event(
+            str(project_id),
+            {
+                "type": "event",
+                "event_type": "mr_created",
+                "data": {
+                    "mr_iid": mr_iid_int,
+                    "title": mr_title,
+                    "author": author,
+                    "source_branch": source_branch,
+                    "target_branch": target_branch,
+                    "status": "pending",
+                    "web_url": web_url,
+                    "timestamp": time.time()
+                }
+            }
+        )
+        print(f"[WS-Repo] Broadcasted mr_created event for MR {mr_iid}")
 
     except Exception as e:
         print(f"[WARN] Failed to store MR in MongoDB: {e}")
@@ -960,6 +997,21 @@ async def orchestrate_review(payload: dict) -> dict:
         )
         await add_log("starting", "🚀 Starting Gatekeeper security analysis", "completed")
         print(f"[OK] Updated MR {mr_iid} status to 'reviewing'")
+
+        # Broadcast analysis started event to repository subscribers
+        await repository_manager.broadcast_event(
+            str(project_id),
+            {
+                "type": "event",
+                "event_type": "analysis_started",
+                "data": {
+                    "mr_iid": mr_iid_int,
+                    "title": mr_title,
+                    "timestamp": time.time()
+                }
+            }
+        )
+        print(f"[WS-Repo] Broadcasted analysis_started event for MR {mr_iid}")
     except Exception as status_err:
         print(f"[WARN] Failed to update MR status to 'reviewing': {status_err}")
 
@@ -1100,7 +1152,6 @@ This may take 30-60 seconds depending on the size of the changes.
 
             # --- 🧠 THE GEMINI COGNITIVE CORE ENGINE ---
             print("[INFO] Step 4: Shipping code diff to Gemini Pro Core for automated security review...")
-            await add_log("ai_analysis", "🤖 Running AI-powered security and code quality analysis", "running")
 
             # Get user's Gemini config from repository owner (user_id from webhook payload)
             user_config = await get_user_config_from_repo(str(project_id))
@@ -1127,14 +1178,27 @@ This may take 30-60 seconds depending on the size of the changes.
                     mr_id=mr_iid,
                     repository_id=project_id,
                     target_branch_name=target_branch,
-                    source_branch_name=source_branch
+                    source_branch_name=source_branch,
+                    progress_callback=lambda step, msg, status: add_log(step, msg, status)
                 )
                 tools_called = gemini_result.get("tools_called", [])
                 if tools_called:
                     print(f"[INFO] GitNexus tools called during review: {', '.join(tools_called)}")
             else:
                 print(f"[INFO] Using standard Gemini review (no local clone available)")
-                gemini_result = await run_gemini_review(raw_diff_content, "", user_config, user_id=user_id, mr_id=mr_iid, repository_id=project_id)
+
+                # Send starting progress for standard review
+                await add_log("ai_analysis_starting", "🤖 Initializing AI code review...", "running")
+
+                gemini_result = await run_gemini_review(
+                    raw_diff_content,
+                    "",
+                    user_config,
+                    user_id=user_id,
+                    mr_id=mr_iid,
+                    repository_id=project_id,
+                    progress_callback=lambda step, msg, status: add_log(step, msg, status)
+                )
             audit_report = gemini_result.get("review_text", "")
             review_usage = gemini_result.get("usage", {})
             captured_trace_id = gemini_result.get("trace_id")
@@ -1170,7 +1234,6 @@ This may take 30-60 seconds depending on the size of the changes.
             print(f"[OK] Step 4 complete: Gemini analysis compiled ({len(audit_report)} chars)")
             if review_usage:
                 print(f"[ℹ] Review usage: {review_usage.get('total_tokens', 0)} tokens ({review_usage.get('model_name', 'unknown')})")
-            await add_log("ai_analysis", f"✅ AI analysis complete - {len(audit_report)} characters of findings generated", "completed")
 
             # 3. Update the loading comment with the final report
             print("[INFO] Updating review with findings...")
@@ -1240,6 +1303,22 @@ This may take 30-60 seconds depending on the size of the changes.
                 )
 
                 await add_log("completed", "🎉 Review completed successfully - Report published to merge request", "completed")
+
+                # Broadcast analysis completed event to repository subscribers
+                await repository_manager.broadcast_event(
+                    str(project_id),
+                    {
+                        "type": "event",
+                        "event_type": "analysis_completed",
+                        "data": {
+                            "mr_iid": mr_iid_int,
+                            "title": mr_title,
+                            "health_score": health_score,
+                            "timestamp": time.time()
+                        }
+                    }
+                )
+                print(f"[WS-Repo] Broadcasted analysis_completed event for MR {mr_iid}")
             except Exception as update_err:
                 print(f"[WARN] Failed to update MongoDB with AI analysis: {update_err}")
 

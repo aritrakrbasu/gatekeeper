@@ -1,8 +1,44 @@
 import { Outlet, NavLink } from "react-router-dom";
+import { useEffect } from "react";
 import { useAuth } from "../contexts/AuthContext";
+import { useWebSocketNotifications } from "../contexts/WebSocketNotificationsContext";
+import { useRepositories } from "../services/queries";
+import { toast } from "react-toastify";
 
 const Layout = () => {
   const { user, logout } = useAuth();
+  const { listenToRepository, stopListeningToRepository } =
+    useWebSocketNotifications();
+  const { data: repositories = [] } = useRepositories();
+
+  // Automatically listen to all repositories globally
+  useEffect(() => {
+    if (!repositories || repositories.length === 0) return;
+
+    console.log(
+      "[Layout-Global-Notifications] Setting up listeners for all repositories:",
+      repositories.length,
+    );
+
+    // Listen to all repositories
+    repositories.forEach((repo) => {
+      if (repo?.id) {
+        listenToRepository(repo.id);
+      }
+    });
+
+    // Cleanup: stop listening when component unmounts
+    return () => {
+      console.log(
+        "[Layout-Global-Notifications] Cleaning up listeners for all repositories",
+      );
+      repositories.forEach((repo) => {
+        if (repo?.id) {
+          stopListeningToRepository(repo.id);
+        }
+      });
+    };
+  }, [repositories, listenToRepository, stopListeningToRepository]);
 
   const navLinkClass = ({ isActive }) =>
     `flex items-center gap-3 px-4 py-3 font-medium rounded-2xl transition-all ${
@@ -13,18 +49,16 @@ const Layout = () => {
 
   const mobileNavLinkClass = ({ isActive }) =>
     `flex flex-col items-center gap-1 transition-colors ${
-      isActive
-        ? "text-[#FC6D26]"
-        : "text-slate-400 hover:text-slate-900"
+      isActive ? "text-[#FC6D26]" : "text-slate-400 hover:text-slate-900"
     }`;
 
   const mobileIconClass = ({ isActive }) =>
-    `p-2 rounded-full transition-all ${
-      isActive ? "bg-[#FC6D26]/10" : ""
-    }`;
+    `p-2 rounded-full transition-all ${isActive ? "bg-[#FC6D26]/10" : ""}`;
 
   // Get user avatar URL or use dicebear fallback
-  const userAvatar = user?.avatar_url || `https://api.dicebear.com/7.x/notionists/svg?seed=${user?.username || "User"}`;
+  const userAvatar =
+    user?.avatar_url ||
+    `https://api.dicebear.com/7.x/notionists/svg?seed=${user?.username || "User"}`;
   const userName = user?.name || user?.username || "User";
 
   const handleLogout = () => {

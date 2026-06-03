@@ -24,7 +24,7 @@ load_dotenv()
 
 GITLAB_CLIENT_ID = os.getenv("GITLAB_CLIENT_ID", "")
 GITLAB_CLIENT_SECRET = os.getenv("GITLAB_CLIENT_SECRET", "")
-GITLAB_REDIRECT_URI = os.getenv("GITLAB_REDIRECT_URI", "http://localhost:3000/auth/callback")
+GITLAB_REDIRECT_URI = os.getenv("GITLAB_REDIRECT_URI", "http://localhost:5173/auth/callback")
 SECRET_KEY = os.getenv("SECRET_KEY", secrets.token_urlsafe(32))
 GITLAB_BASE_URL = os.getenv("GITLAB_BASE_URL", "https://gitlab.com")
 

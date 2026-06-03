@@ -5,7 +5,9 @@ import time
 import json
 import re
 from typing import Optional
-from fastapi import FastAPI, Request, Header, HTTPException
+from fastapi import FastAPI, Request, Header, HTTPException, WebSocket, WebSocketDisconnect, Query
+from fastapi.responses import JSONResponse
+import httpx
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from google.genai import types
@@ -25,6 +27,8 @@ from services import (
     mcp_service, review_service, auth_service, repository_service,
     mongo_client, user_service, billing_service, incident_service
 )
+from services.websocket_manager import manager, repository_manager
+from services.gitnexus_manager import gitnexus_manager
 from api_models import (
     OAuthCallbackRequest, TokenResponse, UserResponse,
     VerifyTokenRequest, VerifyTokenResponse, LogoutResponse,
@@ -43,7 +47,7 @@ app = FastAPI(title="The Gatekeeper Gemini Orchestrator")
 # ============================================================================
 
 # Get allowed origins from environment or use localhost defaults
-frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
 allowed_origins = [
     frontend_url,
     "http://localhost:3000",
@@ -73,6 +77,10 @@ async def startup_event():
     sys.stderr.write("[STARTUP] New webhook debugging code loaded!\n")
     sys.stderr.flush()
     print("[*] MCP Bridge initialization starting in background...")
+
+    # Start GitNexus eval-server on port 3000
+    print("[*] Starting GitNexus eval-server...")
+    await gitnexus_manager.start()
 
     # Initialize Arize observability for LLM usage tracking
     try:
@@ -120,6 +128,12 @@ async def shutdown_event():
         print("[✅] Arize tracer provider shut down")
     except Exception as e:
         print(f"[⚠️] Error shutting down Arize: {e}")
+
+    # Stop GitNexus server
+    try:
+        await gitnexus_manager.stop()
+    except Exception as e:
+        print(f"[⚠️] Error stopping GitNexus server: {e}")
 
     print("[✅] Gatekeeper shutdown complete")
 
@@ -434,25 +448,192 @@ async def submit_mr_feedback(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/repositories/{repo_id}/mrs/{mr_iid}/progress")
-async def get_mr_progress_logs(repo_id: str, mr_iid: int, authorization: str = Header(None)):
-    """Get progress logs for a specific merge request."""
-    try:
-        # Optional user verification
-        if authorization:
-            token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
-            try:
-                user_info = auth_service.verify_token(token)
-            except:
-                pass  # Token invalid, continue without user context
+@app.websocket("/ws/repositories/{repo_id}/mrs/{mr_iid}/progress")
+async def websocket_progress_endpoint(
+    websocket: WebSocket,
+    repo_id: str,
+    mr_iid: int,
+    token: Optional[str] = None
+):
+    """WebSocket endpoint for real-time MR progress updates.
 
-        logs = await repository_service.get_mr_progress_logs(repo_id, mr_iid)
-        return {"logs": logs}
-    except HTTPException as e:
-        raise e
+    Authentication: Required via ?token= JWT query parameter
+
+    Example:
+        ws://localhost:8000/ws/repositories/123/mrs/456/progress?token=your_jwt_token
+    """
+    # IMPORTANT: Must accept connection first before any close() calls
+    await websocket.accept()
+
+    # Validate JWT token (required)
+    if not token:
+        await websocket.close(code=1008, reason="Token required")
+        return
+
+    try:
+        # Remove "Bearer " prefix if present
+        clean_token = token.replace("Bearer ", "") if token.startswith("Bearer ") else token
+        user_info = auth_service.verify_token(clean_token)
     except Exception as e:
-        print(f"[ERROR] Failed to fetch progress logs: {e}")
+        print(f"[WS] Invalid token attempt: {e}")
+        await websocket.close(code=1008, reason="Invalid token")
+        return
+
+    # Send welcome message and track connection
+    await manager.connect(websocket, repo_id, mr_iid)
+
+    try:
+        # Keep connection alive and handle ping/pong for health checks
+        while True:
+            data = await websocket.receive_text()
+            if data == "ping":
+                await websocket.send_text("pong")
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+    except Exception as e:
+        print(f"[WS] Error for {repo_id}/!{mr_iid}: {e}")
+        manager.disconnect(websocket)
+
+
+# ============================================================================
+# GitNexus API Proxy Endpoints
+# ============================================================================
+
+@app.get("/api/grep")
+async def gitnexus_grep_proxy(
+    pattern: str = Query(...),
+    repo: Optional[str] = None,
+    limit: int = Query(100)
+):
+    """
+    Proxy for GitNexus grep API.
+    Converts GET /api/grep to GitNexus MCP tool call.
+    """
+    try:
+        result = await gitnexus_manager.grep(pattern=pattern, repo=repo, limit=limit)
+        return result
+    except Exception as e:
+        print(f"[ERROR] GitNexus grep proxy error: {e}")
+        return {"error": str(e), "results": []}
+
+
+@app.get("/api/file")
+async def gitnexus_file_proxy(
+    path: str = Query(...),
+    repo: Optional[str] = None,
+    start_line: Optional[int] = None,
+    end_line: Optional[int] = None
+):
+    """
+    Proxy for GitNexus file read API.
+    Converts GET /api/file to GitNexus MCP tool call.
+    """
+    try:
+        result = await gitnexus_manager.file(
+            path=path,
+            repo=repo,
+            start_line=start_line,
+            end_line=end_line
+        )
+        return result
+    except Exception as e:
+        print(f"[ERROR] GitNexus file proxy error: {e}")
+        return {"error": str(e)}
+
+
+# ============================================================================
+
+
+@app.websocket("/ws/repositories/{repo_id}/events")
+async def websocket_repository_events(
+    websocket: WebSocket,
+    repo_id: str,
+    token: Optional[str] = None
+):
+    """WebSocket endpoint for repository-wide real-time events.
+
+    Events:
+    - mr_created: New MR opened
+    - analysis_started: MR analysis began
+    - analysis_completed: MR analysis finished
+    - mr_updated: MR status or data changed
+
+    Authentication: Required via ?token= JWT query parameter
+
+    Example:
+        ws://localhost:8000/ws/repositories/123/events?token=your_jwt_token
+    """
+    # IMPORTANT: Must accept connection first before any close() calls
+    await websocket.accept()
+
+    # Validate JWT token (required)
+    if not token:
+        await websocket.close(code=1008, reason="Token required")
+        return
+
+    try:
+        # Remove "Bearer " prefix if present
+        clean_token = token.replace("Bearer ", "") if token.startswith("Bearer ") else token
+        user_info = auth_service.verify_token(clean_token)
+    except Exception as e:
+        print(f"[WS-Repo] Invalid token attempt: {e}")
+        await websocket.close(code=1008, reason="Invalid token")
+        return
+
+    # Connect to repository manager
+    await repository_manager.connect(websocket, repo_id)
+
+    try:
+        # Keep connection alive and handle ping/pong
+        while True:
+            data = await websocket.receive_text()
+            if data == "ping":
+                await websocket.send_text("pong")
+    except WebSocketDisconnect:
+        repository_manager.disconnect(websocket)
+    except Exception as e:
+        print(f"[WS-Repo] Error for repository {repo_id}: {e}")
+        repository_manager.disconnect(websocket)
+
+
+# ============================================================================
+
+
+@app.get("/ws/test")
+async def websocket_test():
+    """Test endpoint to verify WebSocket configuration"""
+    return {
+        "message": "WebSocket test endpoint",
+        "usage": "Connect to ws://localhost:8000/ws/repositories/{repo_id}/mrs/{mr_iid}/progress?token={jwt}",
+        "note": "Progress messages are only sent when analysis is running and client is connected",
+        "active_connections": manager.get_total_connections()
+    }
+
+
+@app.post("/ws/test/broadcast")
+async def websocket_test_broadcast(repo_id: str = Query(...), mr_iid: int = Query(...)):
+    """Test endpoint to manually trigger a WebSocket broadcast"""
+    try:
+        await manager.broadcast_progress(
+            repo_id=repo_id,
+            mr_iid=mr_iid,
+            event={
+                "type": "progress",
+                "data": {
+                    "step": "test",
+                    "message": "🧪 Test progress message",
+                    "status": "running",
+                    "category": "info",
+                    "timestamp": time.time()
+                }
+            }
+        )
+        return {"status": "sent", "repo_id": repo_id, "mr_iid": mr_iid}
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
 
 
 @app.post("/api/repositories/{repo_id}/scan", response_model=ScanRepositoryResponse)

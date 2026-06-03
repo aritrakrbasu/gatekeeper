@@ -555,6 +555,10 @@ export function useSubmitFeedback() {
 
 /**
  * Get MR progress logs
+ *
+ * @deprecated Use useWebSocketProgress instead for real-time updates.
+ * This hook will be removed in v2.0. The /progress API endpoint has been removed.
+ *
  * @param {string|number} repoId - Repository ID
  * @param {string|number} mrIid - Merge Request IID
  * @param {Object} options - Query options
@@ -563,8 +567,8 @@ export function useMRProgressLogs(repoId, mrIid, options = {}) {
   return useQuery({
     queryKey: ['mrProgress', repoId, mrIid],
     queryFn: () => api.getMRProgressLogs(repoId, mrIid),
-    enabled: !!repoId && !!mrIid,
-    staleTime: options.staleTime || 5 * 1000, // 5 seconds - logs update frequently
-    refetchInterval: options.refetchInterval || 3000, // Poll every 3 seconds for new logs
+    enabled: false, // Disabled by default since the endpoint is removed
+    staleTime: options.staleTime || 5 * 1000,
+    refetchInterval: false, // No polling - endpoint is deprecated
   });
 }

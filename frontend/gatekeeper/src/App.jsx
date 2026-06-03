@@ -6,6 +6,7 @@ import {
 } from "react-router-dom";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { AuthProvider, ProtectedRoute } from "./contexts/AuthContext";
+import { WebSocketNotificationsProvider } from "./contexts/WebSocketNotificationsContext";
 import { queryClient } from "./services/queryClient";
 import { ToastContainer } from "react-toastify";
 import "react-toastify/dist/ReactToastify.css";
@@ -25,77 +26,79 @@ function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <AuthProvider>
-        <Router>
-          <Routes>
-            <Route path="/" element={<GatekeeperLanding />} />
-            <Route path="/login" element={<Login />} />
+        <WebSocketNotificationsProvider>
+          <Router>
+            <Routes>
+              <Route path="/" element={<GatekeeperLanding />} />
+              <Route path="/login" element={<Login />} />
 
-            <Route path="/auth/callback" element={<AuthCallback />} />
-            <Route path="/onboarding" element={<Onboarding />} />
-            <Route element={<Layout />}>
-              <Route
-                path="/dashboard"
-                element={
-                  <ProtectedRoute>
-                    <Dashboard />
-                  </ProtectedRoute>
-                }
-              />
-              <Route
-                path="/repositories"
-                element={
-                  <ProtectedRoute>
-                    <Repositories />
-                  </ProtectedRoute>
-                }
-              />
-              <Route
-                path="/repositories/:id"
-                element={
-                  <ProtectedRoute>
-                    <RepoDetails />
-                  </ProtectedRoute>
-                }
-              />
-              <Route
-                path="/alerts"
-                element={
-                  <ProtectedRoute>
-                    <Alerts />
-                  </ProtectedRoute>
-                }
-              />
-              <Route
-                path="/settings"
-                element={
-                  <ProtectedRoute>
-                    <Settings />
-                  </ProtectedRoute>
-                }
-              />
-              <Route
-                path="/billing"
-                element={
-                  <ProtectedRoute>
-                    <Billing />
-                  </ProtectedRoute>
-                }
-              />
-            </Route>
-          </Routes>
-        </Router>
-        <ToastContainer
-          position="top-right"
-          autoClose={5000}
-          hideProgressBar={false}
-          newestOnTop={false}
-          closeOnClick
-          rtl={false}
-          pauseOnFocusLoss
-          draggable
-          pauseOnHover
-          theme="light"
-        />
+              <Route path="/auth/callback" element={<AuthCallback />} />
+              <Route path="/onboarding" element={<Onboarding />} />
+              <Route element={<Layout />}>
+                <Route
+                  path="/dashboard"
+                  element={
+                    <ProtectedRoute>
+                      <Dashboard />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/repositories"
+                  element={
+                    <ProtectedRoute>
+                      <Repositories />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/repositories/:id"
+                  element={
+                    <ProtectedRoute>
+                      <RepoDetails />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/alerts"
+                  element={
+                    <ProtectedRoute>
+                      <Alerts />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/settings"
+                  element={
+                    <ProtectedRoute>
+                      <Settings />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/billing"
+                  element={
+                    <ProtectedRoute>
+                      <Billing />
+                    </ProtectedRoute>
+                  }
+                />
+              </Route>
+            </Routes>
+          </Router>
+          <ToastContainer
+            position="top-right"
+            autoClose={5000}
+            hideProgressBar={false}
+            newestOnTop={false}
+            closeOnClick
+            rtl={false}
+            pauseOnFocusLoss
+            draggable
+            pauseOnHover
+            theme="light"
+          />
+        </WebSocketNotificationsProvider>
       </AuthProvider>
     </QueryClientProvider>
   );
