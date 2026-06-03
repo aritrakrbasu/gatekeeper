@@ -1,10 +1,14 @@
 import os
 import sys
 import asyncio
+import time
+import json
+import re
 from typing import Optional
 from fastapi import FastAPI, Request, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
+from google.genai import types
 
 # Fix Windows console encoding for emoji characters
 if sys.platform == "win32":
@@ -17,7 +21,10 @@ if sys.platform == "win32":
 load_dotenv()
 
 # Import Gatekeeper Services
-from services import mcp_service, review_service, auth_service, repository_service, mongo_client, user_service, billing_service
+from services import (
+    mcp_service, review_service, auth_service, repository_service,
+    mongo_client, user_service, billing_service, incident_service
+)
 from api_models import (
     OAuthCallbackRequest, TokenResponse, UserResponse,
     VerifyTokenRequest, VerifyTokenResponse, LogoutResponse,
@@ -106,15 +113,6 @@ async def shutdown_event():
     except Exception as e:
         print(f"[⚠️] Error closing MongoDB connection: {e}")
 
-    # Close Phoenix MCP bridge (if initialized)
-    try:
-        if 'phoenix_bridge' in globals() and phoenix_bridge:
-            await close_phoenix_bridge()
-            phoenix_bridge = None
-            print("[✅] Phoenix MCP bridge closed")
-    except Exception as e:
-        print(f"[⚠️] Error closing Phoenix bridge: {e}")
-
     # Shutdown Arize tracer provider
     try:
         from config.arize_config import shutdown as shutdown_arize
@@ -128,11 +126,6 @@ async def shutdown_event():
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint to verify MCP bridge status."""
-    phoenix_connected = False
-    if 'phoenix_bridge' in globals() and phoenix_bridge:
-        phoenix_connected = phoenix_bridge.is_connected()
-
     return {
         "status": "healthy",
         "mcp_ready": mcp_service.mcp_ready,
@@ -173,38 +166,18 @@ async def gitlab_webhook(request: Request, x_gitlab_event: str = Header(None)):
         print("[ℹ️] Please wait a few seconds for the MCP bridge to initialize")
         return {"status": "mcp_not_ready", "message": "MCP sessions still initializing. Please retry in a few seconds."}
 
+    payload = await request.json()
+
+    # 1. Handle GitLab Merge Request Event
+    if x_gitlab_event == "Merge Request Hook":
+        return await review_service.orchestrate_review(payload)
+
+    # 2. Handle Dynatrace Incident/Production Crash Event
     if not x_gitlab_event:
-        print("[⚠️] Missing X-GitLab-Event header")
-        raise HTTPException(status_code=400, detail="Missing X-GitLab-Event header")
+        if isinstance(payload, dict) and "problem_id" in payload:
+            return await incident_service.process_production_crash(payload)
 
-    try:
-        payload = await request.json()
-        print(f"[DEBUG] Event type: {x_gitlab_event}")
-        print(f"[DEBUG] Payload keys: {list(payload.keys())}")
-
-        if x_gitlab_event == "Merge Request Hook":
-            # Extract basic MR info for logging
-            object_attrs = payload.get("object_attributes", {})
-            mr_state = object_attrs.get("state", "unknown")
-            mr_iid = object_attrs.get("iid", "unknown")
-            project_id = payload.get("project", {}).get("id", "unknown")
-            source_branch = object_attrs.get("source_branch", "unknown")
-            target_branch = object_attrs.get("target_branch", "unknown")
-
-            print(f"[INFO] MR Webhook: Project={project_id}, IID={mr_iid}, State={mr_state}")
-            print(f"[INFO] Branches: {source_branch} → {target_branch}")
-
-            # Run review pipeline
-            print(f"[DEBUG] Calling review_service.orchestrate_review...")
-            return await review_service.orchestrate_review(payload)
-        else:
-            print(f"[INFO] Ignoring non-MR event: {x_gitlab_event}")
-            return {"status": "event_ignored", "event": x_gitlab_event}
-    except Exception as e:
-        print(f"[ERROR] Webhook processing failed: {e}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+    return {"status": "event_ignored", "event": x_gitlab_event}
 
 
 # ============================================================================

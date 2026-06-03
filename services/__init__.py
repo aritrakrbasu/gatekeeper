@@ -1,16 +1,17 @@
 # Services package for Gatekeeper
 
-from services import (
+from . import (
     mcp_service,
     review_service,
     auth_service,
     repository_service,
     mongo_client,
-    user_service
+    user_service,
+    incident_service
 )
 
 # Import service modules
-from services.impact_measurement_service import (
+from .impact_measurement_service import (
     run_impact_analysis,
     format_impact_report_to_markdown,
     format_impact_report_for_gemini_prompt,
@@ -18,6 +19,7 @@ from services.impact_measurement_service import (
 )
 
 __all__ = [
+    
     "mcp_service",
     "review_service",
     "auth_service",
@@ -27,5 +29,6 @@ __all__ = [
     "run_impact_analysis",
     "format_impact_report_to_markdown",
     "format_impact_report_for_gemini_prompt",
-    "ImpactAnalysisReport"
+    "ImpactAnalysisReport",
+    "incident_service"
 ]
