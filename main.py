@@ -168,14 +168,39 @@ async def gitlab_webhook(request: Request, x_gitlab_event: str = Header(None)):
 
     payload = await request.json()
 
-    # 1. Handle GitLab Merge Request Event
-    if x_gitlab_event == "Merge Request Hook":
-        return await review_service.orchestrate_review(payload)
+    # Dynamic delegation based on agentic mode environment flag
+    agentic_mode = os.getenv("AGENTIC_MODE_ENABLED", "false").lower() == "true"
+    
+    if agentic_mode:
+        from agents import ContextBuilder, build_default_registry, WorkflowEngine
+        
+        # 1. Handle GitLab Merge Request Event
+        if x_gitlab_event == "Merge Request Hook":
+            context = ContextBuilder.build_from_gitlab_mr(payload)
+            registry = await build_default_registry()
+            engine = WorkflowEngine(registry)
+            print(f"[INFO] [Agentic Mode] Executing agentic workflow for Merge Request: {context.task_id}")
+            result = await engine.run_task(context)
+            return result
 
-    # 2. Handle Dynatrace Incident/Production Crash Event
-    if not x_gitlab_event:
-        if isinstance(payload, dict) and "problem_id" in payload:
-            return await incident_service.process_production_crash(payload)
+        # 2. Handle Dynatrace Incident/Production Crash Event
+        if not x_gitlab_event:
+            if isinstance(payload, dict) and "problem_id" in payload:
+                context = ContextBuilder.build_from_dynatrace_crash(payload)
+                registry = await build_default_registry()
+                engine = WorkflowEngine(registry)
+                print(f"[INFO] [Agentic Mode] Executing agentic workflow for Production Incident: {context.task_id}")
+                result = await engine.run_task(context)
+                return result
+    else:
+        # 1. Handle GitLab Merge Request Event
+        if x_gitlab_event == "Merge Request Hook":
+            return await review_service.orchestrate_review(payload)
+
+        # 2. Handle Dynatrace Incident/Production Crash Event
+        if not x_gitlab_event:
+            if isinstance(payload, dict) and "problem_id" in payload:
+                return await incident_service.process_production_crash(payload)
 
     return {"status": "event_ignored", "event": x_gitlab_event}
 
