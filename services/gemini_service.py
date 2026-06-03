@@ -435,6 +435,8 @@ async def run_gemini_review_with_gitnexus(
     impact_context: str,
     repo_path: Optional[Path] = None,
     repo_name: Optional[str] = None,
+    target_branch_name: Optional[str] = None,
+    source_branch_name: Optional[str] = None,
     user_config: Dict = None,
     user_id: str = None,
     mr_id: str = None,
@@ -447,11 +449,17 @@ async def run_gemini_review_with_gitnexus(
     allowing Gemini to call GitNexus tools (impact, detect_changes, context, query)
     dynamically when needed during the review.
 
+    For all tools except detect_changes, results are gathered from BOTH branches:
+    - Target branch (base) - what's being merged into
+    - Source branch (feature) - what's being proposed
+
     Args:
         raw_diff_content: The code diff to review
         impact_context: Impact analysis context
         repo_path: Path to the git repository
         repo_name: GitNexus repository name (required when multiple repos indexed)
+        target_branch_name: Target branch name (base branch, auto-injected as base_ref for detect_changes)
+        source_branch_name: Source branch name (feature branch, for dual-branch tool execution)
         user_config: Optional dict with user's Gemini config (api_token, model)
         user_id: Optional user ID for usage tracking and Arize tracing
         mr_id: Optional MR ID for trace attribution
@@ -478,7 +486,14 @@ Use these tools when you need more context about dependencies, call chains,
 or the broader impact of the changes.
 
 CRITICAL INSTRUCTION FOR THIS REVIEW:
-Look closely at the diff. If any exported identifiers or configuration objects are renamed or modified, you MUST use the `query` or `impact` (downstream) tools to verify if references in other files (e.g., frontend entry points, `main.js`, etc.) are now broken. Do not output your final review until you have confirmed whether or not this change breaks other parts of the codebase.
+You have access to the `detect_changes` tool. Because this is a raw pull request diff stream, you MUST execute `detect_changes(scope: "compare")` first to map the git diff against the codebase's existing architectural processes and blast radius. Do not rely on `impact()` for renamed or deleted exports, as the definition anchors will be missing on disk. Use `detect_changes` to see what will break.
+
+IMPORTANT - Dual-Branch Tool Execution:
+For all tools EXCEPT `detect_changes`, results will be gathered from BOTH branches:
+- Target branch (base/main): Shows current production state
+- Source branch (feature): Shows proposed changes
+
+This allows you to compare architectural impact between the current state and proposed changes.
 """
 
     # Get tracer for creating manual span
@@ -635,23 +650,115 @@ Look closely at the diff. If any exported identifiers or configuration objects a
                                 elif func_call.name in repo_supported_tools:
                                     print(f"[WARN] GitNexus tool {func_call.name} needs repo but none provided!")
 
+                                # Inject base_ref for detect_changes when scope is "compare"
+                                if func_call.name == 'detect_changes' and tool_args.get('scope') == 'compare' and target_branch_name:
+                                    tool_args['base_ref'] = target_branch_name
+                                    print(f"[INFO] Auto-injected base_ref='{target_branch_name}' into detect_changes call")
+
                                 # Execute via MCP
                                 try:
-                                    mcp_output = await asyncio.wait_for(
-                                        mcp_session.call_tool(
-                                            name=func_call.name,
-                                            arguments=tool_args
-                                        ),
-                                        timeout=MCP_TIMEOUT
+                                    # For non-detect_changes tools, run on both branches if branch names provided
+                                    is_dual_branch_tool = (
+                                        func_call.name != 'detect_changes' and
+                                        source_branch_name and
+                                        target_branch_name
                                     )
 
-                                    # Extract text from result
-                                    tool_result_text = "".join([
-                                        block.text for block in mcp_output.content
-                                        if hasattr(block, 'text')
-                                    ])
+                                    if is_dual_branch_tool:
+                                        print(f"[INFO] Running {func_call.name} on both branches for comparison")
 
-                                    print(f"[INFO] Tool result: {len(tool_result_text)} chars")
+                                        # Get current branch for restoration
+                                        import subprocess
+                                        current_branch_result = subprocess.run(
+                                            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                                            capture_output=True,
+                                            text=True,
+                                            cwd=repo_dir
+                                        )
+                                        original_branch = current_branch_result.stdout.strip()
+
+                                        # Run on target branch (base)
+                                        print(f"[INFO] Checking out target branch: {target_branch_name}")
+                                        subprocess.run(
+                                            ["git", "checkout", target_branch_name],
+                                            capture_output=True,
+                                            cwd=repo_dir
+                                        )
+
+                                        target_output = await asyncio.wait_for(
+                                            mcp_session.call_tool(
+                                                name=func_call.name,
+                                                arguments=tool_args
+                                            ),
+                                            timeout=MCP_TIMEOUT
+                                        )
+
+                                        target_result_text = "".join([
+                                            block.text for block in target_output.content
+                                            if hasattr(block, 'text')
+                                        ])
+                                        print(f"[INFO] Target branch result: {len(target_result_text)} chars")
+
+                                        # Run on source branch (feature)
+                                        print(f"[INFO] Checking out source branch: {source_branch_name}")
+                                        subprocess.run(
+                                            ["git", "checkout", source_branch_name],
+                                            capture_output=True,
+                                            cwd=repo_dir
+                                        )
+
+                                        source_output = await asyncio.wait_for(
+                                            mcp_session.call_tool(
+                                                name=func_call.name,
+                                                arguments=tool_args
+                                            ),
+                                            timeout=MCP_TIMEOUT
+                                        )
+
+                                        source_result_text = "".join([
+                                            block.text for block in source_output.content
+                                            if hasattr(block, 'text')
+                                        ])
+                                        print(f"[INFO] Source branch result: {len(source_result_text)} chars")
+
+                                        # Restore original branch
+                                        if original_branch and original_branch != "HEAD":
+                                            subprocess.run(
+                                                ["git", "checkout", original_branch],
+                                                capture_output=True,
+                                                cwd=repo_dir
+                                            )
+                                            print(f"[INFO] Restored to branch: {original_branch}")
+
+                                        # Combine results for Gemini
+                                        combined_result = f"""## Target Branch ({target_branch_name}) - Current State:
+
+{target_result_text}
+
+## Source Branch ({source_branch_name}) - Proposed Changes:
+
+{source_result_text}
+"""
+                                        tool_result_text = combined_result
+                                        print(f"[INFO] Combined dual-branch result: {len(tool_result_text)} chars")
+
+                                    else:
+                                        # Single branch execution (detect_changes or no branch info)
+                                        mcp_output = await asyncio.wait_for(
+                                            mcp_session.call_tool(
+                                                name=func_call.name,
+                                                arguments=tool_args
+                                            ),
+                                            timeout=MCP_TIMEOUT
+                                        )
+
+                                        # Extract text from result
+                                        tool_result_text = "".join([
+                                            block.text for block in mcp_output.content
+                                            if hasattr(block, 'text')
+                                        ])
+
+                                        print(f"[INFO] Tool result: {len(tool_result_text)} chars")
 
                                     # Feed back to Gemini
                                     tool_response = types.Content(

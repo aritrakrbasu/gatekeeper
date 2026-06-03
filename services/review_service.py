@@ -1125,7 +1125,9 @@ This may take 30-60 seconds depending on the size of the changes.
                     user_config=user_config,
                     user_id=user_id,
                     mr_id=mr_iid,
-                    repository_id=project_id
+                    repository_id=project_id,
+                    target_branch_name=target_branch,
+                    source_branch_name=source_branch
                 )
                 tools_called = gemini_result.get("tools_called", [])
                 if tools_called:
