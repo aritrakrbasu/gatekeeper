@@ -1,789 +1,495 @@
 """
 Impact Analysis Module for Code Change Review
 
-This module provides impact analysis capabilities to identify code affected by changes,
-including dependencies, call chains, and potential ripple effects beyond the directly
-changed files.
+This module provides impact analysis capabilities by integrating GitNexus MCP tools
+directly with Gemini. Instead of performing manual analysis, it passes GitNexus tools
+to Gemini so that Gemini can call them dynamically when needed for context.
 
 Integrates with GitNexus (https://github.com/abhigyanpatwari/GitNexus) for advanced
 code intelligence via MCP.
 """
 
 import os
-import re
-import ast
-import asyncio
-import subprocess
 import json
+import asyncio
 from pathlib import Path
-from typing import List, Dict, Set, Optional, Tuple
+from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass, field
-from enum import Enum
+
+from google import genai
+from google.genai import types
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
 
 
-class ImpactLevel(Enum):
-    """Severity levels for impact analysis findings."""
-    CRITICAL = "critical"  # Breaking changes that will definitely cause issues
-    HIGH = "high"  # Likely to cause issues
-    MEDIUM = "medium"  # May cause issues in certain scenarios
-    LOW = "low"  # Unlikely to cause issues
-    INFO = "info"  # Informational only
-
-
-# Timeout for MCP tool calls (in seconds) to prevent indefinite hangs
+# Timeout for MCP tool calls (in seconds)
 MCP_TIMEOUT = 30
 
 
-async def call_mcp_tool_with_timeout(session, name: str, arguments: dict, timeout: float = MCP_TIMEOUT):
-    """
-    Call an MCP tool with a timeout to prevent indefinite hangs.
-
-    Args:
-        session: MCP session (gitlab_session, nexus_session, etc.)
-        name: Tool name
-        arguments: Tool arguments
-        timeout: Timeout in seconds
-
-    Returns:
-        Tool result
-
-    Raises:
-        asyncio.TimeoutError: If the call times out
-    """
-    return await asyncio.wait_for(
-        session.call_tool(name=name, arguments=arguments),
-        timeout=timeout
-    )
-
-
 @dataclass
-class ImpactFinding:
-    """A single impact analysis finding."""
-    level: ImpactLevel
-    file_path: str
-    line_number: int
-    description: str
-    impact_type: str  # "dependency", "call_chain", "breaking_change", "api_change", etc.
-    related_change: str  # Reference to the change that causes this impact
-    suggestion: Optional[str] = None
-
-    def to_dict(self) -> dict:
-        """Convert to dictionary for serialization."""
-        return {
-            "level": self.level.value,
-            "file_path": self.file_path,
-            "line_number": self.line_number,
-            "description": self.description,
-            "impact_type": self.impact_type,
-            "related_change": self.related_change,
-            "suggestion": self.suggestion
-        }
+class ImpactAnalysisResult:
+    """Result from Gemini-powered impact analysis."""
+    analysis_text: str
+    usage: Dict[str, any]
+    trace_id: Optional[str] = None
+    tools_called: List[str] = field(default_factory=list)
 
 
-@dataclass
-class ImpactReport:
-    """Complete impact analysis report."""
-    project_id: str
-    merge_request_iid: int
-    source_branch: str
-    target_branch: str
-    changed_files: Set[str] = field(default_factory=set)
-    findings: List[ImpactFinding] = field(default_factory=list)
-    analyzed_files: Set[str] = field(default_factory=set)
-    execution_time_seconds: float = 0.0
-
-    def add_finding(self, finding: ImpactFinding):
-        """Add a finding to the report."""
-        self.findings.append(finding)
-
-    def get_findings_by_level(self, level: ImpactLevel) -> List[ImpactFinding]:
-        """Get all findings of a specific level."""
-        return [f for f in self.findings if f.level == level]
-
-    def get_findings_by_type(self, impact_type: str) -> List[ImpactFinding]:
-        """Get all findings of a specific type."""
-        return [f for f in self.findings if f.impact_type == impact_type]
-
-    def to_markdown(self) -> str:
-        """Generate a markdown summary of the report."""
-        lines = [
-            "## 🎯 Impact Analysis Report",
-            "",
-            f"**MR:** !{self.merge_request_iid} | **Branch:** `{self.source_branch}` → `{self.target_branch}`",
-            f"**Files Changed:** {len(self.changed_files)} | **Files Analyzed:** {len(self.analyzed_files)}",
-            f"**Analysis Time:** {self.execution_time_seconds:.2f}s",
-            "",
-            "### Findings Summary",
-            ""
-        ]
-
-        # Count by level
-        level_counts = {}
-        for finding in self.findings:
-            level_counts[finding.level] = level_counts.get(finding.level, 0) + 1
-
-        for level in [ImpactLevel.CRITICAL, ImpactLevel.HIGH, ImpactLevel.MEDIUM, ImpactLevel.LOW, ImpactLevel.INFO]:
-            count = level_counts.get(level, 0)
-            if count > 0:
-                emoji = {
-                    ImpactLevel.CRITICAL: "🔴",
-                    ImpactLevel.HIGH: "🟠",
-                    ImpactLevel.MEDIUM: "🟡",
-                    ImpactLevel.LOW: "🟢",
-                    ImpactLevel.INFO: "ℹ️"
-                }[level]
-                lines.append(f"- {emoji} **{level.value.upper()}**: {count} findings")
-
-        lines.append("")
-        lines.append("### Detailed Findings")
-        lines.append("")
-
-        # Group by impact type
-        by_type: Dict[str, List[ImpactFinding]] = {}
-        for finding in self.findings:
-            if finding.impact_type not in by_type:
-                by_type[finding.impact_type] = []
-            by_type[finding.impact_type].append(finding)
-
-        for impact_type, findings in sorted(by_type.items()):
-            lines.append(f"#### {impact_type.replace('_', ' ').title()}")
-            lines.append("")
-
-            for finding in findings[:20]:  # Limit to 20 per type to avoid huge reports
-                emoji = {
-                    ImpactLevel.CRITICAL: "🔴",
-                    ImpactLevel.HIGH: "🟠",
-                    ImpactLevel.MEDIUM: "🟡",
-                    ImpactLevel.LOW: "🟢",
-                    ImpactLevel.INFO: "ℹ️"
-                }[finding.level]
-                lines.append(f"- {emoji} **{finding.file_path}:{finding.line_number}**")
-                lines.append(f"  - {finding.description}")
-                if finding.suggestion:
-                    lines.append(f"  - 💡 *{finding.suggestion}*")
-                lines.append("")
-
-        return '\n'.join(lines)
-
-
-class PythonCodeAnalyzer:
+class GitNexusGeminiIntegration:
     """
-    Analyzes Python code to extract dependencies, function calls, and class relationships.
+    Integrates GitNexus MCP tools with Gemini for dynamic impact analysis.
+
+    This approach lets Gemini decide when and how to use GitNexus tools,
+    rather than pre-computing impact analysis.
     """
 
-    def __init__(self, file_content: str, file_path: str):
-        """Initialize analyzer with file content."""
-        self.file_content = file_content
-        self.file_path = file_path
-        self.tree = None
-        self.imports: Set[str] = set()
-        self.function_definitions: Dict[str, Tuple[int, List[str]]] = {}  # name -> (line, calls)
-        self.class_definitions: Dict[str, Tuple[int, List[str]]] = {}  # name -> (line, methods)
-        self.function_calls: List[Tuple[int, str]] = []  # (line, called_function)
-
-        try:
-            self.tree = ast.parse(file_content)
-            self._analyze()
-        except SyntaxError:
-            pass  # File might not be valid Python
-
-    def _analyze(self):
-        """Perform AST analysis."""
-        if not self.tree:
-            return
-
-        for node in ast.walk(self.tree):
-            # Track imports
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    self.imports.add(alias.name.split('.')[0])
-            elif isinstance(node, ast.ImportFrom):
-                if node.module:
-                    self.imports.add(node.module.split('.')[0])
-
-            # Track function definitions
-            if isinstance(node, ast.FunctionDef):
-                calls = self._extract_calls(node)
-                self.function_definitions[node.name] = (node.lineno, calls)
-
-            # Track class definitions
-            if isinstance(node, ast.ClassDef):
-                methods = [n.name for n in node.body if isinstance(n, ast.FunctionDef)]
-                self.class_definitions[node.name] = (node.lineno, methods)
-
-    def _extract_calls(self, node: ast.AST) -> List[str]:
-        """Extract function calls from a node."""
-        calls = []
-
-        for child in ast.walk(node):
-            if isinstance(child, ast.Call):
-                if isinstance(child.func, ast.Name):
-                    calls.append(child.func.id)
-                elif isinstance(child.func, ast.Attribute):
-                    calls.append(child.func.attr)
-
-        return calls
-
-    def get_function_at_line(self, line: int) -> Optional[str]:
-        """Get the function name containing a given line."""
-        for func_name, (func_line, _) in self.function_definitions.items():
-            # Simple check - in real code would need to account for function length
-            if func_line <= line:
-                return func_name
-        return None
-
-    def get_functions_calling(self, function_name: str) -> List[Tuple[str, int]]:
+    def __init__(self, repo_path: Optional[Path] = None):
         """
-        Find functions that call the given function.
-
-        Returns:
-            List of (caller_function_name, line_number) tuples
-        """
-        callers = []
-
-        for func_name, (func_line, calls) in self.function_definitions.items():
-            if function_name in calls:
-                callers.append((func_name, func_line))
-
-        return callers
-
-
-class GitImpactAnalyzer:
-    """
-    Main impact analysis engine combining GitNexus with fallback code analysis.
-    """
-
-    def __init__(self, repo_path: Optional[Path] = None, nexus_session=None):
-        """
-        Initialize the analyzer.
+        Initialize the integration.
 
         Args:
-            repo_path: Path to the git repository. If None, assumes current directory.
-            nexus_session: Active GitNexus MCP session for advanced analysis
+            repo_path: Path to the git repository. If None, uses current directory.
         """
         self.repo_path = repo_path or Path.cwd()
-        self.nexus = GitNexusWrapper(nexus_session, repo_path)
-        self.findings_cache: Dict[str, List[ImpactFinding]] = {}
 
-    async def analyze_merge_request(
+    async def analyze_with_gemini(
         self,
-        project_id: str,
-        merge_request_iid: int,
-        source_branch: str,
-        target_branch: str,
+        diff_content: str,
         changed_files: List[str],
-        gitlab_session=None
-    ) -> ImpactReport:
+        client: genai.Client,
+        model: str = 'gemini-2.5-pro',
+        system_instruction: Optional[str] = None
+    ) -> ImpactAnalysisResult:
         """
-        Perform comprehensive impact analysis for a merge request.
+        Run impact analysis by giving Gemini access to GitNexus tools.
 
         Args:
-            project_id: GitLab project ID
-            merge_request_iid: Merge request IID
-            source_branch: Source branch
-            target_branch: Target branch
+            diff_content: The diff content to analyze
             changed_files: List of changed file paths
-            gitlab_session: Optional GitLab MCP session for fetching file contents
+            client: Gemini client
+            model: Model name to use
+            system_instruction: Optional system instruction for Gemini
 
         Returns:
-            ImpactReport with all findings
+            ImpactAnalysisResult with analysis text and usage metrics
         """
-        import time
-        start_time = time.time()
+        if system_instruction is None:
+            system_instruction = self._default_system_instruction()
 
-        report = ImpactReport(
-            project_id=project_id,
-            merge_request_iid=merge_request_iid,
-            source_branch=source_branch,
-            target_branch=target_branch,
-            changed_files=set(changed_files)
+        # Build the analysis prompt
+        analysis_prompt = self._build_analysis_prompt(diff_content, changed_files)
+
+        # Track tools that were called
+        tools_called = []
+
+        try:
+            # Save current directory and change to repo directory
+            # GitNexus MCP needs to run from within the repository
+            original_cwd = os.getcwd()
+            repo_dir = str(self.repo_path)
+            os.chdir(repo_dir)
+            print(f"[INFO] Changed working directory to: {repo_dir}")
+
+            mcp_directory_restored = False
+
+            try:
+                # 1. Spawn GitNexus subprocess via stdio transport
+                # GitNexus needs to be run with the 'mcp' subcommand
+                server_params = StdioServerParameters(
+                    command="gitnexus",
+                    args=["mcp"],
+                    env={**os.environ}
+                )
+
+                async with stdio_client(server_params) as (read, write):
+                    async with ClientSession(read, write) as mcp_session:
+                        await mcp_session.initialize()
+
+                        # 2. Extract tools manifest from GitNexus
+                        gitnexus_manifest = await mcp_session.list_tools()
+
+                        # 3. Map to Gemini's Function Declarations format
+                        gemini_tools = self._convert_to_gemini_tools(gitnexus_manifest.tools)
+
+                        print(f"[INFO] GitNexus MCP tools available: {len(gemini_tools[0].function_declarations)}")
+
+                        # 4. Build conversation history
+                        history = [
+                            types.Content(role="user", parts=[types.Part.from_text(text=analysis_prompt)])
+                        ]
+
+                        total_input_tokens = 0
+                        total_output_tokens = 0
+                        analysis_text = ""
+
+                        # 5. Continuous iteration loop for tool calls
+                        max_iterations = 10  # Prevent infinite loops
+                        iteration = 0
+
+                        while iteration < max_iterations:
+                            iteration += 1
+
+                            # Call Gemini with tools
+                            response = await asyncio.to_thread(
+                                client.models.generate_content,
+                                model=model,
+                                contents=history,
+                                config=types.GenerateContentConfig(
+                                    system_instruction=system_instruction,
+                                    tools=gemini_tools,
+                                    temperature=0.2
+                                )
+                            )
+
+                            # Accumulate usage metrics
+                            usage_metadata = getattr(response, 'usage_metadata', None)
+                            if usage_metadata:
+                                total_input_tokens += getattr(usage_metadata, 'prompt_token_count', 0)
+                                total_output_tokens += getattr(usage_metadata, 'candidates_token_count', 0)
+
+                            # Get model output
+                            model_content = response.candidates[0].content
+                            history.append(model_content)
+
+                            # Check for function call - iterate through all parts
+                            func_call = None
+                            for part in model_content.parts:
+                                if hasattr(part, 'function_call') and part.function_call:
+                                    func_call = part.function_call
+                                    break
+
+                            if func_call:
+                                print(f"[INFO] Gemini calling GitNexus tool: {func_call.name}")
+
+                                tools_called.append(func_call.name)
+
+                                # Execute via MCP
+                                try:
+                                    mcp_output = await asyncio.wait_for(
+                                        mcp_session.call_tool(
+                                            name=func_call.name,
+                                            arguments=dict(func_call.args)
+                                        ),
+                                        timeout=MCP_TIMEOUT
+                                    )
+
+                                    # Extract text from result
+                                    tool_result_text = "".join([
+                                        block.text for block in mcp_output.content
+                                        if hasattr(block, 'text')
+                                    ])
+
+                                    print(f"[INFO] Tool result length: {len(tool_result_text)} chars")
+
+                                    # Feed back to Gemini
+                                    tool_response = types.Content(
+                                        role="tool",
+                                        parts=[types.Part.from_function_response(
+                                            name=func_call.name,
+                                            response={"result": tool_result_text}
+                                        )]
+                                    )
+                                    history.append(tool_response)
+
+                                except asyncio.TimeoutError:
+                                    error_msg = f"Tool call timed out after {MCP_TIMEOUT}s"
+                                    print(f"[WARN] {error_msg}")
+                                    history.append(types.Content(
+                                        role="tool",
+                                        parts=[types.Part.from_function_response(
+                                            name=func_call.name,
+                                            response={"error": error_msg}
+                                        )]
+                                    ))
+                                    break
+                                except Exception as e:
+                                    error_msg = f"Tool call failed: {str(e)}"
+                                    print(f"[WARN] {error_msg}")
+                                    history.append(types.Content(
+                                        role="tool",
+                                        parts=[types.Part.from_function_response(
+                                            name=func_call.name,
+                                            response={"error": error_msg}
+                                        )]
+                                    ))
+                                    break
+                            else:
+                                # No more tool calls - get final response
+                                try:
+                                    analysis_text = response.text
+                                except Exception:
+                                    analysis_text = "Error: Could not extract analysis text"
+                                break
+
+                        if iteration >= max_iterations:
+                            print(f"[WARN] Reached max iterations ({max_iterations})")
+
+                # Restore original working directory after MCP operations complete
+                os.chdir(original_cwd)
+                mcp_directory_restored = True
+                print(f"[INFO] Restored working directory to: {original_cwd}")
+
+            finally:
+                # Ensure directory is restored even if an error occurred
+                if not mcp_directory_restored:
+                    try:
+                        os.chdir(original_cwd)
+                        print(f"[INFO] Restored working directory in finally block: {original_cwd}")
+                    except Exception as restore_err:
+                        print(f"[ERROR] Failed to restore working directory: {restore_err}")
+
+        except Exception as e:
+            print(f"[ERROR] GitNexus integration failed: {e}")
+            # Fallback to basic analysis without tools
+            analysis_text = await self._fallback_analysis(diff_content, changed_files)
+            total_input_tokens = 0
+            total_output_tokens = 0
+
+        return ImpactAnalysisResult(
+            analysis_text=analysis_text,
+            usage={
+                "input_tokens": total_input_tokens,
+                "output_tokens": total_output_tokens,
+                "total_tokens": total_input_tokens + total_output_tokens,
+                "model_name": model
+            },
+            tools_called=tools_called
         )
 
-        # 1. Pre-review: Identify dependencies and call chains
-        await self._analyze_dependencies(report, changed_files, gitlab_session)
+    def _default_system_instruction(self) -> str:
+        """Default system instruction for impact analysis."""
+        return """You are a senior code reviewer specializing in impact analysis.
 
-        # 2. Check for breaking API changes
-        await self._analyze_api_changes(report, changed_files, gitlab_session)
+Your task is to analyze code changes and identify:
+1. Breaking changes that could affect other parts of the codebase
+2. Critical dependencies and call chains
+3. Potential ripple effects beyond the directly changed files
+4. Security implications of the changes
 
-        # 3. Check for configuration/environment changes
-        await self._analyze_config_changes(report, changed_files, gitlab_session)
+You have access to GitNexus tools that can help you understand:
+- Impact scope of specific symbols (impact tool)
+- Changed symbols and affected processes (detect_changes tool)
+- 360-degree context for symbols (context tool)
+- Process-grouped search (query tool)
 
-        # 4. Analyze test coverage impact
-        await self._analyze_test_impact(report, changed_files, gitlab_session)
+Use these tools strategically when you need more context about:
+- What depends on the changed code
+- What the changed code depends on
+- Related functions and processes
+- Usage patterns across the codebase
 
-        report.execution_time_seconds = time.time() - start_time
-        return report
+Provide a clear, structured analysis with severity levels (CRITICAL, HIGH, MEDIUM, LOW)."""
 
-    async def _analyze_dependencies(
-        self,
-        report: ImpactReport,
-        changed_files: List[str],
-        gitlab_session
-    ):
-        """Analyze dependency relationships and call chains."""
-        if not gitlab_session:
-            return
+    def _build_analysis_prompt(self, diff_content: str, changed_files: List[str]) -> str:
+        """Build the analysis prompt for Gemini."""
+        return f"""Analyze this code change for impact and potential issues:
 
-        python_files = [f for f in changed_files if f.endswith('.py')]
+## Changed Files
+{chr(10).join(f"- {f}" for f in changed_files)}
 
-        for file_path in python_files:
-            try:
-                # Fetch file content from target branch (with timeout to prevent hangs)
-                result = await asyncio.wait_for(
-                    gitlab_session.call_tool(
-                        name="get_file_contents",
-                        arguments={
-                            "project_id": str(report.project_id),
-                            "file_path": file_path,
-                            "ref": report.target_branch
-                        }
-                    ),
-                    timeout=MCP_TIMEOUT
+## Diff Content
+{diff_content}
+
+Use the available GitNexus tools to:
+1. Identify what depends on the changed functions/classes
+2. Find call chains that might be affected
+3. Detect any breaking API changes
+4. Understand the broader context of the changes
+
+Provide your analysis with clear severity levels and actionable recommendations."""
+
+    def _convert_to_gemini_tools(self, mcp_tools) -> List[types.Tool]:
+        """
+        Convert MCP tool schemas to Gemini native Tool format using the proper SDK types.
+        Removes the 'repo' parameter so it can be injected automatically based on the project.
+        """
+        function_declarations = []
+
+        for tool in mcp_tools:
+            # MCP tools use standard JSON Schema in inputSchema
+            schema = getattr(tool, 'inputSchema', {})
+            if hasattr(schema, 'model_dump'):
+                schema = schema.model_dump()
+            elif not isinstance(schema, dict):
+                schema = dict(schema)
+
+            properties = schema.get('properties', {})
+            required = schema.get('required', [])
+
+            # Remove 'repo' parameter - we'll inject it automatically
+            # This prevents Gemini from choosing the wrong repo
+            properties = {k: v for k, v in properties.items() if k != 'repo'}
+            required = [r for r in required if r != 'repo']
+
+            # Map properties cleanly using types.Schema objects
+            param_properties = {}
+            for prop_name, prop_def in properties.items():
+                param_properties[prop_name] = self._convert_mcp_property_to_gemini(prop_def)
+
+            # Build the exact parameters definition
+            parameters = types.Schema(
+                type="OBJECT",
+                properties=param_properties if param_properties else None,
+                required=required if required else None
+            )
+
+            # Create native FunctionDeclaration object
+            function_declarations.append(
+                types.FunctionDeclaration(
+                    name=tool.name,
+                    description=tool.description,
+                    parameters=parameters
                 )
+            )
 
-                # Parse and analyze
-                content = str(result.content)
-                analyzer = PythonCodeAnalyzer(content, file_path)
+        return [types.Tool(function_declarations=function_declarations)]
 
-                report.analyzed_files.add(file_path)
+    def _convert_mcp_property_to_gemini(self, prop_def: dict) -> types.Schema:
+        """
+        Recursively convert an MCP parameter property into a Gemini types.Schema object.
+        """
+        if not isinstance(prop_def, dict):
+            prop_def = dict(prop_def)
 
-                # Check for changes to public functions
-                for func_name, (line, calls) in analyzer.function_definitions.items():
-                    if not func_name.startswith('_'):  # Public function
-                        # This is a change that might affect callers
-                        report.add_finding(ImpactFinding(
-                            level=ImpactLevel.MEDIUM,
-                            file_path=file_path,
-                            line_number=line,
-                            description=f"Public function `{func_name}` has been modified. "
-                                       f"Check all call sites for compatibility.",
-                            impact_type="call_chain",
-                            related_change=f"Function {func_name} in {file_path}",
-                            suggestion="Review all files that import and call this function."
-                        ))
+        prop_type = prop_def.get('type', 'string').upper()
+        description = prop_def.get('description')
 
-            except asyncio.TimeoutError:
-                print(f"[⏱️] Timeout fetching file {file_path} from GitLab MCP (>{MCP_TIMEOUT}s)")
-            except Exception as e:
-                print(f"[⚠️] Could not analyze dependencies for {file_path}: {e}")
+        # Handle Arrays
+        if prop_type == 'ARRAY':
+            items_def = prop_def.get('items', {"type": "string"})
+            return types.Schema(
+                type="ARRAY",
+                description=description,
+                items=self._convert_mcp_property_to_gemini(items_def)
+            )
 
-    async def _analyze_api_changes(
-        self,
-        report: ImpactReport,
-        changed_files: List[str],
-        gitlab_session
-    ):
-        """Analyze API/interface changes that could break consumers."""
-        api_patterns = {
-            'routes': re.compile(r'@.*\.(route|get|post|put|delete|patch)', re.IGNORECASE),
-            'api_decorators': re.compile(r'@api\.', re.IGNORECASE),
-            'fastapi': re.compile(r'@.*\.(get|post|put|delete|patch)\(', re.IGNORECASE),
-            'schema_changes': re.compile(r'class.*\(.*Base.*\):', re.IGNORECASE),
+        # Handle Objects
+        if prop_type == 'OBJECT':
+            nested_properties = prop_def.get('properties', {})
+            nested_required = prop_def.get('required', [])
+
+            mapped_nested = {
+                k: self._convert_mcp_property_to_gemini(v)
+                for k, v in nested_properties.items()
+            }
+
+            return types.Schema(
+                type="OBJECT",
+                description=description,
+                properties=mapped_nested,
+                required=nested_required if nested_required else None
+            )
+
+        # Handle baseline types (STRING, INTEGER, NUMBER, BOOLEAN)
+        if prop_type in ['NUMBER', 'FLOAT']:
+            gemini_type = "NUMBER"
+        elif prop_type in ['INTEGER', 'INT']:
+            gemini_type = "INTEGER"
+        elif prop_type == 'BOOLEAN':
+            gemini_type = "BOOLEAN"
+        else:
+            gemini_type = "STRING"
+
+        return types.Schema(
+            type=gemini_type,
+            description=description
+        )
+
+    def _map_json_type_to_gemini(self, json_type: str) -> str:
+        """Map JSON Schema types to Gemini types. (Deprecated - use _convert_mcp_property_to_gemini)"""
+        type_map = {
+            "string": "string",
+            "integer": "integer",
+            "number": "number",
+            "boolean": "boolean",
+            "array": "array",
+            "object": "object"
         }
+        return type_map.get(json_type, "string")
 
-        for file_path in changed_files:
-            if not any(file_path.endswith(ext) for ext in ['.py', '.js', '.ts']):
-                continue
+    async def _fallback_analysis(self, diff_content: str, changed_files: List[str]) -> str:
+        """
+        Fallback analysis when GitNexus is not available.
 
-            try:
-                # Fetch file content (with timeout to prevent hangs)
-                result = await asyncio.wait_for(
-                    gitlab_session.call_tool(
-                        name="get_file_contents",
-                        arguments={
-                            "project_id": str(report.project_id),
-                            "file_path": file_path,
-                            "ref": report.target_branch
-                        }
-                    ),
-                    timeout=MCP_TIMEOUT
-                )
+        Provides basic pattern-based analysis.
+        """
+        import re
 
-                content = str(result.content)
+        findings = []
 
-                # Check for API definitions
-                if any(pattern.search(content) for pattern in api_patterns.values()):
-                    report.add_finding(ImpactFinding(
-                        level=ImpactLevel.HIGH,
-                        file_path=file_path,
-                        line_number=1,
-                        description="This file contains API route definitions. Changes may affect API consumers.",
-                        impact_type="api_change",
-                        related_change=file_path,
-                        suggestion="Review API documentation and notify consumers of breaking changes."
-                    ))
-
-            except asyncio.TimeoutError:
-                print(f"[⏱️] Timeout fetching file {file_path} from GitLab MCP (>{MCP_TIMEOUT}s)")
-            except Exception as e:
-                print(f"[⚠️] Could not analyze API changes for {file_path}: {e}")
-
-    async def _analyze_config_changes(
-        self,
-        report: ImpactReport,
-        changed_files: List[str],
-        gitlab_session
-    ):
-        """Analyze configuration and environment variable changes."""
-        config_files = [
-            '.env', '.env.example', '.env.local',
-            'config.py', 'settings.py', 'settings/*.py',
-            'docker-compose.yml', 'Dockerfile',
-            'package.json', 'requirements.txt', 'pyproject.toml'
+        # Check for API changes
+        api_patterns = [
+            r'@\.(route|get|post|put|delete|patch)\(',
+            r'@api\.',
+            r'@.*\.(get|post|put|delete|patch)\('
         ]
 
-        for file_path in changed_files:
-            if any(file_path == cf or file_path.endswith(cf) for cf in config_files):
-                report.add_finding(ImpactFinding(
-                    level=ImpactLevel.HIGH,
-                    file_path=file_path,
-                    line_number=1,
-                    description=f"Configuration file `{file_path}` has been modified. "
-                               f"This may require deployment updates or environment changes.",
-                    impact_type="config_change",
-                    related_change=file_path,
-                    suggestion="Ensure all environments are updated with new configuration."
-                ))
+        for pattern in api_patterns:
+            if re.search(pattern, diff_content):
+                findings.append("🔴 **HIGH**: API route changes detected - may affect consumers")
+                break
 
-    async def _analyze_test_impact(
-        self,
-        report: ImpactReport,
-        changed_files: List[str],
-        gitlab_session
-    ):
-        """Analyze which tests need to be run based on changes."""
+        # Check for config changes
+        config_files = [f for f in changed_files if any(
+            x in f.lower() for x in ['config', 'setting', 'env', 'docker', 'package']
+        )]
+        if config_files:
+            findings.append(f"🟠 **HIGH**: Configuration files changed: {', '.join(config_files)}")
+
+        # Check for test changes
         test_files = [f for f in changed_files if 'test' in f.lower()]
+        if test_files:
+            findings.append(f"ℹ️ **INFO**: Test files modified: {', '.join(test_files)}")
 
-        source_files = [f for f in changed_files
-                       if not any(x in f.lower() for x in ['test', 'spec', 'mock'])]
+        # Check for function changes
+        func_pattern = r'(def |async def |function |const |let )[\w_]+\('
+        if re.search(func_pattern, diff_content):
+            findings.append("🟡 **MEDIUM**: Function/method signatures changed - check call sites")
 
-        if not source_files:
-            return
+        if not findings:
+            findings.append("ℹ️ **INFO**: No obvious impact patterns detected")
 
-        # Map source files to likely test files
-        for source_file in source_files:
-            if source_file.endswith('.py'):
-                # Suggest test file
-                test_file = source_file.replace('.py', '_test.py')
-                test_file_alt = source_file.replace('.py', '.test.py')
-                test_file_path = f"tests/{source_file}"
-
-                report.add_finding(ImpactFinding(
-                    level=ImpactLevel.INFO,
-                    file_path=source_file,
-                    line_number=1,
-                    description=f"Source file modified. Run tests: `{test_file}`, `{test_file_alt}`, or `{test_file_path}`",
-                    impact_type="test_coverage",
-                    related_change=source_file,
-                    suggestion=f"Ensure tests for {source_file} are updated and passing."
-                ))
-
-    async def post_review_validation(
-        self,
-        report: ImpactReport,
-        review_findings: List[dict],
-        gitlab_session
-    ) -> List[ImpactFinding]:
-        """
-        Perform post-review validation to catch issues outside changed code.
-
-        Args:
-            report: The original impact report
-            review_findings: Findings from the AI review
-            gitlab_session: GitLab MCP session
-
-        Returns:
-            Additional findings discovered during validation
-        """
-        validation_findings = []
-
-        # Check if review found issues that might have broader impact
-        for finding in review_findings:
-            # If security issues found in changed functions, check their callers
-            if finding.get('severity') == 'high':
-                # This would need more sophisticated analysis in production
-                pass
-
-        return validation_findings
+        return "## Impact Analysis (Fallback - GitNexus unavailable)\n\n" + "\n".join(f"- {f}" for f in findings)
 
 
-class GitNexusWrapper:
+async def run_impact_analysis(
+    diff_content: str,
+    changed_files: List[str],
+    client: genai.Client = None,
+    model: str = 'gemini-2.5-pro',
+    repo_path: Optional[Path] = None
+) -> ImpactAnalysisResult:
     """
-    Wrapper for integrating with GitNexus MCP server.
+    Main entry point for running impact analysis with GitNexus + Gemini.
 
-    GitNexus provides:
-    - impact(): Blast radius analysis with depth grouping and confidence
-    - detect_changes(): Git-diff impact — maps changed lines to affected processes
-    - context(): 360-degree symbol view — categorized refs, process participation
-    - query(): Process-grouped hybrid search (BM25 + semantic + RRF)
+    Args:
+        diff_content: The code diff to analyze
+        changed_files: List of changed file paths
+        client: Optional Gemini client (uses default if None)
+        model: Model name to use
+        repo_path: Optional repository path
 
-    Installation: npm install -g gitnexus
-    MCP Server: gitnexus mcp (or npx -y gitnexus@latest mcp)
+    Returns:
+        ImpactAnalysisResult with analysis and usage data
     """
+    # Import default client if none provided
+    if client is None:
+        from services.gemini_service import ai_client
+        client = ai_client
 
-    def __init__(self, nexus_session=None, repo_path: Optional[Path] = None):
-        """
-        Initialize the wrapper.
+    integration = GitNexusGeminiIntegration(repo_path=repo_path)
 
-        Args:
-            nexus_session: Active MCP ClientSession for GitNexus
-            repo_path: Path to the repository (for fallback operations)
-        """
-        self.nexus_session = nexus_session
-        self.repo_path = repo_path or Path.cwd()
-        self.nexus_available = nexus_session is not None
+    result = await integration.analyze_with_gemini(
+        diff_content=diff_content,
+        changed_files=changed_files,
+        client=client,
+        model=model
+    )
 
-    async def get_impact_scope(
-        self,
-        target: str,
-        direction: str = "upstream",
-        max_depth: int = 3,
-        min_confidence: float = 0.7,
-        repo: Optional[str] = None
-    ) -> Dict[str, any]:
-        """
-        Get impact scope using GitNexus impact tool.
-
-        Args:
-            target: Symbol name to analyze (e.g., "UserService", "validateUser")
-            direction: "upstream" (what depends on this) or "downstream" (what this depends on)
-            max_depth: How deep to trace dependencies
-            min_confidence: Minimum confidence threshold (0.0-1.0)
-            repo: Repository name (if multiple repos indexed)
-
-        Returns:
-            Dict with impact data including affected symbols, processes, and confidence scores
-        """
-        if not self.nexus_available:
-            return await self._git_fallback_impact_scope(target, direction)
-
-        try:
-            result = await asyncio.wait_for(
-                self.nexus_session.call_tool(
-                    name="impact",
-                    arguments={
-                        "target": target,
-                        "direction": direction,
-                        "maxDepth": max_depth,
-                        "minConfidence": min_confidence,
-                        "repo": repo
-                    }
-                ),
-                timeout=MCP_TIMEOUT
-            )
-
-            return self._parse_nexus_impact_result(result)
-
-        except Exception as e:
-            print(f"[⚠️] GitNexus impact analysis failed: {e}")
-            return await self._git_fallback_impact_scope(target, direction)
-
-    async def detect_changes_impact(
-        self,
-        repo: Optional[str] = None,
-        scope: str = "all"
-    ) -> Dict[str, any]:
-        """
-        Detect impact of uncommitted changes using GitNexus detect_changes.
-
-        Args:
-            repo: Repository name
-            scope: "all", "staged", or "unstaged"
-
-        Returns:
-            Dict with changed symbols, affected processes, and risk level
-        """
-        if not self.nexus_available:
-            return {"changed_symbols": [], "affected_processes": [], "risk_level": "unknown"}
-
-        try:
-            result = await asyncio.wait_for(
-                self.nexus_session.call_tool(
-                    name="detect_changes",
-                    arguments={
-                        "repo": repo,
-                        "scope": scope
-                    }
-                ),
-                timeout=MCP_TIMEOUT
-            )
-
-            return self._parse_nexus_detect_changes_result(result)
-
-        except Exception as e:
-            print(f"[⚠️] GitNexus detect_changes failed: {e}")
-            return {"changed_symbols": [], "affected_processes": [], "risk_level": "unknown"}
-
-    async def get_symbol_context(
-        self,
-        symbol_name: str,
-        repo: Optional[str] = None
-    ) -> Dict[str, any]:
-        """
-        Get 360-degree context for a symbol using GitNexus context tool.
-
-        Args:
-            symbol_name: Name of the symbol to analyze
-            repo: Repository name
-
-        Returns:
-            Dict with incoming/outgoing references, process participation, etc.
-        """
-        if not self.nexus_available:
-            return {"symbol": None, "incoming": {}, "outgoing": {}, "processes": []}
-
-        try:
-            result = await asyncio.wait_for(
-                self.nexus_session.call_tool(
-                    name="context",
-                    arguments={
-                        "name": symbol_name,
-                        "repo": repo
-                    }
-                ),
-                timeout=MCP_TIMEOUT
-            )
-
-            return self._parse_nexus_context_result(result)
-
-        except Exception as e:
-            print(f"[⚠️] GitNexus context failed: {e}")
-            return {"symbol": symbol_name, "incoming": {}, "outgoing": {}, "processes": []}
-
-    async def query_codebase(
-        self,
-        query: str,
-        repo: Optional[str] = None,
-        limit: int = 20
-    ) -> Dict[str, any]:
-        """
-        Search the codebase using GitNexus query tool.
-
-        Args:
-            query: Search query
-            repo: Repository name
-            limit: Max results
-
-        Returns:
-            Dict with process-grouped search results
-        """
-        if not self.nexus_available:
-            return {"processes": [], "definitions": [], "process_symbols": []}
-
-        try:
-            result = await asyncio.wait_for(
-                self.nexus_session.call_tool(
-                    name="query",
-                    arguments={
-                        "query": query,
-                        "repo": repo,
-                        "limit": limit
-                    }
-                ),
-                timeout=MCP_TIMEOUT
-            )
-
-            return self._parse_nexus_query_result(result)
-
-        except Exception as e:
-            print(f"[⚠️] GitNexus query failed: {e}")
-            return {"processes": [], "definitions": [], "process_symbols": []}
-
-    def _parse_nexus_impact_result(self, result) -> Dict[str, any]:
-        """Parse GitNexus impact tool result."""
-        try:
-            if hasattr(result, 'content') and result.content:
-                content = result.content[0].text if hasattr(result.content[0], 'text') else str(result.content[0])
-                data = json.loads(content)
-                return data
-        except Exception as e:
-            print(f"[⚠️] Failed to parse impact result: {e}")
-        return {"affected": [], "processes": [], "confidence": 0}
-
-    def _parse_nexus_detect_changes_result(self, result) -> Dict[str, any]:
-        """Parse GitNexus detect_changes tool result."""
-        try:
-            if hasattr(result, 'content') and result.content:
-                content = result.content[0].text if hasattr(result.content[0], 'text') else str(result.content[0])
-                data = json.loads(content)
-                return data
-        except Exception as e:
-            print(f"[⚠️] Failed to parse detect_changes result: {e}")
-        return {"changed_symbols": [], "affected_processes": [], "risk_level": "unknown"}
-
-    def _parse_nexus_context_result(self, result) -> Dict[str, any]:
-        """Parse GitNexus context tool result."""
-        try:
-            if hasattr(result, 'content') and result.content:
-                content = result.content[0].text if hasattr(result.content[0], 'text') else str(result.content[0])
-                data = json.loads(content)
-                return data
-        except Exception as e:
-            print(f"[⚠️] Failed to parse context result: {e}")
-        return {"symbol": None, "incoming": {}, "outgoing": {}, "processes": []}
-
-    def _parse_nexus_query_result(self, result) -> Dict[str, any]:
-        """Parse GitNexus query tool result."""
-        try:
-            if hasattr(result, 'content') and result.content:
-                content = result.content[0].text if hasattr(result.content[0], 'text') else str(result.content[0])
-                data = json.loads(content)
-                return data
-        except Exception as e:
-            print(f"[⚠️] Failed to parse query result: {e}")
-        return {"processes": [], "definitions": [], "process_symbols": []}
-
-    async def _git_fallback_impact_scope(self, target: str, direction: str = "upstream") -> Dict[str, any]:
-        """
-        Fallback using standard git commands when GitNexus is not available.
-
-        This provides basic impact analysis without GitNexus.
-        """
-        try:
-            # Use pathlib to list files instead of git (avoids credential popups)
-            repo_path = Path(self.repo_path)
-            if not repo_path.exists():
-                return {"affected": [], "processes": [], "confidence": 0}
-
-            # Find common code files
-            files = []
-            for pattern in ['*.py', '*.js', '*.ts', '*.jsx', '*.tsx']:
-                files.extend([str(f.relative_to(repo_path)) for f in repo_path.rglob(pattern)])
-
-            return {
-                "affected": files[:10],  # Limit results
-                "processes": [],
-                "confidence": 0.5,
-                "fallback": True,
-                "message": "GitNexus not available - using basic file system analysis"
-            }
-        except Exception as e:
-            print(f"[⚠️] File system fallback failed: {e}")
-            return {"affected": [], "processes": [], "confidence": 0}
-
-            files = [f.strip() for f in result.stdout.split('\n') if f.strip()]
-
-            return {
-                "affected": files[:10],  # Limit results
-                "processes": [],
-                "confidence": 0.5,
-                "fallback": True,
-                "message": "GitNexus not available - using basic git analysis"
-            }
-        except Exception as e:
-            print(f"[⚠️] Git fallback failed: {e}")
-            return {"affected": [], "processes": [], "confidence": 0}
-
-    def _parse_nexus_output(self, output: str) -> Dict[str, List[str]]:
-        """Parse git-nexus output format."""
-        # This would be adapted based on actual git-nexus output format
-        return {
-            "files": [],
-            "functions": [],
-            "modules": []
-        }
+    return result
 
 
+# Legacy compatibility - keep old interface for existing code
 async def run_pre_review_analysis(
     project_id: str,
     mr_iid: int,
@@ -792,80 +498,39 @@ async def run_pre_review_analysis(
     changed_files: List[str],
     gitlab_session,
     nexus_session=None
-) -> Tuple[ImpactReport, str]:
+) -> Tuple:
     """
-    Run pre-review impact analysis and return report + context string.
+    Legacy interface - redirects to new Gemini-powered analysis.
 
-    The context string can be included in the AI review prompt for better analysis.
-
-    Args:
-        project_id: GitLab project ID
-        mr_iid: Merge request IID
-        source_branch: Source branch
-        target_branch: Target branch
-        changed_files: List of changed files
-        gitlab_session: GitLab MCP session
-        nexus_session: Optional GitNexus MCP session for advanced analysis
+    This maintains backward compatibility while using the new approach.
     """
-    analyzer = GitImpactAnalyzer(nexus_session=nexus_session)
+    # For now, return a simple formatted context
+    # The actual analysis will be done by Gemini with tools
 
-    report = await analyzer.analyze_merge_request(
-        project_id=project_id,
-        merge_request_iid=mr_iid,
-        source_branch=source_branch,
-        target_branch=target_branch,
-        changed_files=changed_files,
-        gitlab_session=gitlab_session
-    )
-
-    # Generate context for AI review
     context = f"""
 ## Impact Analysis Context
 
-The following impact analysis was performed before review:
+- **Project ID**: {project_id}
+- **MR IID**: {mr_iid}
+- **Branch**: {source_branch} → {target_branch}
+- **Changed Files**: {len(changed_files)}
 
-- **Changed Files**: {len(report.changed_files)}
-- **Analyzed Files**: {len(report.analyzed_files)}
-- **Key Findings**: {len(report.findings)}
+### Files Changed
+{chr(10).join(f"- {f}" for f in changed_files[:20])}
 
-### Critical Impact Areas:
-{chr(10).join(f"- [{f.level.value.upper()}] {f.file_path}: {f.description}" for f in report.findings if f.level in [ImpactLevel.CRITICAL, ImpactLevel.HIGH])}
-
-### Medium Priority Findings:
-{chr(10).join(f"- [{f.level.value.upper()}] {f.file_path}: {f.description}" for f in report.findings if f.level == ImpactLevel.MEDIUM)[:500]}
-
----
-
-*The reviewer should pay special attention to these impact areas when evaluating the changes.*
+*Impact analysis will be performed dynamically by Gemini using GitNexus tools during review.*
 """
 
-    return report, context
+    # Return a simple report object and context
+    class SimpleReport:
+        def __init__(self):
+            self.changed_files = set(changed_files)
+            self.analyzed_files = set()
+            self.findings = []
+            self.execution_time_seconds = 0.0
+            self.project_id = project_id
+            self.merge_request_iid = mr_iid
+            self.source_branch = source_branch
+            self.target_branch = target_branch
 
-
-async def run_post_review_validation(
-    pre_review_report: ImpactReport,
-    ai_review_findings: List[dict],
-    gitlab_session,
-    nexus_session=None
-) -> List[ImpactFinding]:
-    """
-    Run post-review validation to catch issues outside directly changed code.
-
-    Args:
-        pre_review_report: Report from pre-review analysis
-        ai_review_findings: Findings from the AI review
-        gitlab_session: GitLab MCP session
-        nexus_session: Optional GitNexus MCP session for advanced validation
-
-    Returns:
-        Additional findings discovered during validation
-    """
-    analyzer = GitImpactAnalyzer(nexus_session=nexus_session)
-
-    validation_findings = await analyzer.post_review_validation(
-        report=pre_review_report,
-        review_findings=ai_review_findings,
-        gitlab_session=gitlab_session
-    )
-
-    return validation_findings
+    return SimpleReport(), context

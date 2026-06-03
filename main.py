@@ -1,9 +1,18 @@
 import os
+import sys
 import asyncio
 from typing import Optional
 from fastapi import FastAPI, Request, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
+
+# Fix Windows console encoding for emoji characters
+if sys.platform == "win32":
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+    # Fix Windows subprocess issue with asyncio - MUST be set before event loop is created
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 load_dotenv()
 
@@ -52,29 +61,11 @@ app.add_middleware(
 async def startup_event():
     # Defer process execution into a separate background event loop
     print("[*] Starting Gatekeeper service...")
+    print("[*] CODE VERSION: WEBHOOK-DEBUG-1.0 - If you see this, new code is loaded!")
+    import sys
+    sys.stderr.write("[STARTUP] New webhook debugging code loaded!\n")
+    sys.stderr.flush()
     print("[*] MCP Bridge initialization starting in background...")
-
-    # Check if GitNexus is installed
-    try:
-        import subprocess
-        from services.mcp_service import GITNEXUS_CMD
-        result = subprocess.run(
-            [GITNEXUS_CMD, "--version"],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        if result.returncode == 0:
-            print(f"[✅] GitNexus found: {result.stdout.strip()}")
-            print("[ℹ️] To enable GitNexus analysis, run: python setup_repos.py index")
-        else:
-            print("[ℹ️] GitNexus not found - using built-in impact analysis")
-            print("[ℹ️] Install GitNexus: npm install -g gitnexus")
-    except FileNotFoundError:
-        print("[ℹ️] GitNexus not installed - using built-in impact analysis")
-        print("[ℹ️] Install GitNexus for enhanced analysis: npm install -g gitnexus")
-    except Exception as e:
-        print(f"[ℹ️] Could not check GitNexus status: {e}")
 
     # Initialize Arize observability for LLM usage tracking
     try:
@@ -167,6 +158,15 @@ async def test_mongodb_connection():
 @app.post("/webhooks/gitlab")
 async def gitlab_webhook(request: Request, x_gitlab_event: str = Header(None)):
     """API endpoint to receive and delegate GitLab webhook payloads."""
+    import sys
+    sys.stderr.write(f"\n[WEBHOOK HIT!] X-GitLab-Event: {x_gitlab_event}\n")
+    sys.stderr.flush()
+
+    print(f"[DEBUG] ===== WEBHOOK RECEIVED =====", flush=True)
+    print(f"[DEBUG] X-GitLab-Event header: {x_gitlab_event}", flush=True)
+    print(f"[DEBUG] MCP ready: {mcp_service.mcp_ready}", flush=True)
+    print(f"[DEBUG] GitLab session: {mcp_service.gitlab_session is not None}", flush=True)
+
     # Check if MCP sessions are ready
     if not mcp_service.mcp_ready or not mcp_service.gitlab_session:
         print("[⚠️] MCP sessions not ready yet - cannot process webhook")
@@ -174,15 +174,37 @@ async def gitlab_webhook(request: Request, x_gitlab_event: str = Header(None)):
         return {"status": "mcp_not_ready", "message": "MCP sessions still initializing. Please retry in a few seconds."}
 
     if not x_gitlab_event:
+        print("[⚠️] Missing X-GitLab-Event header")
         raise HTTPException(status_code=400, detail="Missing X-GitLab-Event header")
 
-    payload = await request.json()
+    try:
+        payload = await request.json()
+        print(f"[DEBUG] Event type: {x_gitlab_event}")
+        print(f"[DEBUG] Payload keys: {list(payload.keys())}")
 
-    if x_gitlab_event == "Merge Request Hook":
-        # Run review pipeline
-        return await review_service.orchestrate_review(payload)
+        if x_gitlab_event == "Merge Request Hook":
+            # Extract basic MR info for logging
+            object_attrs = payload.get("object_attributes", {})
+            mr_state = object_attrs.get("state", "unknown")
+            mr_iid = object_attrs.get("iid", "unknown")
+            project_id = payload.get("project", {}).get("id", "unknown")
+            source_branch = object_attrs.get("source_branch", "unknown")
+            target_branch = object_attrs.get("target_branch", "unknown")
 
-    return {"status": "event_ignored", "event": x_gitlab_event}
+            print(f"[INFO] MR Webhook: Project={project_id}, IID={mr_iid}, State={mr_state}")
+            print(f"[INFO] Branches: {source_branch} → {target_branch}")
+
+            # Run review pipeline
+            print(f"[DEBUG] Calling review_service.orchestrate_review...")
+            return await review_service.orchestrate_review(payload)
+        else:
+            print(f"[INFO] Ignoring non-MR event: {x_gitlab_event}")
+            return {"status": "event_ignored", "event": x_gitlab_event}
+    except Exception as e:
+        print(f"[ERROR] Webhook processing failed: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ============================================================================
@@ -592,8 +614,8 @@ async def install_webhook_manually(repo_id: str, authorization: str = Header(Non
         if not gitlab_token:
             gitlab_token = os.getenv("GITLAB_PERSONAL_ACCESS_TOKEN", "")
 
-        # Install webhook
-        result = await repository_service.install_gitlab_webhook(repo_id, gitlab_token)
+        # Install webhook (user_id passed to create and store project access token)
+        result = await repository_service.install_gitlab_webhook(repo_id, gitlab_token, user_id)
         return result
     except HTTPException as e:
         raise e

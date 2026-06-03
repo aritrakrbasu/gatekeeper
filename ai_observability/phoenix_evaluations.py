@@ -69,8 +69,6 @@ class PhoenixEvaluationExporter:
             "timestamp": datetime.utcnow().isoformat(),
         })
 
-        logger.debug(f"[DEBUG] Added evaluation: {eval_name} = {score} for span {span_id[:12]}...")
-
     async def _export_via_phoenix_api(
         self,
         eval_name: str,
@@ -169,14 +167,10 @@ class PhoenixEvaluationExporter:
                     if response.status_code in (200, 201, 202):
                         logger.info(f"[✅] Successfully exported {len(annotations)} '{eval_name}' evaluations to Arize Cloud project '{project_name}'")
                         return True
-                    else:
-                        logger.debug(f"[DEBUG] Endpoint {endpoint} returned {response.status_code}: {response.text[:200]}")
 
             except httpx.ConnectError as e:
-                logger.debug(f"[DEBUG] Connection error to {endpoint}: {e}")
                 continue
             except Exception as e:
-                logger.debug(f"[DEBUG] Error calling {endpoint}: {e}")
                 continue
 
         logger.warning(f"[⚠️] All Phoenix API endpoints failed for '{eval_name}'")
@@ -190,7 +184,6 @@ class PhoenixEvaluationExporter:
             True if evaluations were sent successfully, False otherwise
         """
         if not self._evaluations:
-            logger.debug("[DEBUG] No evaluations to flush")
             return True
 
         from config.arize_config import is_phoenix_configured, get_phoenix_mode
@@ -253,8 +246,6 @@ class PhoenixEvaluationExporter:
 
             except Exception as e:
                 logger.error(f"[x] Failed to export evaluation '{eval_name}': {e}")
-                import traceback
-                logger.debug(f"[DEBUG] Export error: {traceback.format_exc()[:500]}")
                 self._save_group_locally(eval_name, evals)
 
         if exported_count > 0:

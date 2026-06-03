@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
+import { toast } from "react-toastify";
 import {
   useRecentMRs,
   useRepositories,
@@ -452,13 +453,33 @@ const Dashboard = () => {
         onClose={() => setShowConnectModal(false)}
         onConnect={async (repo, selectedBranches) => {
           try {
-            await connectMutation.mutateAsync({
+            const response = await connectMutation.mutateAsync({
               repoId: repo.id,
               targetBranches: selectedBranches || ["main", "master", "develop"],
             });
+
+            // Check for project token errors
+            if (response?.project_token?.created === false) {
+              const tokenError =
+                response.project_token.error ||
+                "Failed to create project access token";
+              console.warn("Project token creation failed:", tokenError);
+
+              // Show warning toast
+              toast.warn(tokenError, {
+                position: "top-right",
+                autoClose: 8000,
+                hideProgressBar: false,
+                closeOnClick: true,
+                pauseOnHover: true,
+                draggable: true,
+              });
+            }
+
             console.log("Connected repository:", repo);
           } catch (err) {
             console.error("Failed to connect repository:", err);
+            throw err; // Re-throw so modal can handle it
           }
         }}
       />

@@ -37,7 +37,6 @@ def get_current_trace_id() -> Optional[str]:
         return None
 
     except Exception as e:
-        logger.debug(f"[DEBUG] Failed to get current trace ID: {e}")
         return None
 
 
@@ -63,7 +62,6 @@ def get_current_span_id() -> Optional[str]:
         return None
 
     except Exception as e:
-        logger.debug(f"[DEBUG] Failed to get current span ID: {e}")
         return None
 
 

@@ -1,7 +1,5 @@
 import os
 import asyncio
-import subprocess
-import platform
 from pathlib import Path
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -10,37 +8,21 @@ from mcp.types import Implementation
 # Global process variables for persistent MCP channels
 mongo_session = None
 gitlab_session = None
-nexus_session = None
 mcp_ready = False  # Track when MCP sessions are ready
-
-# Detect the correct GitNexus command for the platform
-root_dir = Path(__file__).parent.parent
-local_bin = root_dir / "node_modules" / ".bin"
-if platform.system() == "Windows":
-    local_gitnexus = local_bin / "gitnexus.cmd"
-    GITNEXUS_CMD = str(local_gitnexus) if local_gitnexus.exists() else "gitnexus.cmd"
-else:
-    local_gitnexus = local_bin / "gitnexus"
-    GITNEXUS_CMD = str(local_gitnexus) if local_gitnexus.exists() else "gitnexus"
 
 
 async def boot_mcp_bridge():
-    """Spins up and maintains persistent stdio pipes to MongoDB, GitLab, and GitNexus MCP servers"""
-    global mongo_session, gitlab_session, nexus_session, mcp_ready
+    """Spins up and maintains persistent stdio pipes to MongoDB and GitLab MCP servers"""
+    global mongo_session, gitlab_session, mcp_ready
 
     # Detect platform and configure paths dynamically
-    is_windows = platform.system() == "Windows"
+    is_windows = Path(__file__).parent.name == "Windows"
 
     # 1. Determine Node and NPX executables
     if is_windows:
         node_cmd = r"C:\Program Files\nodejs\node.exe" if Path(r"C:\Program Files\nodejs\node.exe").exists() else "node"
-        npx_cmd = "npx.cmd"
     else:
         node_cmd = "node"
-        npx_cmd = "npx"
-
-    print(f"[DEBUG] Using node_cmd: {node_cmd}")
-    print(f"[DEBUG] Platform: {platform.system()}")
 
     # 2. Determine paths to MongoDB and GitLab MCP servers
     root_dir = Path(__file__).parent.parent
@@ -104,48 +86,12 @@ async def boot_mcp_bridge():
         }
     )
 
-    # 3. GitNexus MCP Server Parameters (Code Intelligence & Impact Analysis)
-    nexus_params = StdioServerParameters(
-        command=npx_cmd,
-        args=["-y", "gitnexus@latest", "mcp"],
-        env={**os.environ}
-    )
-
-    print("[INFO] Igniting Triple MCP Orchestrator Core (MongoDB + GitLab + GitNexus)...")
+    print("[INFO] Igniting MCP Orchestrator Core (MongoDB + GitLab)...")
     print("[INFO] This may take 10-30 seconds to initialize all connections...")
 
     # Track which connections succeed
     mongo_ok = False
     gitlab_ok = False
-    nexus_ok = True  # Start optimistic, set to False if test fails
-
-    # Test if GitNexus works before starting MCP
-    print("[INFO] Testing GitNexus installation...")
-    try:
-        test_result = subprocess.run(
-            [GITNEXUS_CMD, "--version"],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        if test_result.returncode == 0:
-            print(f"[OK] GitNexus found: {test_result.stdout.strip()}")
-        else:
-            print("[WARN] GitNexus command failed - skipping GitNexus MCP")
-            print(f"[INFO] Error: {test_result.stderr}")
-            nexus_ok = False
-    except FileNotFoundError:
-        print("[WARN] GitNexus not found - skipping GitNexus MCP")
-        print("[INFO] Install with: npm install -g gitnexus")
-        nexus_ok = False
-    except Exception as e:
-        print(f"[WARN] GitNexus test failed: {e}")
-        print("[INFO] Skipping GitNexus MCP - using built-in analysis")
-        nexus_ok = False
-
-    # Skip GitNexus if the test failed
-    if not nexus_ok:
-        print("[WARN] GitNexus MCP will be skipped - using built-in analysis")
 
     try:
         async with stdio_client(mongo_params) as (m_read, m_write):
@@ -155,179 +101,66 @@ async def boot_mcp_bridge():
                 print("[OK] GitLab stdio client connected")
                 gitlab_ok = True
 
-                # Only try GitNexus if the test passed
-                if nexus_ok:
+                async with ClientSession(m_read, m_write, client_info=Implementation(name="gk-db", version="1.0.0")) as m_sess, \
+                           ClientSession(g_read, g_write, client_info=Implementation(name="gk-git", version="1.0.0")) as g_sess:
+
+                    print("[INFO] Initializing MCP protocol handshakes...")
+
+                    # Initialize MongoDB and GitLab (critical services)
                     try:
-                        async with stdio_client(nexus_params) as (n_read, n_write):
-                            print("[OK] GitNexus stdio client connected")
-                            async with ClientSession(m_read, m_write, client_info=Implementation(name="gk-db", version="1.0.0")) as m_sess, \
-                                       ClientSession(g_read, g_write, client_info=Implementation(name="gk-git", version="1.0.0")) as g_sess, \
-                                       ClientSession(n_read, n_write, client_info=Implementation(name="gk-nexus", version="1.0.0")) as n_sess:
+                        print("[INFO] Initializing MongoDB MCP session...")
+                        await asyncio.wait_for(m_sess.initialize(), timeout=10.0)
+                        print("[OK] MongoDB MCP initialized")
 
-                                print("[INFO] Initializing MCP protocol handshakes...")
-
-                                # Initialize MongoDB and GitLab first (critical), GitNexus can be optional
-                                try:
-                                    print("[INFO] Initializing MongoDB MCP session...")
-                                    await asyncio.wait_for(m_sess.initialize(), timeout=10.0)
-                                    print("[OK] MongoDB MCP initialized")
-
-                                    # Verify MongoDB connection by listing tools
-                                    try:
-                                        mongo_tools = await m_sess.list_tools()
-                                        print(f"[OK] MongoDB tools available: {[t.name for t in mongo_tools.tools[:3]]}")
-                                    except Exception as tool_err:
-                                        print(f"[WARN] Could not list MongoDB tools: {tool_err}")
-
-                                except asyncio.TimeoutError:
-                                    print("[WARN] MongoDB MCP initialization timed out")
-                                    print("[INFO] This may indicate MDB_MCP_CONNECTION_STRING is not set or invalid")
-                                    raise
-                                except Exception as mongo_init_err:
-                                    print(f"[ERROR] MongoDB MCP initialization failed: {mongo_init_err}")
-                                    print(f"[INFO] Error type: {type(mongo_init_err).__name__}")
-                                    import traceback
-                                    traceback.print_exc()
-                                    raise
-
-                                try:
-                                    print("[INFO] Initializing GitLab MCP session...")
-                                    await asyncio.wait_for(g_sess.initialize(), timeout=10.0)
-                                    print("[OK] GitLab MCP initialized")
-                                except asyncio.TimeoutError:
-                                    print("[WARN] GitLab MCP initialization timed out")
-                                    raise
-
-                                # Set sessions as ready for critical services
-                                mongo_session = m_sess
-                                gitlab_session = g_sess
-                                mcp_ready = True
-                                print("[OK] CRITICAL MCP SERVICES READY - Can now process webhooks!")
-
-                                # Verify active connectivity by listing available tools
-                                try:
-                                    git_tools = await g_sess.list_tools()
-                                    print(f"[OK] GitLab Capabilities: {[t.name for t in git_tools.tools[:2]]} (Total: {len(git_tools.tools)})")
-                                except Exception as e:
-                                    print(f"[WARN] GitLab tool listing failed: {e}")
-
-                                # Initialize GitNexus (optional - may fail if no repos indexed)
-                                print("[INFO] Initializing GitNexus MCP session (optional)...")
-                                print("[INFO] Note: GitNexus requires indexed repositories")
-                                try:
-                                    await asyncio.wait_for(n_sess.initialize(), timeout=15.0)
-                                    print("[OK] GitNexus MCP initialized successfully")
-                                    nexus_session = n_sess
-
-                                    # Verify GitNexus has indexed repositories
-                                    try:
-                                        nexus_tools = await n_sess.list_tools()
-                                        print(f"[OK] GitNexus Capabilities: {[t.name for t in nexus_tools.tools[:5]]} (Total: {len(nexus_tools.tools)})")
-
-                                        # Try to list repos to verify it's working
-                                        try:
-                                            list_repos_result = await n_sess.call_tool(name="list_repos", arguments={})
-                                            print(f"[OK] GitNexus has indexed repositories available")
-                                        except Exception as repo_err:
-                                            print(f"[WARN] GitNexus initialized but no indexed repositories found")
-                                            print(f"[INFO] Run 'python setup_repos.py index' to index repositories")
-                                            nexus_session = None
-
-                                    except Exception as e:
-                                        print(f"[WARN] GitNexus tool listing failed: {e}")
-                                        nexus_session = None
-
-                                except asyncio.TimeoutError:
-                                    print("[WARN] GitNexus MCP initialization timed out")
-                                    print("[INFO] This is normal if GitNexus has no indexed repositories yet")
-                                    nexus_session = None
-                                except Exception as e:
-                                    print(f"[WARN] GitNexus initialization failed: {type(e).__name__}: {str(e)[:100]}")
-                                    print("[INFO] This is expected if no repositories are indexed yet")
-                                    print("[INFO] Run: python setup_repos.py index")
-                                    nexus_session = None
-
-                                print("[OK] MCP Bridge fully initialized!")
-                                if nexus_session:
-                                    print("[OK] Full analysis available (MongoDB + GitLab + GitNexus)")
-                                else:
-                                    print("[INFO] Standard analysis available (MongoDB + GitLab + Built-in Impact)")
-
-                                # Keep the background process streams alive indefinitely
-                                try:
-                                    await asyncio.sleep(float('inf'))
-                                except asyncio.CancelledError:
-                                    print("[INFO] MCP connection task terminated cleanly.")
-                                    raise
-
-                    except Exception as nexus_err:
-                        print(f"[WARN] GitNexus connection failed: {nexus_err}")
-                        print("[INFO] Continuing with MongoDB and GitLab only...")
-                        print("[DEBUG] Setting nexus_ok=False to trigger fallback path")
-                        nexus_ok = False  # Set to False so fallback path will execute
-
-                # If GitNexus is not available, continue with just MongoDB and GitLab
-                if not nexus_ok:
-                    print("[DEBUG] Entering fallback path (MongoDB + GitLab only)")
-                    async with ClientSession(m_read, m_write, client_info=Implementation(name="gk-db", version="1.0.0")) as m_sess, \
-                               ClientSession(g_read, g_write, client_info=Implementation(name="gk-git", version="1.0.0")) as g_sess:
-
-                        print("[INFO] Initializing MCP protocol handshakes (MongoDB + GitLab)...")
-
-                        # Initialize MongoDB and GitLab
+                        # Verify MongoDB connection by listing tools
                         try:
-                            print("[INFO] Initializing MongoDB MCP session...")
-                            await asyncio.wait_for(m_sess.initialize(), timeout=10.0)
-                            print("[OK] MongoDB MCP initialized")
+                            mongo_tools = await m_sess.list_tools()
+                            print(f"[OK] MongoDB tools available: {[t.name for t in mongo_tools.tools[:3]]}")
+                        except Exception as tool_err:
+                            print(f"[WARN] Could not list MongoDB tools: {tool_err}")
 
-                            # Verify MongoDB connection by listing tools
-                            try:
-                                mongo_tools = await m_sess.list_tools()
-                                print(f"[OK] MongoDB tools available: {[t.name for t in mongo_tools.tools[:3]]}")
-                            except Exception as tool_err:
-                                print(f"[WARN] Could not list MongoDB tools: {tool_err}")
+                    except asyncio.TimeoutError:
+                        print("[WARN] MongoDB MCP initialization timed out")
+                        print("[INFO] This may indicate MDB_MCP_CONNECTION_STRING is not set or invalid")
+                        raise
+                    except Exception as mongo_init_err:
+                        print(f"[ERROR] MongoDB MCP initialization failed: {mongo_init_err}")
+                        print(f"[INFO] Error type: {type(mongo_init_err).__name__}")
+                        import traceback
+                        traceback.print_exc()
+                        raise
 
-                        except asyncio.TimeoutError:
-                            print("[WARN] MongoDB MCP initialization timed out")
-                            print("[INFO] This may indicate MDB_MCP_CONNECTION_STRING is not set or invalid")
-                            raise
-                        except Exception as mongo_init_err:
-                            print(f"[ERROR] MongoDB MCP initialization failed: {mongo_init_err}")
-                            print(f"[INFO] Error type: {type(mongo_init_err).__name__}")
-                            import traceback
-                            traceback.print_exc()
-                            raise
+                    try:
+                        print("[INFO] Initializing GitLab MCP session...")
+                        await asyncio.wait_for(g_sess.initialize(), timeout=10.0)
+                        print("[OK] GitLab MCP initialized")
+                    except asyncio.TimeoutError:
+                        print("[WARN] GitLab MCP initialization timed out")
+                        raise
 
-                        try:
-                            print("[INFO] Initializing GitLab MCP session...")
-                            await asyncio.wait_for(g_sess.initialize(), timeout=10.0)
-                            print("[OK] GitLab MCP initialized")
-                        except asyncio.TimeoutError:
-                            print("[WARN] GitLab MCP initialization timed out")
-                            raise
+                    # Set sessions as ready
+                    mongo_session = m_sess
+                    gitlab_session = g_sess
+                    mcp_ready = True
+                    print("[OK] CRITICAL MCP SERVICES READY - Can now process webhooks!")
 
-                        # Set sessions as ready
-                        mongo_session = m_sess
-                        gitlab_session = g_sess
-                        mcp_ready = True
-                        print("[OK] CRITICAL MCP SERVICES READY - Can now process webhooks!")
+                    # Verify active connectivity by listing available tools
+                    try:
+                        git_tools = await g_sess.list_tools()
+                        print(f"[OK] GitLab Capabilities: {[t.name for t in git_tools.tools[:2]]} (Total: {len(git_tools.tools)})")
+                    except Exception as e:
+                        print(f"[WARN] GitLab tool listing failed: {e}")
 
-                        # Verify GitLab tools
-                        try:
-                            git_tools = await g_sess.list_tools()
-                            print(f"[OK] GitLab Capabilities: {[t.name for t in git_tools.tools[:2]]} (Total: {len(git_tools.tools)})")
-                        except Exception as e:
-                            print(f"[WARN] GitLab tool listing failed: {e}")
+                    print("[OK] MCP Bridge fully initialized!")
+                    print("[INFO] Standard analysis available (MongoDB + GitLab + Built-in Impact)")
 
-                        print("[OK] MCP Bridge fully initialized!")
-                        print("[INFO] Standard analysis available (MongoDB + GitLab + Built-in Impact)")
+                    # Keep the background process streams alive indefinitely
+                    try:
+                        await asyncio.sleep(float('inf'))
+                    except asyncio.CancelledError:
+                        print("[INFO] MCP connection task terminated cleanly.")
+                        raise
 
-                        # Keep alive
-                        try:
-                            await asyncio.sleep(float('inf'))
-                        except asyncio.CancelledError:
-                            print("[INFO] MCP connection task terminated cleanly.")
-                            raise
     except Exception as e:
         print(f"[ERROR] MCP Bridge initialization failed: {e}")
         print(f"[ERROR] Error type: {type(e).__name__}")
@@ -336,9 +169,9 @@ async def boot_mcp_bridge():
 
         # Set at least gitlab_session if possible for basic functionality
         if mongo_ok and gitlab_ok:
-            print("[INFO] MongoDB and GitLab connected - proceeding without GitNexus")
+            print("[INFO] MongoDB and GitLab connected - proceeding")
             mcp_ready = True
-            print("[OK] MCP Bridge is READY (MongoDB + GitLab only)")
+            print("[OK] MCP Bridge is READY (MongoDB + GitLab)")
         else:
             print("[ERROR] Critical MCP connections failed - webhooks will not be processed")
             mcp_ready = False

@@ -80,7 +80,6 @@ class ArizeCloudEvalExporter:
             True if export was successful, False otherwise
         """
         if not evaluations:
-            logger.debug("[DEBUG] No evaluations to export")
             return True
 
         if not self.space_id or not self.api_key:

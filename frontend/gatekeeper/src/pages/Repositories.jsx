@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from "react";
 import { Link } from "react-router-dom";
+import { toast } from "react-toastify";
 import { useRepositories, useConnectRepository } from "../services/queries";
 import ConnectRepositoryModal from "../components/ConnectRepositoryModal";
 import { formatLastSync } from "../utils/formatLastSync";
@@ -58,7 +59,27 @@ const Repositories = () => {
 
   const handleConnectRepository = async (repo) => {
     try {
-      await connectMutation.mutateAsync(repo.id);
+      const response = await connectMutation.mutateAsync(repo.id);
+
+      // Check for project token errors
+      if (response?.project_token?.created === false) {
+        const tokenError =
+          response.project_token.error ||
+          "Failed to create project access token";
+        console.warn("Project token creation failed:", tokenError);
+
+        // Show warning toast
+        toast.warn(tokenError, {
+          position: "top-right",
+          autoClose: 8000,
+          hideProgressBar: false,
+          closeOnClick: true,
+          pauseOnHover: true,
+          draggable: true,
+        });
+      }
+
+      return response;
     } catch (err) {
       console.error("Failed to connect repository:", err);
       throw err;

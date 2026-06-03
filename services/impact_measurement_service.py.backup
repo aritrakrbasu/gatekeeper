@@ -1,0 +1,555 @@
+import os
+import sys
+import json
+import shutil
+import subprocess
+from datetime import datetime, timezone
+from dataclasses import dataclass, field
+from typing import List, Dict, Optional, Any
+from pathlib import Path
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+
+
+@dataclass
+class ChangedSymbol:
+    """Represents a symbol (function, class, variable) that was changed in the MR."""
+    name: str
+    id: str
+    kind: str = ""  # function, class, variable, etc.
+    file_path: str = ""
+
+
+@dataclass
+class ImpactedDependency:
+    """Represents a downstream dependency that will be affected by the change."""
+    id: str
+    name: str
+    file_path: str
+    depth: int
+    source_code_context: str = ""
+
+
+@dataclass
+class ImpactAnalysisReport:
+    """Contains impact analysis results collected during code change audit."""
+    analyzed_at: datetime
+    source_branch: str
+    target_branch: str
+    changed_symbols: List[ChangedSymbol] = field(default_factory=list)
+    impacted_dependencies: List[ImpactedDependency] = field(default_factory=list)
+    total_impacted_files: int = 0
+    high_risk_count: int = 0  # Depth 1 dependencies that will break
+    medium_risk_count: int = 0  # Depth 2+ dependencies
+    skipped_reason: str = ""
+
+
+def get_npx_command_and_args() -> tuple:
+    """Smart resolver to handle Windows PowerShell and Linux binaries natively."""
+    if sys.platform == "win32":
+        return "powershell.exe", ["-NoLogo", "-Command", "npx -y gitnexus@latest mcp"]
+    else:
+        npx_path = shutil.which("npx")
+        if not npx_path:
+            raise FileNotFoundError("Could not find 'npx' on the Linux/macOS system PATH.")
+        return npx_path, ["-y", "gitnexus@latest", "mcp"]
+
+
+def clean_gitnexus_json(raw_output: str) -> str:
+    """GitNexus often appends markdown (--- **Next:**...) to JSON. This strips it."""
+    if not raw_output:
+        return ""
+    return raw_output.split("\n---")[0].strip()
+
+
+async def detect_changes_with_gitnexus(
+    repo_path: str,
+    repo_name: str,
+    source_branch: str,
+    target_branch: str
+) -> List[ChangedSymbol]:
+    """
+    Detect changed symbols using GitNexus MCP detect_changes tool.
+
+    Args:
+        repo_path: Path to the cloned repository
+        repo_name: Name/identifier of the repository for GitNexus
+        source_branch: Source branch with changes
+        target_branch: Target branch to compare against
+
+    Returns:
+        List of ChangedSymbol objects
+
+    Raises:
+        Exception: If GitNexus MCP call fails
+    """
+    cmd, args = get_npx_command_and_args()
+
+    # Silence Node, npm, and GitNexus to prevent non-JSON logs from crashing MCP
+    env = os.environ.copy()
+    env["npm_config_loglevel"] = "silent"
+    env["LOG_LEVEL"] = "error"
+    env["GITNEXUS_LOG_LEVEL"] = "error"
+
+    server_params = StdioServerParameters(command=cmd, args=args, env=env, cwd=repo_path)
+
+    print(f"[INFO] Spinning up GitNexus MCP Server for detect_changes...", flush=True)
+    print(f"[DEBUG] Repo: {repo_name}", flush=True)
+    print(f"[DEBUG] Repo path: {repo_path}", flush=True)
+    print(f"[DEBUG] Comparing current (source={source_branch}) against base_ref={target_branch}", flush=True)
+
+    try:
+        async with stdio_client(server_params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                print(f"[OK] GitNexus MCP connected", flush=True)
+
+                # Run detect_changes
+                # Note: GitNexus only accepts base_ref for compare scope.
+                # We set base_ref to the target branch (unchanged) so it compares
+                # against the current repo state which is checked out at source_branch.
+                print(f"[INFO] Detecting changed symbols...", flush=True)
+                changes_response = await session.call_tool(
+                    name="detect_changes",
+                    arguments={
+                        "repo": repo_name,
+                        "scope": "compare",
+                        "base_ref": target_branch  # Compare current (source_branch) against this
+                    }
+                )
+
+                changes_text = "".join(item.text for item in changes_response.content if hasattr(item, 'text'))
+                changes_json = clean_gitnexus_json(changes_text)
+
+                print(f"[DEBUG] GitNexus response length: {len(changes_json)} chars", flush=True)
+
+                try:
+                    changes_data = json.loads(changes_json)
+                except json.JSONDecodeError as e:
+                    print(f"[ERROR] Failed to parse detect_changes JSON: {e}", flush=True)
+                    print(f"[DEBUG] Raw output: {changes_text[:500]}", flush=True)
+                    return []
+
+                changed_symbols_raw = changes_data.get("changed_symbols", [])
+                summary = changes_data.get("summary", {})
+                changed_files = summary.get("changed_files", 0)
+
+                changed_symbols = []
+                for symbol_data in changed_symbols_raw:
+                    changed_symbols.append(ChangedSymbol(
+                        name=symbol_data.get("name", ""),
+                        id=symbol_data.get("id", ""),
+                        kind=symbol_data.get("kind", ""),
+                        file_path=symbol_data.get("filePath", "")
+                    ))
+
+                print(f"[OK] Found {len(changed_symbols)} changed symbols, {changed_files} changed files", flush=True)
+
+                # Log when files changed but no symbols detected (likely value/content changes)
+                if changed_files > 0 and not changed_symbols:
+                    print(f"[INFO] Files changed but no symbols detected.", flush=True)
+                    print(f"[INFO] This may indicate value/content changes (e.g., object property modifications)", flush=True)
+                    print(f"[INFO] that GitNexus doesn't track as symbol-level changes.", flush=True)
+
+                return changed_symbols
+
+    except Exception as e:
+        print(f"[ERROR] GitNexus detect_changes failed: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+        return []
+
+
+async def analyze_impact_with_gitnexus(
+    repo_path: str,
+    repo_name: str,
+    changed_symbols: List[ChangedSymbol],
+    max_symbols_to_analyze: int = 5
+) -> List[ImpactedDependency]:
+    """
+    Analyze impact of changed symbols using GitNexus MCP impact tool.
+
+    Args:
+        repo_path: Path to the cloned repository
+        repo_name: Name/identifier of the repository for GitNexus
+        changed_symbols: List of symbols that were changed
+        max_symbols_to_analyze: Maximum number of symbols to analyze (to limit API calls)
+
+    Returns:
+        List of ImpactedDependency objects
+    """
+    if not changed_symbols:
+        print(f"[INFO] No changed symbols to analyze", flush=True)
+        return []
+
+    cmd, args = get_npx_command_and_args()
+
+    # Silence Node, npm, and GitNexus
+    env = os.environ.copy()
+    env["npm_config_loglevel"] = "silent"
+    env["LOG_LEVEL"] = "error"
+    env["GITNEXUS_LOG_LEVEL"] = "error"
+
+    server_params = StdioServerParameters(command=cmd, args=args, env=env, cwd=repo_path)
+
+    print(f"[INFO] Spinning up GitNexus MCP Server for impact analysis...", flush=True)
+
+    all_impacted = []
+
+    # Limit the number of symbols we analyze to avoid excessive API calls
+    symbols_to_analyze = changed_symbols[:max_symbols_to_analyze]
+
+    try:
+        async with stdio_client(server_params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                print(f"[OK] GitNexus MCP connected for impact analysis", flush=True)
+
+                for symbol in symbols_to_analyze:
+                    print(f"[INFO] Analyzing impact for symbol: {symbol.name}", flush=True)
+
+                    try:
+                        impact_response = await session.call_tool(
+                            name="impact",
+                            arguments={
+                                "repo": repo_name,
+                                "target": symbol.name,
+                                "direction": "upstream"  # Get downstream dependents
+                            }
+                        )
+
+                        impact_text = "".join(item.text for item in impact_response.content if hasattr(item, 'text'))
+                        impact_json = clean_gitnexus_json(impact_text)
+
+                        try:
+                            impact_data = json.loads(impact_json)
+                        except json.JSONDecodeError as e:
+                            print(f"[WARN] Failed to parse impact JSON for {symbol.name}: {e}", flush=True)
+                            continue
+
+                        by_depth = impact_data.get("byDepth", {})
+
+                        # Process each depth level
+                        for depth_str, items in by_depth.items():
+                            try:
+                                depth = int(depth_str)
+                            except ValueError:
+                                continue
+
+                            for item in items:
+                                file_path = item.get("filePath", "")
+                                if not file_path:
+                                    continue
+
+                                # Read source code context from the file
+                                full_file_path = Path(repo_path) / file_path
+                                source_code = ""
+                                try:
+                                    if full_file_path.exists():
+                                        with open(full_file_path, "r", encoding="utf-8") as f:
+                                            source_code = f.read()
+                                    else:
+                                        source_code = f"// File not found at {full_file_path}"
+                                except Exception as read_err:
+                                    source_code = f"// Error reading file: {read_err}"
+
+                                impacted = ImpactedDependency(
+                                    id=item.get("id", ""),
+                                    name=item.get("name", ""),
+                                    file_path=file_path,
+                                    depth=depth,
+                                    source_code_context=source_code
+                                )
+                                all_impacted.append(impacted)
+
+                        print(f"[OK] Found impact data for {symbol.name}", flush=True)
+
+                    except Exception as symbol_err:
+                        print(f"[WARN] Failed to analyze impact for {symbol.name}: {symbol_err}", flush=True)
+                        continue
+
+    except Exception as e:
+        print(f"[ERROR] GitNexus impact analysis failed: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+
+    print(f"[OK] Total impacted dependencies found: {len(all_impacted)}", flush=True)
+    return all_impacted
+
+
+async def run_impact_analysis(
+    repo_path: str,
+    repo_name: str,
+    source_branch: str,
+    target_branch: str,
+    max_symbols_to_analyze: int = 5
+) -> Optional[ImpactAnalysisReport]:
+    """
+    Run the complete impact analysis pipeline:
+    1. Detect changed symbols
+    2. Analyze downstream dependencies (blast radius)
+    3. Fetch source code context for impacted files
+
+    Args:
+        repo_path: Path to the cloned repository
+        repo_name: Name/identifier of the repository for GitNexus
+        source_branch: Source branch with changes
+        target_branch: Target branch to compare against
+        max_symbols_to_analyze: Maximum number of symbols to analyze
+
+    Returns:
+        ImpactAnalysisReport or None if analysis fails
+    """
+    print(f"[INFO] ===== IMPACT ANALYSIS PIPELINE START =====", flush=True)
+    print(f"[INFO] Source branch: {source_branch}, Target branch: {target_branch}", flush=True)
+
+    try:
+        # Step 1: Detect changed symbols
+        changed_symbols = await detect_changes_with_gitnexus(
+            repo_path=repo_path,
+            repo_name=repo_name,
+            source_branch=source_branch,
+            target_branch=target_branch
+        )
+
+        if not changed_symbols:
+            print(f"[INFO] No changed symbols detected - skipping impact analysis", flush=True)
+            return ImpactAnalysisReport(
+                analyzed_at=datetime.now(timezone.utc),
+                source_branch=source_branch,
+                target_branch=target_branch,
+                changed_symbols=[],
+                impacted_dependencies=[],
+                skipped_reason="No changed symbols detected"
+            )
+
+        # Step 2: Analyze impact
+        impacted_dependencies = await analyze_impact_with_gitnexus(
+            repo_path=repo_path,
+            repo_name=repo_name,
+            changed_symbols=changed_symbols,
+            max_symbols_to_analyze=max_symbols_to_analyze
+        )
+
+        # Calculate risk counts
+        high_risk = sum(1 for dep in impacted_dependencies if dep.depth == 1)
+        medium_risk = sum(1 for dep in impacted_dependencies if dep.depth >= 2)
+
+        report = ImpactAnalysisReport(
+            analyzed_at=datetime.now(timezone.utc),
+            source_branch=source_branch,
+            target_branch=target_branch,
+            changed_symbols=changed_symbols,
+            impacted_dependencies=impacted_dependencies,
+            total_impacted_files=len(set(dep.file_path for dep in impacted_dependencies)),
+            high_risk_count=high_risk,
+            medium_risk_count=medium_risk
+        )
+
+        print(f"[OK] Impact analysis complete:", flush=True)
+        print(f"     - Changed symbols: {len(changed_symbols)}", flush=True)
+        print(f"     - High risk (Depth 1): {high_risk}", flush=True)
+        print(f"     - Medium risk (Depth 2+): {medium_risk}", flush=True)
+        print(f"     - Total impacted files: {report.total_impacted_files}", flush=True)
+
+        return report
+
+    except Exception as e:
+        print(f"[ERROR] Impact analysis pipeline failed: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+def format_impact_report_to_markdown(report: ImpactAnalysisReport) -> str:
+    """
+    Format the ImpactAnalysisReport into markdown suitable for Gemini context.
+
+    Args:
+        report: ImpactAnalysisReport instance
+
+    Returns:
+        Formatted markdown block string
+    """
+    if not report or report.skipped_reason:
+        if report and report.skipped_reason:
+            return f"""
+## Impact Analysis (Blast Radius)
+
+ℹ️ *{report.skipped_reason}*
+
+*No downstream impact analysis performed.*
+"""
+        return ""
+
+    if not report.changed_symbols and not report.impacted_dependencies:
+        return """
+## Impact Analysis (Blast Radius)
+
+✅ *No changed symbols detected - no impact to analyze.*
+
+"""
+
+    lines = []
+
+    lines.append("## Impact Analysis (Blast Radius)")
+    lines.append("")
+    lines.append(f"**Source Branch:** `{report.source_branch}` → **Target Branch:** `{report.target_branch}`")
+    lines.append("")
+    lines.append(f"**Changed Symbols:** {len(report.changed_symbols)}")
+    lines.append(f"**High Risk Dependencies (Depth 1 - WILL BREAK):** {report.high_risk_count}")
+    lines.append(f"**Medium Risk Dependencies (Depth 2+):** {report.medium_risk_count}")
+    lines.append("")
+
+    if report.changed_symbols:
+        lines.append("### Changed Symbols")
+        for symbol in report.changed_symbols:
+            kind_str = f" ({symbol.kind})" if symbol.kind else ""
+            lines.append(f"- `{symbol.name}`{kind_str}")
+            if symbol.file_path:
+                lines.append(f"  - Location: `{symbol.file_path}`")
+        lines.append("")
+
+    if report.impacted_dependencies:
+        lines.append("### Impacted Downstream Dependencies")
+        lines.append("")
+
+        # Group by depth
+        depth_1_deps = [dep for dep in report.impacted_dependencies if dep.depth == 1]
+        depth_other_deps = [dep for dep in report.impacted_dependencies if dep.depth > 1]
+
+        if depth_1_deps:
+            lines.append("#### 🔴 High Risk (Depth 1 - Will Break)")
+            for dep in depth_1_deps[:20]:  # Limit to 20 files
+                lines.append(f"- **{dep.name}** in `{dep.file_path}`")
+            if len(depth_1_deps) > 20:
+                lines.append(f"- ... and {len(depth_1_deps) - 20} more files")
+            lines.append("")
+
+        if depth_other_deps:
+            lines.append("#### 🟠 Medium Risk (Depth 2+)")
+            for dep in depth_other_deps[:10]:  # Limit to 10 files
+                lines.append(f"- **{dep.name}** in `{dep.file_path}` (Depth {dep.depth})")
+            if len(depth_other_deps) > 10:
+                lines.append(f"- ... and {len(depth_other_deps) - 10} more files")
+            lines.append("")
+
+        # Add source code context for high-risk dependencies only
+        if depth_1_deps:
+            lines.append("---")
+            lines.append("### Source Code Context for High-Risk Files")
+            lines.append("")
+
+            for dep in depth_1_deps[:5]:  # Only show first 5 files with full context
+                lines.append(f"#### File: `{dep.file_path}`")
+                lines.append(f"**Dependency:** `{dep.name}`")
+                lines.append("")
+                lines.append("```")
+                # Truncate context if too long
+                context = dep.source_code_context
+                if len(context) > 3000:
+                    context = context[:3000] + "\n\n... (truncated)"
+                lines.append(context)
+                lines.append("```")
+                lines.append("")
+
+    return "\n".join(lines)
+
+
+def format_impact_report_for_gemini_prompt(report: ImpactAnalysisReport) -> str:
+    """
+    Format impact analysis into a detailed prompt for Gemini LLM.
+
+    This creates a more detailed, instruction-focused prompt that guides
+    the LLM to provide actionable feedback about breaking changes.
+
+    Args:
+        report: ImpactAnalysisReport instance
+
+    Returns:
+        Formatted prompt string for LLM consumption
+    """
+    if not report or report.skipped_reason:
+        return ""
+
+    # If no changed symbols at all, return empty
+    if not report.changed_symbols:
+        return ""
+
+    lines = []
+
+    lines.append("### 🔍 IMPACT ANALYSIS: Breaking Change Detection")
+    lines.append("")
+    lines.append("The following symbols were modified in this PR:")
+    lines.append("")
+
+    # Changed symbols
+    lines.append("#### Modified Symbols:")
+    for symbol in report.changed_symbols:
+        kind_str = f" ({symbol.kind})" if symbol.kind else ""
+        lines.append(f"- `{symbol.name}`{kind_str} in `{symbol.file_path or 'unknown location'}`")
+    lines.append("")
+
+    # Check if there are any impacted dependencies
+    if not report.impacted_dependencies:
+        lines.append("#### ✅ Impact Assessment: LOW RISK")
+        lines.append("")
+        lines.append("The modified symbols have no detected downstream dependencies.")
+        lines.append("This suggests they are leaf nodes (not called/used by other code).")
+        lines.append("")
+        lines.append("**Review focus:** Verify the changes are correct and complete.")
+        lines.append("")
+    else:
+        lines.append("#### 🚨 RISK ASSESSMENT:")
+        lines.append("")
+        lines.append(f"Total downstream dependencies affected: **{len(report.impacted_dependencies)}**")
+        lines.append(f"High risk (will break): **{report.high_risk_count}**")
+        lines.append(f"Medium risk (may affect): **{report.medium_risk_count}**")
+        lines.append("")
+
+        # High-risk dependencies (Depth 1)
+        high_risk_deps = [dep for dep in report.impacted_dependencies if dep.depth == 1]
+
+        if high_risk_deps:
+            lines.append("#### Files That WILL BREAK:")
+            lines.append("")
+            for dep in high_risk_deps[:15]:
+                lines.append(f"- **{dep.name}** in `{dep.file_path}`")
+            lines.append("")
+
+            # Add detailed source context for top 3 high-risk files
+            lines.append("---")
+            lines.append("#### Source Code Context (Top 3 High-Risk Files):")
+            lines.append("")
+            lines.append("Review the following code that depends on your changes:")
+            lines.append("")
+
+            for i, dep in enumerate(high_risk_deps[:3], 1):
+                lines.append(f"**{i}. `{dep.file_path}`**")
+                lines.append(f"   Depends on: `{dep.name}`")
+                lines.append("")
+                lines.append("```")
+                context = dep.source_code_context
+                if len(context) > 2000:
+                    context = context[:2000] + "\n\n... (truncated)"
+                lines.append(context)
+                lines.append("```")
+                lines.append("")
+
+    lines.append("---")
+    lines.append("")
+
+    if not report.impacted_dependencies:
+        lines.append("**📋 REVIEW TASKS:**")
+        lines.append("1. Verify the modified symbols' changes are intentional")
+        lines.append("2. Ensure the changes don't break external consumers (API users, configs)")
+        lines.append("3. Confirm tests cover the modified code paths")
+        lines.append("")
+    else:
+        lines.append("**📋 ACTION REQUIRED:**")
+        lines.append("1. Identify which changes will break the downstream code listed above")
+        lines.append("2. Provide specific code fixes to update the downstream files")
+        lines.append("3. Or suggest refactoring to reduce the blast radius")
+        lines.append("")
+
+    return "\n".join(lines)

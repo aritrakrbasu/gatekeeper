@@ -925,16 +925,17 @@ async def get_available_gitlab_repositories(user_id: str, search_query: str = ""
         )
 
 
-async def install_gitlab_webhook(repo_id: str, gitlab_token: str) -> Dict:
+async def install_gitlab_webhook(repo_id: str, gitlab_token: str, user_id: Optional[str] = None) -> Dict:
     """
-    Install Gatekeeper webhook on a GitLab repository.
+    Install Gatekeeper webhook on a GitLab repository and create a project access token.
 
     Args:
         repo_id: GitLab project ID
         gitlab_token: GitLab access token
+        user_id: Optional user ID to store the project access token in their document
 
     Returns:
-        Webhook installation result
+        Webhook installation result with project access token info
     """
     # Get Gatekeeper webhook URL from environment
     webhook_url = os.getenv("GATEKEEPER_WEBHOOK_URL", "")
@@ -957,6 +958,149 @@ async def install_gitlab_webhook(repo_id: str, gitlab_token: str) -> Dict:
 
     headers = {"Authorization": f"Bearer {gitlab_token}"}
 
+    # First, create a project access token if user_id is provided
+    # This should happen regardless of webhook status
+    project_token_result = None
+    if user_id and MONGO_CONNECTION_STRING:
+        try:
+            print(f"[INFO] Checking for existing project access token for repo {repo_id}...")
+
+            # Check if project access token already exists for this user/repo in MongoDB
+            existing_user = await mongo_client.find_one(
+                collection_name="users",
+                filter={"_id": user_id}
+            )
+
+            if existing_user and existing_user.get("project_tokens", {}).get(repo_id):
+                print(f"[INFO] Project access token already exists in DB for user {user_id}, repo {repo_id}")
+                existing_token_data = existing_user["project_tokens"][repo_id]
+                project_token_result = {
+                    "token_id": existing_token_data.get("token_id"),
+                    "created": False,
+                    "already_existed": True,
+                    "expires_at": existing_token_data.get("expires_at")
+                }
+            else:
+                # Check if a Gatekeeper project access token already exists in GitLab
+                async with httpx.AsyncClient() as client:
+                    list_tokens_response = await client.get(
+                        f"{GITLAB_BASE_URL}/api/v4/projects/{repo_id}/access_tokens",
+                        headers=headers,
+                        timeout=30.0
+                    )
+                    list_tokens_response.raise_for_status()
+                    existing_tokens = list_tokens_response.json()
+
+                    import sys
+                    print(f"[DEBUG] Found {len(existing_tokens)} existing access tokens", flush=True)
+                    for t in existing_tokens:
+                        print(f"[DEBUG] Existing token: name={t.get('name')}, id={t.get('id')}, expires={t.get('expires_at')}", flush=True)
+
+                    # Check if gatekeeper-{repo_id} token already exists
+                    existing_gatekeeper_token = None
+                    for token in existing_tokens:
+                        if token.get("name") == f"gatekeeper-{repo_id}":
+                            existing_gatekeeper_token = token
+                            break
+
+                    if existing_gatekeeper_token:
+                        print(f"[INFO] Gatekeeper project access token already exists in GitLab (ID: {existing_gatekeeper_token.get('id')})")
+                        # Note: We can't retrieve the token value, only the metadata
+                        project_token_result = {
+                            "token_id": existing_gatekeeper_token.get("id"),
+                            "created": False,
+                            "already_existed": True,
+                            "expires_at": existing_gatekeeper_token.get("expires_at"),
+                            "note": "Token exists in GitLab but value not retrievable. May need to recreate."
+                        }
+                    else:
+                        # Create new project access token with appropriate scopes
+                        print(f"[INFO] Creating new project access token for repo {repo_id}...")
+                        token_data = {
+                            "name": f"gatekeeper-{repo_id}",
+                            "scopes": ["api", "read_repository"],
+                            "expires_at": (datetime.now() + timedelta(days=365)).isoformat()
+                        }
+
+                        print(f"[DEBUG] Token data being sent: {token_data}")
+                        print(f"[DEBUG] GitLab URL: {GITLAB_BASE_URL}/api/v4/projects/{repo_id}/access_tokens")
+
+                        token_response = await client.post(
+                            f"{GITLAB_BASE_URL}/api/v4/projects/{repo_id}/access_tokens",
+                            headers=headers,
+                            json=token_data,
+                            timeout=30.0
+                        )
+
+                        # Log response details for debugging
+                        import sys
+                        gitlab_error_message = None
+                        print(f"[DEBUG] Token creation response status: {token_response.status_code}", flush=True)
+                        if token_response.status_code != 201:
+                            error_text = token_response.text
+                            print(f"[ERROR] GitLab token creation failed with status {token_response.status_code}", flush=True)
+                            print(f"[ERROR] Response: {error_text}", flush=True)
+                            # Try to parse as JSON for better error message
+                            try:
+                                error_json = token_response.json()
+                                gitlab_error_message = error_json.get("message", error_text)
+                                print(f"[ERROR] Error details: {error_json}", flush=True)
+                            except:
+                                gitlab_error_message = error_text
+
+                        token_response.raise_for_status()
+                        project_token = token_response.json()
+
+                        project_token_value = project_token.get("token")
+                        project_token_id = project_token.get("id")
+
+                        if project_token_value:
+                            print(f"[OK] Created project access token (ID: {project_token_id})")
+
+                            # Encrypt and store the token in user's document
+                            from services.encryption_service import encrypt_value
+                            encrypted_token = encrypt_value(project_token_value)
+
+                            # Store in user document with repository mapping
+                            await mongo_client.update_one(
+                                collection_name="users",
+                                filter={"_id": user_id},
+                                update={
+                                    "$set": {
+                                        f"project_tokens.{repo_id}": {
+                                            "token_id": project_token_id,
+                                            "token_encrypted": encrypted_token,
+                                            "created_at": datetime.now().isoformat(),
+                                            "expires_at": token_data["expires_at"],
+                                            "scopes": token_data["scopes"]
+                                        }
+                                    }
+                                }
+                            )
+
+                            print(f"[OK] Stored project access token for user {user_id}, repo {repo_id}")
+                            project_token_result = {
+                                "token_id": project_token_id,
+                                "created": True,
+                                "expires_at": token_data["expires_at"]
+                            }
+                        else:
+                            print(f"[WARN] Project token created but no token value returned")
+
+        except Exception as token_err:
+            print(f"[WARN] Failed to create/store project access token: {token_err}")
+            import traceback
+            traceback.print_exc()
+            # Don't fail webhook installation if token creation fails
+            # Use the captured GitLab error message if available
+            error_msg = gitlab_error_message if 'gitlab_error_message' in locals() else str(token_err)
+            project_token_result = {
+                "created": False,
+                "error": error_msg,
+                "status_code": getattr(token_err, 'response', {}).status_code if hasattr(token_err, 'response') and hasattr(token_err.response, 'status_code') else None
+            }
+
+    # Now handle webhook installation
     try:
         async with httpx.AsyncClient() as client:
             # Check if webhook already exists
@@ -975,7 +1119,8 @@ async def install_gitlab_webhook(repo_id: str, gitlab_token: str) -> Dict:
                     return {
                         "webhook_id": hook.get("id"),
                         "url": hook.get("url"),
-                        "status": "already_exists"
+                        "status": "already_exists",
+                        "project_token": project_token_result
                     }
 
             # Install new webhook
@@ -1007,16 +1152,17 @@ async def install_gitlab_webhook(repo_id: str, gitlab_token: str) -> Dict:
 
             print(f"[OK] Installed Gatekeeper webhook for repo {repo_id}")
             print(f"[INFO] Webhook ID: {webhook.get('id')}, URL: {webhook.get('url')}")
+
             return {
                 "webhook_id": webhook.get("id"),
                 "url": webhook.get("url"),
-                "status": "installed"
+                "status": "installed",
+                "project_token": project_token_result
             }
 
     except httpx.HTTPStatusError as e:
         error_detail = e.response.text if hasattr(e.response, 'text') else str(e)
         print(f"[ERROR] Failed to install webhook: {error_detail}")
-        print(f"[DEBUG] Status code: {e.response.status_code}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to install webhook: {error_detail}"
@@ -1106,7 +1252,7 @@ async def connect_repository(user_id: str, repo_id: str, target_branches: Option
 
         # Try to install webhook anyway (it will check if already exists)
         try:
-            webhook_result = await install_gitlab_webhook(repo_id, gitlab_token)
+            webhook_result = await install_gitlab_webhook(repo_id, gitlab_token, user_id)
             print(f"[OK] Webhook check complete for existing repo {repo_id}: {webhook_result.get('status')}")
 
             # Update existing repository with webhook info and target branches
@@ -1187,7 +1333,7 @@ async def connect_repository(user_id: str, repo_id: str, target_branches: Option
 
     # Install webhook
     try:
-        webhook_result = await install_gitlab_webhook(new_repo["id"], gitlab_token)
+        webhook_result = await install_gitlab_webhook(new_repo["id"], gitlab_token, user_id)
         new_repo["webhook_id"] = webhook_result.get("webhook_id")
         new_repo["webhook_url"] = webhook_result.get("url")
         new_repo["webhook_status"] = webhook_result.get("status")
@@ -1422,8 +1568,6 @@ async def get_repository_mrs_from_db(
         if status_filter:
             filter_query["status"] = status_filter
 
-        print(f"[DEBUG] Fetching MRs for repo_id: {repo_id} with filter: {filter_query}")
-
         # Fetch from MongoDB
         if MONGO_CONNECTION_STRING:
             documents = await mongo_client.find(
@@ -1433,15 +1577,6 @@ async def get_repository_mrs_from_db(
                 sort=[("created_at", -1)]  # Newest first
             )
             print(f"[INFO] Fetched {len(documents)} MRs from MongoDB for repo {repo_id}")
-            if len(documents) == 0:
-                print(f"[DEBUG] No MRs found. Checking collection...")
-                # Try to find any MRs in the collection for debugging
-                all_mrs = await mongo_client.find(
-                    collection_name=MRS_COLLECTION,
-                    filter={},
-                    limit=5
-                )
-                print(f"[DEBUG] Sample MRs in collection: {[mr.get('repository_id', 'no_repo_id') for mr in all_mrs]}")
         else:
             # Fallback to in-memory cache
             print(f"[WARN] MongoDB not configured - using in-memory MR cache")
@@ -1977,8 +2112,6 @@ async def submit_arize_annotation(
     except Exception as e:
         error_detail = str(e)
         print(f"[WARN] Failed to submit Arize annotation: {e}")
-        import traceback
-        print(f"[DEBUG] Traceback: {traceback.format_exc()}")
         return False
 
 
@@ -1999,10 +2132,6 @@ async def update_mr_analysis(
         True if update successful, False otherwise
     """
     try:
-        print(f"[DEBUG] Updating MR analysis: repo_id={repo_id} (type: {type(repo_id).__name__}), mr_iid={mr_iid} (type: {type(mr_iid).__name__})")
-        print(f"[DEBUG] Analysis data keys: {list(analysis_data.keys())}")
-        print(f"[DEBUG] Analysis status: {analysis_data.get('analysis_status', 'NOT_SET')}")
-
         if MONGO_CONNECTION_STRING:
             result = await mongo_client.update_one(
                 collection_name=MRS_COLLECTION,
@@ -2024,9 +2153,7 @@ async def update_mr_analysis(
                     filter={"repository_id": repo_id}
                 )
                 if existing:
-                    print(f"[DEBUG] Found MR with different ID structure:")
-                    print(f"[DEBUG] Existing repo_id: {existing.get('repository_id')} (type: {type(existing.get('repository_id')).__name__})")
-                    print(f"[DEBUG] Existing gitlab_mr_id: {existing.get('gitlab_mr_id')} (type: {type(existing.get('gitlab_mr_id')).__name__})")
+                    print(f"[WARN] MR found with different ID structure")
                 return False
         else:
             # Update in-memory cache

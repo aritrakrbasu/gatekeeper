@@ -156,11 +156,6 @@ async def _aggregate_trace_to_monthly_data(trace: Dict, user_id: str, monthly_da
     month_key = trace_time.strftime("%Y-%m")
     day_key = trace_time.strftime("%d")  # Day as "01", "02", etc.
 
-    # Debug logging for first trace only
-    if not hasattr(_aggregate_trace_to_monthly_data, '_logged_first'):
-        print(f"[DEBUG] Trace date aggregation: trace_time={trace_time}, month_key={month_key}, day_key={day_key}")
-        _aggregate_trace_to_monthly_data._logged_first = True
-
     # Initialize month if not exists
     if month_key not in monthly_data:
         monthly_data[month_key] = {
@@ -176,18 +171,8 @@ async def _aggregate_trace_to_monthly_data(trace: Dict, user_id: str, monthly_da
     month = monthly_data[month_key]
 
     # Update summary
-    prev_tokens = month["summary"]["total_tokens"]
-    prev_cost = month["summary"]["total_cost"]
     month["summary"]["total_tokens"] += total_tokens
     month["summary"]["total_cost"] += estimated_cost
-
-    # Log aggregation details
-    if not hasattr(_aggregate_trace_to_monthly_data, '_log_count'):
-        _aggregate_trace_to_monthly_data._log_count = 0
-    _aggregate_trace_to_monthly_data._log_count += 1
-    if _aggregate_trace_to_monthly_data._log_count <= 3:  # Log first 3 traces
-        print(f"[DEBUG] Aggregating trace: tokens={total_tokens} (input={input_tokens}, output={output_tokens}), cost={estimated_cost:.6f}")
-        print(f"[DEBUG] Month summary: {prev_tokens} -> {month['summary']['total_tokens']} tokens, {prev_cost:.6f} -> {month['summary']['total_cost']:.6f} cost")
 
     # Track MRs
     mr_id = attributes.get("mr_id")
@@ -307,10 +292,6 @@ async def sync_user_billing_optimized(
                 }
             }
 
-        # Log existing MR IDs for debugging
-        total_existing_mrs = sum(len(m.get("mr_ids", [])) for m in monthly_aggregates.values())
-        print(f"[DEBUG] Loaded {total_existing_mrs} existing MR IDs from {len(monthly_aggregates)} months for deduplication")
-
         total_synced = 0
         total_skipped = 0
         last_trace_id = None
@@ -353,12 +334,6 @@ async def sync_user_billing_optimized(
 
                 # Aggregate this trace
                 await _aggregate_trace_to_monthly_data(trace, user_id, monthly_aggregates)
-
-                # Log first few traces for debugging
-                if window_synced == 0:
-                    trace_ts = trace.get("attributes", {}).get("timestamp")
-                    print(f"[DEBUG] First trace aggregated: trace_id={trace.get('trace_id', '')[:16]}..., timestamp={trace_ts}")
-
                 window_synced += 1
                 total_synced += 1
 
@@ -377,7 +352,6 @@ async def sync_user_billing_optimized(
                 window_size_hours = 6
 
         # Merge aggregated data into existing monthly data
-        print(f"[DEBUG] Merging {len(monthly_aggregates)} months into existing {len(existing_months)} months")
         for month_key, month_data in monthly_aggregates.items():
             # Merge with existing month data
             if month_key in existing_months:
@@ -400,7 +374,6 @@ async def sync_user_billing_optimized(
                 if "summary" in month_data:
                     existing["summary"]["total_tokens"] += month_data["summary"]["total_tokens"]
                     existing["summary"]["total_cost"] += month_data["summary"]["total_cost"]
-                    print(f"[DEBUG] Merged existing month {month_key}: {prev_tokens} -> {existing['summary']['total_tokens']} tokens, {prev_cost:.6f} -> {existing['summary']['total_cost']:.6f} cost, +{len(new_mr_ids)} new MRs")
 
                     # Merge models
                     for model, stats in month_data.get("models", {}).items():
@@ -443,11 +416,6 @@ async def sync_user_billing_optimized(
                     existing_months[month_key] = month_data.copy()
 
         # Update billing summary document with single atomic write
-        print(f"[DEBUG] Writing to MongoDB: {len(existing_months)} months")
-        for month_key in existing_months:
-            month = existing_months[month_key]
-            print(f"[DEBUG] Month {month_key}: tokens={month['summary']['total_tokens']}, cost={month['summary']['total_cost']:.6f}")
-
         await mongo_client.update_one(
             "billing_summaries",
             {"user_id": user_id},
@@ -703,33 +671,21 @@ async def sync_user_usage_from_arize(
                 if trace_user_id:
                     user_ids_found.add(str(trace_user_id))
 
-                # Debug: print first few traces to understand structure
-                if synced == 0 and skipped < 3:
-                    print(f"[DEBUG] Trace {trace_id[:8]}... attributes: {list(attributes.keys())[:15]}")
-                    print(f"[DEBUG] Trace user_id: {trace_user_id} (looking for: {user_id})")
-                    if not trace_user_id:
-                        print(f"[DEBUG] No user_id in trace - checking if we should associate with requesting user")
-
                 # If trace has a user_id that doesn't match the requesting user, skip
                 # This handles multi-tenant scenarios where traces have specific user ownership
                 if trace_user_id and str(trace_user_id) != str(user_id):
-                    print(f"[DEBUG] Skipping trace - user_id mismatch: {trace_user_id} != {user_id}")
                     skipped += 1
                     continue
 
                 # If no user_id in trace, associate with requesting user
                 # (This is a fallback for traces that don't have user_id set)
-                if not trace_user_id:
-                    print(f"[DEBUG] No user_id in trace - associating with requesting user: {user_id}")
-                    # Continue processing - will use the requesting user_id below
+                # Continue processing - will use the requesting user_id below
 
                 # Extract token usage from span attributes
                 # Note: OpenTelemetry uses underscores, not dots
                 input_tokens = attributes.get("llm_input_tokens", 0)
                 output_tokens = attributes.get("llm_output_tokens", 0)
                 model_name = attributes.get("llm_model_name", "gemini-3.5-flash")
-
-                print(f"[DEBUG] Found matching trace: {input_tokens} input, {output_tokens} output tokens")
 
                 if not input_tokens and not output_tokens:
                     skipped += 1

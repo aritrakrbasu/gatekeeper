@@ -383,6 +383,141 @@ async def get_user_gemini_config(user_id: str) -> Dict:
     }
 
 
+async def get_user_gitlab_token(user_id: str, project_id: str) -> Optional[str]:
+    """
+    Get user's project-specific GitLab access token from project_tokens.
+
+    Args:
+        user_id: User ID
+        project_id: Project ID to get project-specific token from project_tokens
+
+    Returns:
+        GitLab access token or None if not found
+    """
+    try:
+        # Try to get from in-memory session first (most reliable for active users)
+        from services import auth_service
+        user_session = auth_service.get_user_session(user_id)
+        if user_session and user_session.get("project_tokens", {}).get(project_id):
+            token = user_session.get("project_tokens", {}).get(project_id)
+            return token
+
+        # Fall back to decrypting from MongoDB (for webhook processing when session not active)
+        print(f"[INFO] No in-memory session for user {user_id}, trying MongoDB...")
+        user = await get_user(user_id)
+        if not user:
+            print(f"[WARN] User {user_id} not found when fetching GitLab token")
+            return None
+
+        # Get project-specific token from project_tokens
+        project_tokens = user.get("project_tokens", {})
+        project_token_data = project_tokens.get(project_id, {})
+        encrypted_token = project_token_data.get("token_encrypted", "")
+        if not encrypted_token:
+            print(f"[WARN] No project token found for user {user_id}, project {project_id}")
+            return None
+
+        decrypted_token = decrypt_value(encrypted_token)
+        if not decrypted_token or decrypted_token == encrypted_token:
+            print(f"[WARN] Project token decryption failed for user {user_id}, project {project_id}")
+            return None
+
+        print(f"[OK] Retrieved project-specific GitLab token for user {user_id}, project {project_id}")
+        return decrypted_token
+    except Exception as e:
+        print(f"[ERROR] Failed to get GitLab token for user {user_id}, project {project_id}: {e}")
+        return None
+
+
+async def refresh_gitlab_token(user_id: str) -> Optional[Dict]:
+    """
+    Refresh the user's GitLab access token using their refresh token.
+
+    Args:
+        user_id: User ID
+
+    Returns:
+        Dictionary with new access_token and refresh_token, or None if refresh fails
+    """
+    import httpx
+    from dotenv import load_dotenv
+    load_dotenv()
+
+    try:
+        user = await get_user(user_id)
+        if not user:
+            print(f"[WARN] User {user_id} not found when refreshing GitLab token")
+            return None
+
+        gitlab_config = user.get("gitlab", {})
+        if not gitlab_config.get("connected", False):
+            print(f"[WARN] GitLab not connected for user {user_id}")
+            return None
+
+        encrypted_refresh_token = gitlab_config.get("refresh_token_encrypted", "")
+        if not encrypted_refresh_token:
+            print(f"[WARN] No GitLab refresh token found for user {user_id}")
+            return None
+
+        refresh_token = decrypt_value(encrypted_refresh_token)
+        if not refresh_token or refresh_token == encrypted_refresh_token:
+            print(f"[WARN] GitLab refresh token decryption failed for user {user_id}")
+            return None
+
+        # Get OAuth credentials
+        client_id = os.getenv("GITLAB_CLIENT_ID", "")
+        client_secret = os.getenv("GITLAB_CLIENT_SECRET", "")
+        redirect_uri = os.getenv("GITLAB_REDIRECT_URI", "")
+        gitlab_base_url = os.getenv("GITLAB_BASE_URL", "https://gitlab.com")
+
+        if not client_id or not client_secret:
+            print(f"[ERROR] GitLab OAuth credentials not configured")
+            return None
+
+        # Refresh the token
+        print(f"[INFO] Refreshing GitLab token for user {user_id}...")
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{gitlab_base_url}/oauth/token",
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "redirect_uri": redirect_uri
+                },
+                headers={"Accept": "application/json"}
+            )
+
+            if response.status_code != 200:
+                print(f"[ERROR] GitLab token refresh failed: {response.text}")
+                return None
+
+            token_data = response.json()
+
+            # Update user's tokens in MongoDB
+            new_access_token = token_data.get("access_token")
+            new_refresh_token = token_data.get("refresh_token", refresh_token)  # Use old refresh token if not returned
+
+            updates = {
+                "gitlab.access_token_encrypted": encrypt_value(new_access_token),
+                "gitlab.refresh_token_encrypted": encrypt_value(new_refresh_token),
+                "gitlab.last_used": datetime.utcnow()
+            }
+
+            await update_user(user_id, updates)
+            print(f"[OK] GitLab token refreshed successfully for user {user_id}")
+
+            return {
+                "access_token": new_access_token,
+                "refresh_token": new_refresh_token
+            }
+
+    except Exception as e:
+        print(f"[ERROR] Failed to refresh GitLab token for user {user_id}: {e}")
+        return None
+
+
 # ============================================================================
 # Policy Settings Operations
 # ============================================================================

@@ -7,6 +7,8 @@ import {
 import { QueryClientProvider } from "@tanstack/react-query";
 import { AuthProvider, ProtectedRoute } from "./contexts/AuthContext";
 import { queryClient } from "./services/queryClient";
+import { ToastContainer } from "react-toastify";
+import "react-toastify/dist/ReactToastify.css";
 import Login from "./pages/Login";
 import AuthCallback from "./pages/AuthCallback";
 import Dashboard from "./pages/Dashboard";
@@ -82,6 +84,18 @@ function App() {
             </Route>
           </Routes>
         </Router>
+        <ToastContainer
+          position="top-right"
+          autoClose={5000}
+          hideProgressBar={false}
+          newestOnTop={false}
+          closeOnClick
+          rtl={false}
+          pauseOnFocusLoss
+          draggable
+          pauseOnHover
+          theme="light"
+        />
       </AuthProvider>
     </QueryClientProvider>
   );

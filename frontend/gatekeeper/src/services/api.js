@@ -7,9 +7,10 @@
 
 // In development with Vite proxy, use empty string for relative URLs
 // In production, use the full API URL
-const API_BASE_URL = import.meta.env.MODE === 'production'
-  ? import.meta.env.VITE_API_URL || "http://localhost:8000"
-  : "";
+const API_BASE_URL =
+  import.meta.env.MODE === "production"
+    ? import.meta.env.VITE_API_URL || "http://localhost:8000"
+    : "";
 
 /**
  * Generic API wrapper that handles authentication and errors
@@ -47,7 +48,9 @@ async function apiRequest(endpoint, options = {}) {
     // Handle other errors
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.detail || errorData.message || "Request failed");
+      throw new Error(
+        errorData.detail || errorData.message || "Request failed",
+      );
     }
 
     return await response.json();
@@ -68,14 +71,12 @@ export const api = {
   /**
    * Get OAuth configuration status
    */
-  getAuthConfig: () =>
-    apiRequest("/api/auth/config"),
+  getAuthConfig: () => apiRequest("/api/auth/config"),
 
   /**
    * Initiate GitLab OAuth flow
    */
-  initiateGitLabOAuth: () =>
-    apiRequest("/api/auth/gitlab", { method: "POST" }),
+  initiateGitLabOAuth: () => apiRequest("/api/auth/gitlab", { method: "POST" }),
 
   /**
    * Handle OAuth callback
@@ -119,20 +120,17 @@ export const api = {
   /**
    * Get repository details
    */
-  getRepository: (id) =>
-    apiRequest(`/api/repositories/${id}`),
+  getRepository: (id) => apiRequest(`/api/repositories/${id}`),
 
   /**
    * Get repository merge requests
    */
-  getRepositoryMRs: (id) =>
-    apiRequest(`/api/repositories/${id}/mrs`),
+  getRepositoryMRs: (id) => apiRequest(`/api/repositories/${id}/mrs`),
 
   /**
    * Get repository policies
    */
-  getRepositoryPolicies: (id) =>
-    apiRequest(`/api/repositories/${id}/policies`),
+  getRepositoryPolicies: (id) => apiRequest(`/api/repositories/${id}/policies`),
 
   /**
    * Search repositories
@@ -220,14 +218,12 @@ export const api = {
   /**
    * Get repository health stats
    */
-  getReposHealth: () =>
-    apiRequest("/api/dashboard/repos-health"),
+  getReposHealth: () => apiRequest("/api/dashboard/repos-health"),
 
   /**
    * Get global dashboard stats
    */
-  getDashboardStats: () =>
-    apiRequest("/api/dashboard/stats"),
+  getDashboardStats: () => apiRequest("/api/dashboard/stats"),
 
   // ============================================================================
   // Alerts
@@ -250,8 +246,7 @@ export const api = {
   /**
    * Dismiss/delete alert
    */
-  dismissAlert: (id) =>
-    apiRequest(`/api/alerts/${id}`, { method: "DELETE" }),
+  dismissAlert: (id) => apiRequest(`/api/alerts/${id}`, { method: "DELETE" }),
 
   /**
    * Mark all alerts as read
@@ -266,20 +261,17 @@ export const api = {
   /**
    * Get billing usage statistics
    */
-  getBillingUsage: () =>
-    apiRequest("/api/billing/usage"),
+  getBillingUsage: () => apiRequest("/api/billing/usage"),
 
   /**
    * Get Gemini cost breakdown
    */
-  getGeminiCosts: () =>
-    apiRequest("/api/billing/gemini-cost"),
+  getGeminiCosts: () => apiRequest("/api/billing/gemini-cost"),
 
   /**
    * Get invoice history
    */
-  getInvoices: () =>
-    apiRequest("/api/billing/invoices"),
+  getInvoices: () => apiRequest("/api/billing/invoices"),
 
   /**
    * Download invoice PDF
@@ -304,8 +296,7 @@ export const api = {
   /**
    * Get Gemini settings
    */
-  getGeminiSettings: () =>
-    apiRequest("/api/settings/gemini"),
+  getGeminiSettings: () => apiRequest("/api/settings/gemini"),
 
   /**
    * Update Gemini settings
@@ -328,8 +319,7 @@ export const api = {
   /**
    * Get global policy settings
    */
-  getPolicySettings: () =>
-    apiRequest("/api/settings/policies"),
+  getPolicySettings: () => apiRequest("/api/settings/policies"),
 
   /**
    * Update global policy settings
@@ -343,8 +333,7 @@ export const api = {
   /**
    * Get user profile
    */
-  getUserProfile: () =>
-    apiRequest("/api/user/profile"),
+  getUserProfile: () => apiRequest("/api/user/profile"),
 
   /**
    * Update user profile
@@ -365,7 +354,10 @@ export const api = {
   connectGitLab: (accessToken, instanceUrl) =>
     apiRequest("/api/integrations/gitlab", {
       method: "POST",
-      body: JSON.stringify({ access_token: accessToken, instance_url: instanceUrl }),
+      body: JSON.stringify({
+        access_token: accessToken,
+        instance_url: instanceUrl,
+      }),
     }),
 
   /**

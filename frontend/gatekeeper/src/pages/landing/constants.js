@@ -91,7 +91,7 @@ export const DASHBOARD_PREVIEW_CONTENT = {
 export const TICKER_CONTENT = {
   label: "Engineered with the best tools in the ecosystem",
   items: [
-    "React", "FastAPI", "MongoDB", "GitLab", "Gemini Pro", "GitNexus", "Python", "AES-256 Encryption", "MCP Protocol", 
+    "React", "FastAPI", "MongoDB", "GitLab", "Gemini Pro", "Python", "AES-256 Encryption", "MCP Protocol",
     "Motor", "Pydantic",
   ]
 };

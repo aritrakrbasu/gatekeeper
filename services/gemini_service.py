@@ -2,15 +2,20 @@ import os
 import asyncio
 import json
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Optional, Dict, List, Tuple
 from google import genai
 from google.genai import types
 from google.genai.errors import APIError
 from opentelemetry import trace, context
 from datetime import datetime
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
 
 # Default client for when no user config is available
 ai_client = genai.Client()
+
+# Timeout for MCP tool calls
+MCP_TIMEOUT = 30
 
 
 def create_user_client(api_token: str) -> genai.Client:
@@ -270,12 +275,7 @@ async def run_gemini_review(raw_diff_content: str, impact_context: str, user_con
 
     # Extract usage metadata from Gemini response
     try:
-        print(f"[DEBUG] response type: {type(response)}")
-        print(f"[DEBUG] response attributes: {dir(response)}")
         usage_metadata = getattr(response, 'usage_metadata', None)
-        print(f"[DEBUG] usage_metadata type: {type(usage_metadata)}")
-        if usage_metadata:
-            print(f"[DEBUG] usage_metadata attributes: {dir(usage_metadata)}")
 
         usage_data = {
             "input_tokens": getattr(usage_metadata, 'prompt_token_count', 0) if usage_metadata else 0,
@@ -283,7 +283,6 @@ async def run_gemini_review(raw_diff_content: str, impact_context: str, user_con
             "total_tokens": getattr(usage_metadata, 'total_token_count', 0) if usage_metadata else 0,
             "model_name": model
         }
-        print(f"[DEBUG] usage_data: {usage_data}")
     except Exception as metadata_err:
         print(f"[ERROR] Error extracting usage metadata: {metadata_err}")
         import traceback
@@ -305,7 +304,6 @@ async def run_gemini_review(raw_diff_content: str, impact_context: str, user_con
 
     try:
         review_text = response.text
-        print(f"[DEBUG] review_text length: {len(review_text)}")
     except Exception as text_err:
         print(f"[ERROR] Error accessing response.text: {text_err}")
         import traceback
@@ -317,6 +315,479 @@ async def run_gemini_review(raw_diff_content: str, impact_context: str, user_con
         "usage": usage_data,
         "trace_id": current_trace_id,
         "span_id": llm_span_id  # Include LLM span ID for Arize annotations
+    }
+
+
+def convert_mcp_tools_to_gemini(mcp_tools) -> types.Tool:
+    """
+    Convert MCP tool schemas to Gemini native Tool format using the proper SDK types.
+    Removes the 'repo' parameter so it can be injected automatically based on the project.
+    """
+    function_declarations = []
+
+    for tool in mcp_tools:
+        # MCP tools use standard JSON Schema in inputSchema
+        schema = getattr(tool, 'inputSchema', {})
+        if hasattr(schema, 'model_dump'):
+            schema = schema.model_dump()
+        elif not isinstance(schema, dict):
+            schema = dict(schema)
+
+        properties = schema.get('properties', {})
+        required = schema.get('required', [])
+
+        # Remove 'repo' parameter - we'll inject it automatically
+        # This prevents Gemini from choosing the wrong repo
+        properties = {k: v for k, v in properties.items() if k != 'repo'}
+        required = [r for r in required if r != 'repo']
+
+        # Map properties cleanly using types.Schema objects
+        param_properties = {}
+        for prop_name, prop_def in properties.items():
+            param_properties[prop_name] = convert_mcp_property_to_gemini(prop_def)
+
+        # Build the exact parameters definition
+        parameters = types.Schema(
+            type="OBJECT",
+            properties=param_properties if param_properties else None,
+            required=required if required else None
+        )
+
+        # Create native FunctionDeclaration object
+        function_declarations.append(
+            types.FunctionDeclaration(
+                name=tool.name,
+                description=tool.description,
+                parameters=parameters
+            )
+        )
+
+    return types.Tool(function_declarations=function_declarations)
+
+
+def convert_mcp_property_to_gemini(prop_def: dict) -> types.Schema:
+    """
+    Recursively convert an MCP parameter property into a Gemini types.Schema object.
+    """
+    if not isinstance(prop_def, dict):
+        prop_def = dict(prop_def)
+
+    prop_type = prop_def.get('type', 'string').upper()
+    description = prop_def.get('description')
+
+    # Handle Arrays
+    if prop_type == 'ARRAY':
+        items_def = prop_def.get('items', {"type": "string"})
+        return types.Schema(
+            type="ARRAY",
+            description=description,
+            items=convert_mcp_property_to_gemini(items_def)
+        )
+
+    # Handle Objects
+    if prop_type == 'OBJECT':
+        nested_properties = prop_def.get('properties', {})
+        nested_required = prop_def.get('required', [])
+
+        mapped_nested = {
+            k: convert_mcp_property_to_gemini(v)
+            for k, v in nested_properties.items()
+        }
+
+        return types.Schema(
+            type="OBJECT",
+            description=description,
+            properties=mapped_nested,
+            required=nested_required if nested_required else None
+        )
+
+    # Handle baseline types (STRING, INTEGER, NUMBER, BOOLEAN)
+    if prop_type in ['NUMBER', 'FLOAT']:
+        gemini_type = "NUMBER"
+    elif prop_type in ['INTEGER', 'INT']:
+        gemini_type = "INTEGER"
+    elif prop_type == 'BOOLEAN':
+        gemini_type = "BOOLEAN"
+    else:
+        gemini_type = "STRING"
+
+    return types.Schema(
+        type=gemini_type,
+        description=description
+    )
+
+
+def map_json_type_to_gemini(json_type: str) -> str:
+    """Map JSON Schema types to Gemini types. (Deprecated - use convert_mcp_property_to_gemini)"""
+    type_map = {
+        "string": "string",
+        "integer": "integer",
+        "number": "number",
+        "boolean": "boolean",
+        "array": "array",
+        "object": "object"
+    }
+    return type_map.get(json_type, "string")
+
+
+async def run_gemini_review_with_gitnexus(
+    raw_diff_content: str,
+    impact_context: str,
+    repo_path: Optional[Path] = None,
+    repo_name: Optional[str] = None,
+    user_config: Dict = None,
+    user_id: str = None,
+    mr_id: str = None,
+    repository_id: str = None
+) -> dict:
+    """
+    Sends MR diff to Gemini with GitNexus MCP tools for dynamic impact analysis.
+
+    This function spawns GitNexus as an MCP server and passes its tools to Gemini,
+    allowing Gemini to call GitNexus tools (impact, detect_changes, context, query)
+    dynamically when needed during the review.
+
+    Args:
+        raw_diff_content: The code diff to review
+        impact_context: Impact analysis context
+        repo_path: Path to the git repository
+        repo_name: GitNexus repository name (required when multiple repos indexed)
+        user_config: Optional dict with user's Gemini config (api_token, model)
+        user_id: Optional user ID for usage tracking and Arize tracing
+        mr_id: Optional MR ID for trace attribution
+        repository_id: Optional repository ID for trace attribution
+
+    Returns:
+        dict with "review_text" (str), "usage" (dict), and "tools_called" (list)
+    """
+    system_instruction = load_prompt("senior_pr_reviewer")
+
+    review_prompt = f"""Review this raw pull request diff change stream:
+
+{raw_diff_content}
+
+{impact_context}
+
+You have access to GitNexus tools for advanced code intelligence:
+- impact: Analyze blast radius and dependencies
+- detect_changes: Map changed lines to affected processes
+- context: Get 360-degree symbol view
+- query: Search the codebase
+
+Use these tools when you need more context about dependencies, call chains,
+or the broader impact of the changes.
+
+CRITICAL INSTRUCTION FOR THIS REVIEW:
+Look closely at the diff. If any exported identifiers or configuration objects are renamed or modified, you MUST use the `query` or `impact` (downstream) tools to verify if references in other files (e.g., frontend entry points, `main.js`, etc.) are now broken. Do not output your final review until you have confirmed whether or not this change breaks other parts of the codebase.
+"""
+
+    # Get tracer for creating manual span
+    tracer = trace.get_tracer(__name__)
+
+    # Use OpenTelemetry baggage to propagate attributes
+    from opentelemetry.baggage import set_baggage
+    from opentelemetry.context import Context
+
+    # Create baggage with our custom attributes
+    ctx = Context()
+    if user_id:
+        ctx = set_baggage("user.id", str(user_id), context=ctx)
+    if mr_id:
+        ctx = set_baggage("mr.id", str(mr_id), context=ctx)
+    if repository_id:
+        ctx = set_baggage("repository.id", str(repository_id), context=ctx)
+    ctx = set_baggage("operation.type", "review", context=ctx)
+
+    token = context.attach(ctx)
+    current_trace_id = None
+    llm_span_id = None
+
+    # Track aggregated metrics across multi-turn tool loops
+    total_input_tokens = 0
+    total_output_tokens = 0
+    review_text = ""
+    tools_called = []
+
+    # Use user's config if provided, otherwise use defaults
+    client = ai_client
+    model = 'gemini-2.5-pro'  # Use Pro for structural dependency reasoning
+
+    if user_config:
+        api_token = user_config.get("api_token")
+        model = user_config.get("model", "gemini-2.5-pro")
+        if api_token:
+            client = create_user_client(api_token)
+            print(f"[INFO] Using user's Gemini API with model: {model}")
+        else:
+            print(f"[WARN] User config provided but no API token, using defaults")
+    else:
+        print(f"[WARN] No user config provided, using default Gemini client")
+
+    # Set repo path - use current directory if not specified
+    if repo_path is None:
+        repo_path = Path.cwd()
+
+    try:
+        with tracer.start_as_current_span("gemini_review_with_gitnexus") as parent_span:
+            if user_id: parent_span.set_attribute("user.id", str(user_id))
+            if mr_id: parent_span.set_attribute("mr.id", str(mr_id))
+            if repository_id: parent_span.set_attribute("repository.id", str(repository_id))
+            parent_span.set_attribute("operation.type", "review")
+
+            print(f"[INFO] Initializing GitNexus MCP integration...")
+
+            # Save current directory and change to repo directory
+            # GitNexus MCP needs to run from within the repository
+            original_cwd = os.getcwd()
+            repo_dir = str(repo_path)
+            os.chdir(repo_dir)
+            print(f"[INFO] Changed working directory to: {repo_dir}")
+
+            mcp_directory_restored = False
+
+            try:
+                # 1. Spawning GitNexus Subprocess Context via Stdio Transport
+                # GitNexus needs to be run with the 'mcp' subcommand
+                server_params = StdioServerParameters(
+                    command="gitnexus",
+                    args=["mcp"],
+                    env={**os.environ}
+                )
+
+                async with stdio_client(server_params) as (read, write):
+                    async with ClientSession(read, write) as mcp_session:
+                        await mcp_session.initialize()
+
+                        # 2. Extract tools manifest from GitNexus
+                        gitnexus_manifest = await mcp_session.list_tools()
+                        print(f"[INFO] GitNexus tools available: {len(gitnexus_manifest.tools)}")
+
+                        # 3. Convert to Gemini's Function Declarations format
+                        gemini_tools = [convert_mcp_tools_to_gemini(gitnexus_manifest.tools)]
+
+                        # 4. Construct Agent Conversation History
+                        history = [
+                            types.Content(role="user", parts=[types.Part.from_text(text=review_prompt)])
+                        ]
+
+                        # 5. Continuous Agent Iteration Loop
+                        max_iterations = 15
+                        iteration = 0
+
+                        while iteration < max_iterations:
+                            iteration += 1
+
+                            response = await call_gemini_with_retry(
+                                client.models.generate_content,
+                                model=model,
+                                contents=history,
+                                config=types.GenerateContentConfig(
+                                    system_instruction=system_instruction,
+                                    tools=gemini_tools,
+                                    temperature=0.1
+                                )
+                            )
+
+                            # Parse and accumulate usage metrics
+                            usage_metadata = getattr(response, 'usage_metadata', None)
+                            if usage_metadata:
+                                total_input_tokens += getattr(usage_metadata, 'prompt_token_count', 0)
+                                total_output_tokens += getattr(usage_metadata, 'candidates_token_count', 0)
+
+                            # Record model output
+                            model_content = response.candidates[0].content
+                            history.append(model_content)
+
+                            # Capture current span context
+                            current_span = trace.get_current_span()
+                            if current_span and current_span.is_recording():
+                                span_context = current_span.get_span_context()
+                                llm_span_id = format(span_context.span_id, 'x')
+
+                                if user_id: current_span.set_attribute("user.id", str(user_id))
+                                if mr_id: current_span.set_attribute("mr.id", str(mr_id))
+                                if repository_id: current_span.set_attribute("repository.id", str(repository_id))
+                                current_span.set_attribute("operation.type", "review")
+
+                            # Check for function call - iterate through all parts
+                            func_call = None
+                            for part in model_content.parts:
+                                if hasattr(part, 'function_call') and part.function_call:
+                                    func_call = part.function_call
+                                    break
+
+                            if func_call:
+                                print(f"[INFO] Gemini calling GitNexus tool: {func_call.name}")
+
+                                tools_called.append(func_call.name)
+
+                                # Inject repo parameter automatically - don't let Gemini choose
+                                tool_args = dict(func_call.args)
+                                if repo_name:
+                                    # Tools that support repo parameter
+                                    repo_supported_tools = {
+                                        'impact', 'context', 'query', 'detect_changes',
+                                        'cypher', 'route_map', 'tool_map', 'shape_check', 'api_impact'
+                                    }
+                                    if func_call.name in repo_supported_tools:
+                                        tool_args['repo'] = repo_name
+                                        print(f"[INFO] Auto-injected repo='{repo_name}' into {func_call.name} call")
+                                elif func_call.name in repo_supported_tools:
+                                    print(f"[WARN] GitNexus tool {func_call.name} needs repo but none provided!")
+
+                                # Execute via MCP
+                                try:
+                                    mcp_output = await asyncio.wait_for(
+                                        mcp_session.call_tool(
+                                            name=func_call.name,
+                                            arguments=tool_args
+                                        ),
+                                        timeout=MCP_TIMEOUT
+                                    )
+
+                                    # Extract text from result
+                                    tool_result_text = "".join([
+                                        block.text for block in mcp_output.content
+                                        if hasattr(block, 'text')
+                                    ])
+
+                                    print(f"[INFO] Tool result: {len(tool_result_text)} chars")
+
+                                    # Feed back to Gemini
+                                    tool_response = types.Content(
+                                        role="tool",
+                                        parts=[types.Part.from_function_response(
+                                            name=func_call.name,
+                                            response={"result": tool_result_text}
+                                        )]
+                                    )
+                                    history.append(tool_response)
+
+                                except asyncio.TimeoutError:
+                                    error_msg = f"Tool call timed out after {MCP_TIMEOUT}s"
+                                    print(f"[WARN] {error_msg}")
+                                    history.append(types.Content(
+                                        role="tool",
+                                        parts=[types.Part.from_function_response(
+                                            name=func_call.name,
+                                            response={"error": error_msg}
+                                        )]
+                                    ))
+                                    # Continue to final response
+                                    try:
+                                        review_text = response.text
+                                    except:
+                                        review_text = "Error: Tool timeout during review"
+                                    break
+                                except Exception as e:
+                                    error_msg = f"Tool call failed: {str(e)}"
+                                    print(f"[WARN] {error_msg}")
+                                    history.append(types.Content(
+                                        role="tool",
+                                        parts=[types.Part.from_function_response(
+                                            name=func_call.name,
+                                            response={"error": error_msg}
+                                        )]
+                                    ))
+                                    # Continue to final response
+                                    try:
+                                        review_text = response.text
+                                    except:
+                                        review_text = f"Error: {error_msg}"
+                                    break
+                            else:
+                                # No more tool calls - get final response
+                                try:
+                                    review_text = response.text
+                                except Exception as text_err:
+                                    print(f"[ERROR] Error accessing final response.text: {text_err}")
+                                    review_text = "Error: Could not extract final review text"
+                                break
+
+                        if iteration >= max_iterations:
+                            print(f"[WARN] Reached max iterations ({max_iterations})")
+
+                # Restore original working directory after MCP operations complete
+                os.chdir(original_cwd)
+                mcp_directory_restored = True
+                print(f"[INFO] Restored working directory to: {original_cwd}")
+
+            finally:
+                # Ensure directory is restored even if an error occurred
+                if not mcp_directory_restored:
+                    try:
+                        os.chdir(original_cwd)
+                        print(f"[INFO] Restored working directory in finally block: {original_cwd}")
+                    except Exception as restore_err:
+                        print(f"[ERROR] Failed to restore working directory: {restore_err}")
+
+            # Capture trace_id while span context is still attached
+            from ai_observability.trace_utils import get_current_trace_id
+            current_trace_id = get_current_trace_id()
+            if current_trace_id:
+                print(f"[INFO] Captured trace_id for MR {mr_id}: {current_trace_id[:16]}...")
+            else:
+                print(f"[WARN] No active trace found during review")
+
+    except Exception as e:
+        print(f"[ERROR] GitNexus integration failed: {e}")
+        import traceback
+        traceback.print_exc()
+
+        # Fallback to basic review without tools
+        print(f"[INFO] Falling back to basic review without GitNexus tools")
+        try:
+            response = await call_gemini_with_retry(
+                client.models.generate_content,
+                model=model,
+                contents=review_prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_instruction,
+                    temperature=0.1
+                )
+            )
+
+            usage_metadata = getattr(response, 'usage_metadata', None)
+            if usage_metadata:
+                total_input_tokens = getattr(usage_metadata, 'prompt_token_count', 0)
+                total_output_tokens = getattr(usage_metadata, 'candidates_token_count', 0)
+
+            review_text = response.text
+        except Exception as fallback_err:
+            print(f"[ERROR] Fallback review also failed: {fallback_err}")
+            review_text = f"Error: Review failed - {str(e)}"
+
+    finally:
+        context.detach(token)
+
+    # 6. Map Total Unified Metrics
+    usage_data = {
+        "input_tokens": total_input_tokens,
+        "output_tokens": total_output_tokens,
+        "total_tokens": total_input_tokens + total_output_tokens,
+        "model_name": model
+    }
+
+    # Track overall usage directly to MongoDB
+    if user_id and usage_data.get("total_tokens", 0) > 0:
+        await track_llm_usage(
+            user_id=user_id,
+            model_name=model,
+            input_tokens=usage_data.get("input_tokens", 0),
+            output_tokens=usage_data.get("output_tokens", 0),
+            total_tokens=usage_data.get("total_tokens", 0),
+            operation_type="review",
+            mr_id=mr_id,
+            repository_id=repository_id,
+            trace_id=current_trace_id
+        )
+
+    return {
+        "review_text": review_text,
+        "usage": usage_data,
+        "trace_id": current_trace_id,
+        "span_id": llm_span_id,
+        "tools_called": tools_called
     }
 
 
@@ -457,9 +928,6 @@ async def run_gemini_fix_analysis(audit_report: str, patch_summary: str, schema_
     # Extract usage metadata from Gemini response
     try:
         usage_metadata = getattr(fix_analysis, 'usage_metadata', None)
-        print(f"[DEBUG] usage_metadata type: {type(usage_metadata)}")
-        if usage_metadata:
-            print(f"[DEBUG] usage_metadata attributes: {dir(usage_metadata)}")
 
         usage_data = {
             "input_tokens": getattr(usage_metadata, 'prompt_token_count', 0) if usage_metadata else 0,
@@ -467,7 +935,6 @@ async def run_gemini_fix_analysis(audit_report: str, patch_summary: str, schema_
             "total_tokens": getattr(usage_metadata, 'total_token_count', 0) if usage_metadata else 0,
             "model_name": model
         }
-        print(f"[DEBUG] usage_data: {usage_data}")
     except Exception as metadata_err:
         print(f"[ERROR] Error extracting usage metadata: {metadata_err}")
         import traceback
@@ -488,10 +955,7 @@ async def run_gemini_fix_analysis(audit_report: str, patch_summary: str, schema_
         )
 
     try:
-        print(f"[DEBUG] fix_analysis type: {type(fix_analysis)}")
-        print(f"[DEBUG] fix_analysis attributes: {dir(fix_analysis)}")
         response_text = fix_analysis.text.strip()
-        print(f"[DEBUG] response_text length: {len(response_text)}")
         if response_text.startswith("```"):
             response_text = response_text.split("```")[1]
             if response_text.startswith("json"):

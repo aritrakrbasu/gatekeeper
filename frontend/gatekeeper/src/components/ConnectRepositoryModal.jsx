@@ -240,7 +240,7 @@ const ConnectRepositoryModal = ({ isOpen, onClose, onConnect }) => {
         }
       });
 
-      await onboardMutation.mutateAsync({
+      const onboardResponse = await onboardMutation.mutateAsync({
         repoId: selectedRepo.id,
         data: {
           mongodb_uri: mongodbUri,
@@ -252,8 +252,26 @@ const ConnectRepositoryModal = ({ isOpen, onClose, onConnect }) => {
         },
       });
 
+      // Now call the connect callback (which creates webhook and project token)
+      // and wait for it to complete to check for project token errors
+      let connectResponse = null;
+      try {
+        await onConnect?.(selectedRepo, selectedBranches);
+        // Note: onConnect doesn't return the response directly in current implementation
+        // We need to check if there was an error
+      } catch (connectErr) {
+        console.error("Connect failed:", connectErr);
+        setOnboardingError(
+          `Failed to complete connection: ${connectErr.message || "Unknown error"}`
+        );
+        return; // Don't close modal on connect failure
+      }
+
       setConnectedIds(new Set([...connectedIds, selectedRepo.id]));
-      onConnect && onConnect(selectedRepo, selectedBranches);
+
+      // For now, close the modal since onboarding+connect succeeded
+      // The project token warning would need to be handled differently
+      // since we don't have access to the connect response here
       handleClose();
     } catch (err) {
       console.error("Onboarding failed:", err);

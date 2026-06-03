@@ -26,5 +26,12 @@
     "branch": "main",
     "private_token": null,
     "auto_update": true
+  },
+  "82733194": {
+    "project_id": "82733194",
+    "gitlab_url": "https://gitlab.com/gatekeeper-group1/gitnexus-demo.git",
+    "branch": "main",
+    "private_token": null,
+    "auto_update": true
   }
 }

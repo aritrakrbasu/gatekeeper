@@ -73,7 +73,6 @@ class EvaluationStore:
         }
 
         self._current_batch.append(evaluation)
-        logger.debug(f"[DEBUG] Stored evaluation: {eval_name} = {score} for span {span_id[:12]}...")
 
     def save_batch(self, batch_name: Optional[str] = None) -> Path:
         """

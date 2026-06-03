@@ -636,16 +636,12 @@ Return only the number, nothing else.
                         logger.warning(f"[⚠️] Evaluation export had issues - check logs for details")
 
             except ImportError:
-                logger.debug("[DEBUG] Phoenix evaluation exporter not available")
+                pass  # Phoenix evaluation exporter not available
             except Exception as export_err:
                 logger.warning(f"[⚠️] Failed to export formal evaluations to Phoenix: {export_err}")
-                import traceback
-                logger.debug(f"[DEBUG] Export error traceback: {traceback.format_exc()}")
 
         except Exception as e:
             logger.warning(f"[⚠️] Failed to log evaluation to Phoenix: {e}")
-            import traceback
-            logger.debug(f"[DEBUG] Full traceback: {traceback.format_exc()}")
 
     def format_evaluation_markdown(self, evaluation_result: Dict[str, Any]) -> str:
         """
