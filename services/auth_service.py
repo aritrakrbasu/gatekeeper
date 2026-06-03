@@ -410,6 +410,47 @@ def verify_token(token: str) -> Dict:
     return user_info
 
 
+def verify_token_without_session(token: str) -> Dict:
+    """
+    Verify a JWT access token without requiring an active session.
+    Used for WebSocket connections where we just need to validate the token signature.
+
+    Args:
+        token: JWT access token
+
+    Returns:
+        Dictionary with user information from token payload if token is valid
+
+    Raises:
+        HTTPException: If token is invalid
+    """
+    payload = decode_jwt_token(token)
+
+    # Check if it's an access token
+    if payload.get("type") != "access":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token type"
+        )
+
+    # Get user ID from token
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token payload"
+        )
+
+    # Return user info from token payload (no session check required)
+    return {
+        "id": user_id,
+        "username": payload.get("username", ""),
+        "name": payload.get("name", ""),
+        "email": payload.get("email", ""),
+        "avatar_url": payload.get("avatar_url", "")
+    }
+
+
 # ============================================================================
 # Session Management
 # ============================================================================

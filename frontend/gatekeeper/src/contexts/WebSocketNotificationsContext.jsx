@@ -208,6 +208,14 @@ export const WebSocketNotificationsProvider = ({ children }) => {
         toast.success("📬 New MR Created", toastifyOptions);
         break;
 
+      case "mr_closed":
+        toast.info("🔒 MR Closed", toastifyOptions);
+        break;
+
+      case "mr_merged":
+        toast.success("🎉 MR Merged", toastifyOptions);
+        break;
+
       case "analysis_started":
         toast.info("🤖 AI Analysis Started", toastifyOptions);
         break;

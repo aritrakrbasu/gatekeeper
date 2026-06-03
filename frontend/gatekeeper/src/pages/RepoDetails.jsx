@@ -575,6 +575,12 @@ const RepoDetails = () => {
                                 Reviewed
                               </span>
                             )}
+                            {statusDisplay === "Closed" && (
+                              <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide bg-slate-100/80 text-slate-500 border border-slate-200">
+                                <span className="w-1.5 h-1.5 rounded-full bg-slate-400"></span>{" "}
+                                Closed
+                              </span>
+                            )}
                             {statusDisplay === "Merged" && (
                               <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide bg-purple-50 text-purple-600 border border-purple-100">
                                 <span className="w-1.5 h-1.5 rounded-full bg-purple-500"></span>{" "}
@@ -669,6 +675,12 @@ const RepoDetails = () => {
                                       <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider bg-slate-800 text-slate-300 border border-slate-700">
                                         <span className="w-1.5 h-1.5 rounded-full bg-slate-500"></span>{" "}
                                         Open
+                                      </span>
+                                    )}
+                                    {autoFixStatusDisplay === "Closed" && (
+                                      <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider bg-slate-800/50 text-slate-400 border border-slate-700">
+                                        <span className="w-1.5 h-1.5 rounded-full bg-slate-500"></span>{" "}
+                                        Closed
                                       </span>
                                     )}
                                     {autoFixStatusDisplay === "Merged" && (
@@ -1598,6 +1610,12 @@ const RepoDetails = () => {
                   <span className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold uppercase tracking-wide bg-purple-100/80 text-purple-700 border border-purple-200">
                     <span className="w-1.5 h-1.5 rounded-full bg-purple-500"></span>{" "}
                     Merged
+                  </span>
+                ) : selectedMR.status === "Closed" ||
+                  selectedMR.status === "closed" ? (
+                  <span className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold uppercase tracking-wide bg-slate-100/80 text-slate-600 border border-slate-200">
+                    <span className="w-1.5 h-1.5 rounded-full bg-slate-400"></span>{" "}
+                    Closed
                   </span>
                 ) : (
                   <span className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold uppercase tracking-wide bg-slate-100/80 text-slate-700 border border-slate-200">

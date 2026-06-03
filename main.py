@@ -174,21 +174,91 @@ async def gitlab_webhook(request: Request, x_gitlab_event: str = Header(None)):
     print(f"[DEBUG] MCP ready: {mcp_service.mcp_ready}", flush=True)
     print(f"[DEBUG] GitLab session: {mcp_service.gitlab_session is not None}", flush=True)
 
-    # Check if MCP sessions are ready
-    if not mcp_service.mcp_ready or not mcp_service.gitlab_session:
-        print("[⚠️] MCP sessions not ready yet - cannot process webhook")
-        print("[ℹ️] Please wait a few seconds for the MCP bridge to initialize")
-        return {"status": "mcp_not_ready", "message": "MCP sessions still initializing. Please retry in a few seconds."}
-
     payload = await request.json()
 
     # 1. Handle GitLab Merge Request Event
     if x_gitlab_event == "Merge Request Hook":
+        object_attrs = payload.get("object_attributes", {})
+        state = object_attrs.get("state")
+        action = object_attrs.get("action")
+
+        print(f"[DEBUG] MR state: {state}, action: {action}", flush=True)
+
+        # Handle MR close/merge events - update status in MongoDB
+        if state in ("closed", "merged") or action in ("close", "merge"):
+            project_id = payload.get("project", {}).get("id")
+            mr_iid = object_attrs.get("iid")
+
+            if state == "merged":
+                new_status = "merged"
+                action_type = "merged"
+            elif state == "closed":
+                new_status = "closed"
+                action_type = "closed"
+            elif action == "merge":
+                new_status = "merged"
+                action_type = "merged"
+            elif action == "close":
+                new_status = "closed"
+                action_type = "closed"
+            else:
+                new_status = state if state in ("closed", "merged") else "closed"
+                action_type = action
+
+            print(f"[INFO] MR {mr_iid} {action_type} - updating status in MongoDB for repo {project_id}", flush=True)
+
+            # Update MR status in MongoDB
+            update_result = await repository_service.update_mr_status_from_webhook(
+                repo_id=str(project_id),
+                mr_iid=int(mr_iid),
+                new_status=new_status,
+                action=action_type
+            )
+
+            # Broadcast WebSocket event to connected clients
+            try:
+                from services.websocket_manager import repository_manager
+                event_type = "mr_merged" if action_type == "merged" else "mr_closed"
+                await repository_manager.broadcast_event(
+                    repo_id=str(project_id),
+                    event={
+                        "type": "event",
+                        "event_type": event_type,
+                        "data": {
+                            "repository_id": str(project_id),
+                            "mr_iid": mr_iid,
+                            "title": object_attrs.get("title", ""),
+                            "action": action_type
+                        }
+                    }
+                )
+                print(f"[OK] Broadcasted {event_type} event for MR {mr_iid}")
+            except Exception as ws_err:
+                print(f"[WARN] Failed to broadcast WebSocket event: {ws_err}")
+
+            return {
+                "status": "mr_status_updated",
+                "action": action_type,
+                "mr_iid": mr_iid,
+                "repository_id": project_id,
+                "update_result": update_result
+            }
+
+        # Only proceed with MCP if sessions are ready (for opened MRs)
+        if not mcp_service.mcp_ready or not mcp_service.gitlab_session:
+            print("[⚠️] MCP sessions not ready yet - cannot process webhook")
+            print("[ℹ️] Please wait a few seconds for the MCP bridge to initialize")
+            return {"status": "mcp_not_ready", "message": "MCP sessions still initializing. Please retry in a few seconds."}
+
         return await review_service.orchestrate_review(payload)
 
     # 2. Handle Dynatrace Incident/Production Crash Event
     if not x_gitlab_event:
         if isinstance(payload, dict) and "problem_id" in payload:
+            # Check if MCP sessions are ready
+            if not mcp_service.mcp_ready or not mcp_service.gitlab_session:
+                print("[⚠️] MCP sessions not ready yet - cannot process webhook")
+                return {"status": "mcp_not_ready", "message": "MCP sessions still initializing."}
             return await incident_service.process_production_crash(payload)
 
     return {"status": "event_ignored", "event": x_gitlab_event}
@@ -473,7 +543,9 @@ async def websocket_progress_endpoint(
     try:
         # Remove "Bearer " prefix if present
         clean_token = token.replace("Bearer ", "") if token.startswith("Bearer ") else token
-        user_info = auth_service.verify_token(clean_token)
+        # Use verify_token_without_session to allow connections after server restart
+        user_info = auth_service.verify_token_without_session(clean_token)
+        print(f"[WS-Progress] User authenticated: {user_info.get('username')}")
     except Exception as e:
         print(f"[WS] Invalid token attempt: {e}")
         await websocket.close(code=1008, reason="Invalid token")
@@ -574,7 +646,9 @@ async def websocket_repository_events(
     try:
         # Remove "Bearer " prefix if present
         clean_token = token.replace("Bearer ", "") if token.startswith("Bearer ") else token
-        user_info = auth_service.verify_token(clean_token)
+        # Use verify_token_without_session to allow connections after server restart
+        user_info = auth_service.verify_token_without_session(clean_token)
+        print(f"[WS-Repo] User authenticated: {user_info.get('username')}")
     except Exception as e:
         print(f"[WS-Repo] Invalid token attempt: {e}")
         await websocket.close(code=1008, reason="Invalid token")

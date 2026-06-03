@@ -2169,6 +2169,111 @@ async def update_mr_analysis(
         return False
 
 
+async def update_mr_status_from_webhook(repo_id: str, mr_iid: int, new_status: str, action: str = "closed") -> Dict:
+    """
+    Update MR status in MongoDB when a close/merge webhook is received.
+
+    This function is called when GitLab sends a webhook for MR close or merge events.
+    If the MR exists in MongoDB for this repository, it will be marked accordingly.
+
+    Args:
+        repo_id: Repository ID (GitLab project ID)
+        mr_iid: Merge Request IID (GitLab MR number)
+        new_status: New status to set ("closed" or "merged")
+        action: Action that triggered this ("closed" or "merged")
+
+    Returns:
+        Dict with status of the update operation
+    """
+    try:
+        if not MONGO_CONNECTION_STRING:
+            print("[WARN] MongoDB not configured - cannot update MR status")
+            # Update in-memory cache
+            for mr in _merge_requests.get(repo_id, []):
+                if mr.get("gitlab_mr_id") == mr_iid:
+                    old_status = mr.get("status", "unknown")
+                    mr["status"] = new_status
+                    print(f"[OK] Updated MR {mr_iid} status in memory: {old_status} -> {new_status}")
+                    return {
+                        "status": "updated_memory",
+                        "mr_id": mr_iid,
+                        "old_status": old_status,
+                        "new_status": new_status,
+                        "action": action
+                    }
+            return {
+                "status": "not_found",
+                "mr_id": mr_iid,
+                "message": "MR not found in memory cache"
+            }
+
+        # Check if MR exists in MongoDB
+        existing_mr = await mongo_client.find_one(
+            collection_name=MRS_COLLECTION,
+            filter={
+                "repository_id": str(repo_id),
+                "gitlab_mr_id": int(mr_iid)
+            }
+        )
+
+        if not existing_mr:
+            print(f"[INFO] MR {mr_iid} not found in MongoDB for repo {repo_id} - skipping status update")
+            return {
+                "status": "not_found",
+                "mr_id": mr_iid,
+                "repository_id": repo_id,
+                "message": "MR not found in database - nothing to update"
+            }
+
+        old_status = existing_mr.get("status", "unknown")
+        print(f"[INFO] Updating MR {mr_iid} status from webhook: {old_status} -> {new_status} (action: {action})")
+
+        # Update MR status in MongoDB
+        result = await mongo_client.update_one(
+            collection_name=MRS_COLLECTION,
+            filter={
+                "repository_id": str(repo_id),
+                "gitlab_mr_id": int(mr_iid)
+            },
+            update={
+                "$set": {
+                    "status": new_status,
+                    "updated_at": datetime.now().isoformat(),
+                    "action": action,
+                    "actioned_at": datetime.now().isoformat()
+                }
+            }
+        )
+
+        if result:
+            print(f"[OK] Updated MR {mr_iid} status in MongoDB: {old_status} -> {new_status}")
+            return {
+                "status": "updated",
+                "mr_id": mr_iid,
+                "repository_id": repo_id,
+                "old_status": old_status,
+                "new_status": new_status,
+                "action": action
+            }
+        else:
+            print(f"[WARN] Failed to update MR {mr_iid} status in MongoDB")
+            return {
+                "status": "failed",
+                "mr_id": mr_iid,
+                "message": "Failed to update status in MongoDB"
+            }
+
+    except Exception as e:
+        print(f"[ERROR] Failed to update MR status from webhook: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "status": "error",
+            "mr_id": mr_iid,
+            "error": str(e)
+        }
+
+
 def is_config_file(filepath: str) -> bool:
     filename = os.path.basename(filepath).lower()
     
