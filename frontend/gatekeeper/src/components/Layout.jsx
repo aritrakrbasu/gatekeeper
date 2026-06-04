@@ -229,7 +229,7 @@ const Layout = () => {
       {/* =========================================
           MAIN CONTENT AREA (Outlet renders here)
           ========================================= */}
-      <main className="h-full overflow-y-auto overflow-x-hidden md:pl-[19rem] w-full pt-24 md:pt-6 pb-28 md:pb-6 relative z-10">
+      <main className="h-full h-min-screen   overflow-y-auto overflow-x-hidden md:pl-[19rem] w-full pt-24 md:pt-6 pb-28 md:pb-6 relative z-10">
         <Outlet />
       </main>
 

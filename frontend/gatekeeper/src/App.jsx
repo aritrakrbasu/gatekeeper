@@ -15,6 +15,7 @@ import AuthCallback from "./pages/AuthCallback";
 import Dashboard from "./pages/Dashboard";
 import Repositories from "./pages/Repositories";
 import RepoDetails from "./pages/RepoDetails";
+import MRDetails from "./pages/MRDetails";
 import Layout from "./components/Layout";
 import Alerts from "./pages/Alerts";
 import Settings from "./pages/Settings";
@@ -56,6 +57,14 @@ function App() {
                   element={
                     <ProtectedRoute>
                       <RepoDetails />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/repositories/:repoId/mrs/:mrId"
+                  element={
+                    <ProtectedRoute>
+                      <MRDetails />
                     </ProtectedRoute>
                   }
                 />

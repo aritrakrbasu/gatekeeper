@@ -37,7 +37,8 @@ from api_models import (
     GeminiSettingsResponse, ValidateTokenRequest, ValidateTokenResponse,
     PolicySettingsResponse, UpdateGeminiSettingsRequest, UpdatePolicySettingsRequest,
     UpdateUserProfileRequest, IntegrationStatusResponse,
-    SyncRequest, BillingUsageResponse, InvoiceResponse
+    SyncRequest, BillingUsageResponse, InvoiceResponse,
+    RecentMRResponse
 )
 
 app = FastAPI(title="The Gatekeeper Gemini Orchestrator")
@@ -1128,6 +1129,40 @@ async def disconnect_gitlab_integration(authorization: str = Header(None)):
         raise e
     except Exception as e:
         print(f"[ERROR] Failed to disconnect GitLab integration: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Dashboard Endpoints
+# ============================================================================
+
+@app.get("/api/dashboard/recent-mrs")
+async def get_recent_mrs(
+    limit: int = Query(10, ge=1, le=50, description="Number of recent MRs to return"),
+    authorization: str = Header(None)
+):
+    """Get recent merge requests for the logged-in user's repositories."""
+    try:
+        if not authorization:
+            raise HTTPException(status_code=401, detail="Authorization required")
+
+        token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+        user_info = auth_service.verify_token(token)
+        user_id = user_info.get("id")
+
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        # Fetch recent MRs for user
+        mrs = await repository_service.get_recent_mrs_for_user(user_id, limit)
+
+        # Format response using RecentMRResponse model
+        return [RecentMRResponse(**mr) for mr in mrs]
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[ERROR] Failed to get recent MRs: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

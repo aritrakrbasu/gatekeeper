@@ -281,11 +281,20 @@ async def sync_user_billing_optimized(
         # Initialize in-memory aggregation structure with existing MR data for deduplication
         monthly_aggregates = {}
         for month_key, month_data in existing_months.items():
-            # Pre-populate with existing MR IDs so deduplication works during aggregation
+            # Pre-populate with existing MR IDs and metrics so deduplication and aggregation work
             monthly_aggregates[month_key] = {
+                "summary": month_data.get("summary", {
+                    "total_tokens": 0,
+                    "total_cost": 0.0,
+                    "mrs_count": 0
+                }),
+                "models": month_data.get("models", {}).copy(),
                 "mr_ids": month_data.get("mr_ids", []).copy(),
                 "days": {
                     day_key: {
+                        "tokens": day_data.get("tokens", 0),
+                        "cost": day_data.get("cost", 0.0),
+                        "mrs": day_data.get("mrs", 0),
                         "mr_ids": day_data.get("mr_ids", []).copy()
                     }
                     for day_key, day_data in month_data.get("days", {}).items()

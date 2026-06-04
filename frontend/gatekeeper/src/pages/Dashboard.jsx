@@ -8,6 +8,24 @@ import {
 } from "../services/queries";
 import ConnectRepositoryModal from "../components/ConnectRepositoryModal";
 
+// Helper function to format relative time
+const formatRelativeTime = (dateString) => {
+  if (!dateString) return "Unknown";
+  const date = new Date(dateString);
+  const now = new Date();
+  const diffMs = now - date;
+  const diffMins = Math.floor(diffMs / 60000);
+  const diffHours = Math.floor(diffMs / 3600000);
+  const diffDays = Math.floor(diffMs / 86400000);
+
+  if (diffMins < 1) return "Just now";
+  if (diffMins < 60) return `${diffMins}m ago`;
+  if (diffHours < 24) return `${diffHours}h ago`;
+  if (diffDays === 1) return "Yesterday";
+  if (diffDays < 7) return `${diffDays} days ago`;
+  return date.toLocaleDateString();
+};
+
 const Dashboard = () => {
   const navigate = useNavigate();
   const [showConnectModal, setShowConnectModal] = useState(false);
@@ -22,7 +40,7 @@ const Dashboard = () => {
   });
 
   // Use React Query hooks with automatic caching and refetching
-  const { data: recentMRs = [] } = useRecentMRs(10);
+  const { data: recentMRs = [] } = useRecentMRs(3);
   const { data: repositories = [] } = useRepositories({ limit: 5 });
 
   // Use React Query mutation for connecting repositories
@@ -249,63 +267,115 @@ const Dashboard = () => {
                 </p>
               </div>
             ) : (
-              // MRs list
-              <div className="space-y-3">
-                {recentMRs.map((mr, i) => (
-                  <div
-                    key={i}
-                    className="group p-4 rounded-2xl border border-white/60 bg-white/40 hover:bg-white/80 transition-all flex items-center justify-between cursor-pointer shadow-sm"
-                  >
-                    <div className="flex items-center gap-4">
-                      <div className="w-10 h-10 rounded-xl bg-white border border-slate-100 flex items-center justify-center shadow-sm">
-                        <svg
-                          className="w-5 h-5 text-slate-400 group-hover:text-[#FC6D26] transition-colors"
-                          fill="none"
-                          viewBox="0 0 24 24"
-                          stroke="currentColor"
-                        >
-                          <path
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            strokeWidth="2"
-                            d="M8 7v8a2 2 0 002 2h6M8 7V5a2 2 0 012-2h4.586a1 1 0 01.707.293l4.414 4.414a1 1 0 01.293.707V15a2 2 0 01-2 2h-2M8 7H6a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2v-2"
-                          />
-                        </svg>
+              // MRs list with improved styling
+              <div className="space-y-5">
+                {recentMRs.map((mr, i) => {
+                  // Map backend status to frontend display
+                  const getStatusDisplay = (status) => {
+                    switch (status) {
+                      case "open":
+                        return "Open";
+                      case "reviewing":
+                        return "Reviewing";
+                      case "reviewed":
+                        return "Reviewed";
+                      case "merged":
+                        return "Merged";
+                      case "closed":
+                        return "Closed";
+                      case "draft":
+                        return "Draft";
+                      case "failed":
+                        return "Failed";
+                      default:
+                        return "Open";
+                    }
+                  };
+
+                  const statusDisplay = getStatusDisplay(mr.status);
+
+                  return (
+                    <div
+                      key={i}
+                      className="group py-2 px-4 rounded-2xl bg-white border border-slate-100 hover:border-slate-200 hover:shadow-md transition-all duration-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4 cursor-pointer"
+                      onClick={() => window.open(mr.web_url, "_blank")}
+                    >
+                      <div className="flex items-start sm:items-center gap-4 min-w-0 flex-1">
+                        <div className="w-10 h-10 rounded-xl bg-slate-50 border border-slate-100 flex items-center justify-center shrink-0 group-hover:bg-slate-100 transition-colors">
+                          <svg
+                            className="w-5 h-5 text-slate-400 group-hover:text-slate-600 transition-colors"
+                            fill="none"
+                            viewBox="0 0 24 24"
+                            stroke="currentColor"
+                          >
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              strokeWidth="2"
+                              d="M8 7v8a2 2 0 002 2h6M8 7V5a2 2 0 012-2h4.586a1 1 0 01.707.293l4.414 4.414a1 1 0 01.293.707V15a2 2 0 01-2 2h-2M8 7H6a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2v-2"
+                            />
+                          </svg>
+                        </div>
+
+                        <div className="min-w-0 flex-1">
+                          <div className="text-sm font-bold text-slate-900 mb-1.5">
+                            <span className="truncate">{mr.title}</span>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-2 text-xs font-mono text-slate-500">
+                            <span
+                              className="bg-slate-100 px-1.5 py-0.5 rounded text-slate-600 border border-slate-200/60 truncate max-w-[140px]"
+                              title={mr.repository_name}
+                            >
+                              {mr.repository_name}
+                            </span>
+                          </div>
+                        </div>
                       </div>
-                      <div>
-                        <p className="text-sm font-semibold text-slate-900 mb-0.5">
-                          {mr.title}
-                        </p>
-                        <p className="text-xs text-slate-500">
-                          {mr.id} • {mr.repo}
-                        </p>
+
+                      <div className="flex flex-row sm:flex-col items-center sm:items-end justify-between sm:justify-center gap-2 ml-14 sm:ml-0 shrink-0">
+                        {statusDisplay === "Open" && (
+                          <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide bg-slate-100 text-slate-600 border border-slate-200">
+                            <span className="w-1.5 h-1.5 rounded-full bg-slate-400"></span>{" "}
+                            Open
+                          </span>
+                        )}
+                        {statusDisplay === "Reviewing" && (
+                          <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide bg-blue-50 text-blue-600 border border-blue-100">
+                            <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse"></span>{" "}
+                            Reviewing
+                          </span>
+                        )}
+                        {statusDisplay === "Reviewed" && (
+                          <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide bg-emerald-50 text-emerald-600 border border-emerald-100">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>{" "}
+                            Reviewed
+                          </span>
+                        )}
+                        {statusDisplay === "Closed" && (
+                          <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide bg-slate-100/80 text-slate-500 border border-slate-200">
+                            <span className="w-1.5 h-1.5 rounded-full bg-slate-400"></span>{" "}
+                            Closed
+                          </span>
+                        )}
+                        {statusDisplay === "Merged" && (
+                          <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide bg-purple-50 text-purple-600 border border-purple-100">
+                            <span className="w-1.5 h-1.5 rounded-full bg-purple-500"></span>{" "}
+                            Merged
+                          </span>
+                        )}
+                        {statusDisplay === "Draft" && (
+                          <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide bg-slate-50 text-slate-500 border border-slate-200">
+                            <span className="w-1.5 h-1.5 rounded-full bg-slate-300"></span>{" "}
+                            Draft
+                          </span>
+                        )}
+                        <span className="text-[10px] text-slate-400 font-medium whitespace-nowrap">
+                          #{mr.id} • {formatRelativeTime(mr.created_at)}
+                        </span>
                       </div>
                     </div>
-                    <div className="flex flex-col items-end gap-2">
-                      {mr.status === "Reviewing" && (
-                        <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide bg-blue-100/80 text-blue-700">
-                          <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-ping"></span>{" "}
-                          Reviewing
-                        </span>
-                      )}
-                      {mr.status === "Approved" && (
-                        <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide bg-emerald-100/80 text-emerald-700">
-                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>{" "}
-                          Approved
-                        </span>
-                      )}
-                      {mr.status === "Issues" && (
-                        <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide bg-rose-100/80 text-rose-700">
-                          <span className="w-1.5 h-1.5 rounded-full bg-rose-500"></span>{" "}
-                          Issues
-                        </span>
-                      )}
-                      <span className="text-[11px] text-slate-400 font-medium">
-                        {mr.time}
-                      </span>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>

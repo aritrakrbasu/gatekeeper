@@ -1543,7 +1543,7 @@ async def store_mr_in_mongodb(mr_data: Dict) -> str:
 
 async def get_repository_mrs_from_db(
     repo_id: str,
-    limit: int = 50,
+    limit: int = 5,
     status_filter: Optional[str] = None,
     user_id: Optional[str] = None
 ) -> List[Dict]:
@@ -1656,6 +1656,82 @@ async def get_repository_mrs_from_db(
     except Exception as e:
         print(f"[ERROR] Failed to fetch MRs from MongoDB: {e}")
         # Return empty list on error
+        return []
+
+
+async def get_recent_mrs_for_user(user_id: str, limit: int = 10) -> List[Dict]:
+    """
+    Get recent merge requests across all repositories for a user.
+
+    Fetches the latest merge requests from all repositories connected by the user,
+    sorted by creation date (newest first).
+
+    Args:
+        user_id: User ID to fetch repositories for
+        limit: Maximum number of MRs to return (default: 10, max: 50)
+
+    Returns:
+        List of merge requests formatted for the dashboard RecentMRResponse model
+    """
+    try:
+        # Get user's repositories
+        user_repos = await _get_user_repositories(user_id)
+
+        if not user_repos:
+            print(f"[INFO] No repositories found for user {user_id}")
+            return []
+
+        # Extract repository IDs
+        user_repo_ids = [str(repo.get("id", "")) for repo in user_repos if repo.get("id")]
+
+        if not user_repo_ids:
+            print(f"[INFO] No valid repository IDs found for user {user_id}")
+            return []
+
+        print(f"[INFO] Fetching recent MRs for user {user_id} across {len(user_repo_ids)} repositories")
+
+        # Fetch MRs from MongoDB using $in operator
+        if MONGO_CONNECTION_STRING:
+            filter_query = {"repository_id": {"$in": user_repo_ids}}
+            documents = await mongo_client.find(
+                collection_name=MRS_COLLECTION,
+                filter=filter_query,
+                limit=limit,
+                sort=[("created_at", -1)]  # Newest first
+            )
+            print(f"[INFO] Fetched {len(documents)} MRs from MongoDB for user {user_id}")
+        else:
+            # Fallback to in-memory cache
+            print(f"[WARN] MongoDB not configured - using in-memory MR cache")
+            documents = []
+            for repo_id in user_repo_ids:
+                repo_mrs = _merge_requests.get(repo_id, [])
+                documents.extend(repo_mrs)
+
+            # Sort by created_at and limit
+            documents.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+            documents = documents[:limit]
+
+        # Format for dashboard response (RecentMRResponse model)
+        result = []
+        for doc in documents:
+            # Get the raw status from the document without normalizing
+            # This preserves additional status values like "reviewed", "reviewing", etc.
+            status = doc.get("status", "open")
+
+            result.append({
+                "id": str(doc.get("gitlab_mr_id", doc.get("id", ""))),
+                "title": doc.get("title", ""),
+                "repository_name": doc.get("repository_name", ""),
+                "status": status,
+                "created_at": doc.get("created_at", ""),
+                "web_url": doc.get("web_url", ""),
+            })
+
+        return result
+
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch recent MRs for user {user_id}: {e}")
         return []
 
 

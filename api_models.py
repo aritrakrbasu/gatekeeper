@@ -192,7 +192,7 @@ class RecentMRResponse(BaseModel):
     id: str
     title: str
     repository_name: str
-    status: MRStatus
+    status: str  # Changed from MRStatus enum to str to support additional statuses like "reviewed", "reviewing"
     created_at: datetime
     web_url: str
 
