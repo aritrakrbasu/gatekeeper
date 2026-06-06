@@ -80,7 +80,8 @@ async def startup_event():
     import sys
     sys.stderr.write("[STARTUP] New webhook debugging code loaded!\n")
     sys.stderr.flush()
-    print("[*] MCP Bridge initialization starting in background...")
+    sys.stderr.write("[*] MCP Bridge initialization starting (startup waits for MongoDB + GitLab)...\n")
+    sys.stderr.flush()
 
     # Initialize Arize observability for LLM usage tracking
     try:
@@ -123,8 +124,37 @@ async def startup_event():
     except Exception as e:
         print(f"[WARN] Copilot collection initialization failed: {e}")
 
-    # Launch Stdio MCP pipes in the background
-    asyncio.create_task(mcp_service.boot_mcp_bridge())
+    # Launch MCP bridge and block startup until MongoDB + GitLab are ready
+    def _log_mcp_task_done(task: asyncio.Task) -> None:
+        if task.cancelled():
+            mcp_service.mark_unready("background task cancelled")
+            return
+        try:
+            task.result()
+        except Exception as exc:
+            mcp_service.mark_unready(str(exc))
+            sys.stderr.write(f"[ERROR] MCP Bridge background task failed: {exc}\n")
+            sys.stderr.flush()
+
+    mcp_task = asyncio.create_task(
+        mcp_service.boot_mcp_bridge(),
+        name="mcp_bridge_boot",
+    )
+    mcp_task.add_done_callback(_log_mcp_task_done)
+
+    sys.stderr.write("[*] Waiting for MCP critical services (MongoDB + GitLab)...\n")
+    sys.stderr.flush()
+    if await mcp_service.wait_for_critical_ready(timeout=120.0):
+        sys.stderr.write(
+            f"[*] MCP ready for webhooks "
+            f"(gitlab_session={mcp_service.gitlab_session is not None})\n"
+        )
+    else:
+        sys.stderr.write(
+            "[WARN] MCP critical ready timed out after 120s — "
+            "webhooks will return mcp_not_ready until bridge completes\n"
+        )
+    sys.stderr.flush()
 
 
 @app.on_event("shutdown")
@@ -177,19 +207,27 @@ async def test_mongodb_connection():
 async def gitlab_webhook(request: Request, x_gitlab_event: str = Header(None)):
     """API endpoint to receive and delegate GitLab webhook payloads."""
     import sys
-    sys.stderr.write(f"\n[WEBHOOK HIT!] X-GitLab-Event: {x_gitlab_event}\n")
+    sys.stderr.write(
+        f"\n[WEBHOOK HIT!] X-GitLab-Event: {x_gitlab_event} "
+        f"mcp_ready={mcp_service.mcp_ready} "
+        f"gitlab_session={mcp_service.gitlab_session is not None}\n"
+    )
     sys.stderr.flush()
-
-    print(f"[DEBUG] ===== WEBHOOK RECEIVED =====", flush=True)
-    print(f"[DEBUG] X-GitLab-Event header: {x_gitlab_event}", flush=True)
-    print(f"[DEBUG] MCP ready: {mcp_service.mcp_ready}", flush=True)
-    print(f"[DEBUG] GitLab session: {mcp_service.gitlab_session is not None}", flush=True)
 
     # Check if MCP sessions are ready
     if not mcp_service.mcp_ready or not mcp_service.gitlab_session:
-        print("[⚠️] MCP sessions not ready yet - cannot process webhook")
-        print("[ℹ️] Please wait a few seconds for the MCP bridge to initialize")
+        sys.stderr.write(
+            "[WARN] MCP sessions not ready — retry after /health shows mcp_ready=true\n"
+        )
+        sys.stderr.flush()
         return {"status": "mcp_not_ready", "message": "MCP sessions still initializing. Please retry in a few seconds."}
+
+    body = await request.body()
+    if not body.strip():
+        return {
+            "status": "invalid_payload",
+            "message": "Webhook body must be non-empty JSON.",
+        }
 
     payload = await request.json()
 

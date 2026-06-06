@@ -62,6 +62,20 @@ def resolve_arguments(arguments: Any, step_results: Dict[str, Any]) -> Any:
         return arguments
 
 
+def derive_mr_comment_from_results(step_results: Dict[str, Any]) -> Optional[str]:
+    """Build a postable MR comment from the most recent step outputs."""
+    comment_keys = ("markdown_report", "comment", "report", "summary", "content")
+    for result in reversed(list(step_results.values())):
+        if isinstance(result, str) and result.strip():
+            return result
+        if isinstance(result, dict):
+            for key in comment_keys:
+                value = result.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value
+    return None
+
+
 class ExecutorAgent:
     """
     Resolves dependency ordering, substitutes step arguments, and runs tools
@@ -171,6 +185,10 @@ class ExecutorAgent:
                 resolved_args["target_branch"] = context.branch.target_branch
             if "source_branch" in props and "source_branch" not in resolved_args:
                 resolved_args["source_branch"] = context.branch.source_branch
+            if "mr_iid" in props and "mr_iid" not in resolved_args:
+                mr_iid = context.metadata.get("mr_iid")
+                if mr_iid is not None and str(mr_iid) not in ("", "unknown"):
+                    resolved_args["mr_iid"] = int(mr_iid)
 
     async def execute_step(self, step: StepSchema, context: AgentContext) -> Any:
         """
@@ -195,6 +213,11 @@ class ExecutorAgent:
         
         # Auto-inject standard parameters
         self._inject_context_args(tool_name, resolved_args, context)
+
+        if tool_name == "post_gitlab_mr_comment" and not resolved_args.get("comment"):
+            comment = derive_mr_comment_from_results(self.step_results)
+            if comment:
+                resolved_args["comment"] = comment
         
         # Register rollback hooks automatically
         self._auto_register_rollbacks(tool_name, resolved_args)
