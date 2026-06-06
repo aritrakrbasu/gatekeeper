@@ -62,6 +62,44 @@ def resolve_arguments(arguments: Any, step_results: Dict[str, Any]) -> Any:
         return arguments
 
 
+_JINJA_DEFAULT_PATTERN = re.compile(
+    r"\{\{\s*([a-zA-Z0-9_\-]+)\.result(?:\.([a-zA-Z0-9_\-]+))?\s*\|\s*default\((?:'([^']*)'|\"([^\"]*)\")\)\s*\}\}"
+)
+_UNRESOLVED_TEMPLATE_PATTERN = re.compile(r"\{\{[^}]+\}\}")
+
+
+def sanitize_comment_templates(text: str, step_results: Dict[str, Any]) -> str:
+    """Resolve planner templates (including Jinja-style defaults) for MR comments."""
+
+    def _replace_jinja_default(match: re.Match) -> str:
+        step_id = match.group(1)
+        field = match.group(2)
+        default = match.group(3) if match.group(3) is not None else (match.group(4) or "")
+        if step_id not in step_results:
+            return default
+        result = step_results[step_id]
+        if field:
+            if isinstance(result, dict):
+                value = result.get(field)
+                if value is not None and str(value).strip():
+                    return str(value)
+            elif hasattr(result, field):
+                value = getattr(result, field)
+                if value is not None and str(value).strip():
+                    return str(value)
+            return default
+        if result is not None and str(result).strip():
+            return str(result)
+        return default
+
+    resolved = _JINJA_DEFAULT_PATTERN.sub(_replace_jinja_default, text)
+    resolved = resolve_arguments(resolved, step_results)
+    if isinstance(resolved, str):
+        resolved = _UNRESOLVED_TEMPLATE_PATTERN.sub("", resolved)
+        return resolved.strip()
+    return str(resolved)
+
+
 def derive_mr_comment_from_results(step_results: Dict[str, Any]) -> Optional[str]:
     """Build a postable MR comment from the most recent step outputs."""
     comment_keys = ("markdown_report", "comment", "report", "summary", "content")
@@ -214,10 +252,16 @@ class ExecutorAgent:
         # Auto-inject standard parameters
         self._inject_context_args(tool_name, resolved_args, context)
 
-        if tool_name == "post_gitlab_mr_comment" and not resolved_args.get("comment"):
-            comment = derive_mr_comment_from_results(self.step_results)
-            if comment:
-                resolved_args["comment"] = comment
+        if tool_name == "post_gitlab_mr_comment":
+            if not resolved_args.get("comment"):
+                comment = derive_mr_comment_from_results(self.step_results)
+                if comment:
+                    resolved_args["comment"] = comment
+            if isinstance(resolved_args.get("comment"), str):
+                resolved_args["comment"] = sanitize_comment_templates(
+                    resolved_args["comment"],
+                    self.step_results,
+                )
         
         # Register rollback hooks automatically
         self._auto_register_rollbacks(tool_name, resolved_args)

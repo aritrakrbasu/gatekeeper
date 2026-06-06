@@ -69,7 +69,11 @@ class ArilSession:
 
     async def update_status(self, status: ExecutionStatus, **fields: Any) -> None:
         try:
-            update = {"status": status.value, **fields}
+            serialized_fields = {
+                key: value.isoformat() if hasattr(value, "isoformat") else value
+                for key, value in fields.items()
+            }
+            update = {"status": status.value, **serialized_fields}
             await self.execution_repo.update_fields(self.execution_id, update)
         except Exception as exc:
             log_aril_event(

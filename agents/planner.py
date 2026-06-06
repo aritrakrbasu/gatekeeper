@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from agents.context import AgentContext
 from agents.registry import ToolRegistry
 from peil.models.enums import CaptureEventType
-from services.gemini_service import ai_client
+from services.gemini_service import ai_client, call_gemini_with_retry
 
 if TYPE_CHECKING:
     from agents.aril_bridge import ArilSession
@@ -226,7 +226,8 @@ class PlannerAgent:
 
         prompt_hash = hash_text(system_instruction + prompt)
         start = time.time()
-        response = ai_client.models.generate_content(
+        response = await call_gemini_with_retry(
+            ai_client.models.generate_content,
             model=self.model_name,
             contents=prompt,
             config=types.GenerateContentConfig(

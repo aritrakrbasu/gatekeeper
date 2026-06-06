@@ -160,4 +160,7 @@ def _execution_from_mongo(doc: dict) -> PeilExecution:
             from peil.models.enums import SubjectType
             ref["type"] = SubjectType(ref["type"])
         data["subject_ref"] = SubjectRef.model_validate(ref)
+    completed_at = data.get("completed_at")
+    if isinstance(completed_at, datetime):
+        data["completed_at"] = completed_at.isoformat()
     return PeilExecution.model_validate(data)

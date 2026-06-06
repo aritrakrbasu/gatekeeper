@@ -48,6 +48,39 @@ class WorkflowEngine:
         self.reflection = ReflectionLayer()
         self.approval = HumanApprovalLayer()
 
+    def _is_webhook_mr_terminal_step(self, context: AgentContext, step: StepSchema) -> bool:
+        """Successful MR comment post completes unattended webhook reviews."""
+        return (
+            context.metadata.get("trigger_type") == "gitlab_mr"
+            and step.tool_name == "post_gitlab_mr_comment"
+        )
+
+    async def _return_completed(
+        self,
+        context: AgentContext,
+        executor: Executor,
+        memory: MemoryStore,
+        executed_ids: Set[str],
+        aril: Optional[ArilSession],
+        loop_started: datetime.datetime,
+    ) -> Dict[str, Any]:
+        print("[OK] [WorkflowEngine] Webhook MR review completed after posting comment.")
+        memory.status = "completed"
+        memory.log_message("system", "Webhook MR review completed after posting GitLab comment.")
+        await memory.persist_to_mongodb()
+        duration_ms = (
+            datetime.datetime.now(datetime.timezone.utc) - loop_started
+        ).total_seconds() * 1000.0
+        await self._emit_terminal(aril, "completed", step_count=len(executed_ids), duration_ms=duration_ms)
+        result = {
+            "status": "completed",
+            "task_id": context.task_id,
+            "results": executor.step_results,
+        }
+        if aril is not None:
+            result["execution_id"] = aril.execution_id
+        return result
+
     def _should_pause_for_approval(self, context: AgentContext, tool_name: str) -> bool:
         """Pause before mutating tools unless the workflow was webhook-triggered."""
         if not self.planner._is_mutate_action(tool_name):
@@ -370,6 +403,16 @@ class WorkflowEngine:
                 executed_ids.add(step_to_run.step_id)
                 if aril is not None:
                     await aril.flush()
+
+                if self._is_webhook_mr_terminal_step(context, step_to_run):
+                    return await self._return_completed(
+                        context,
+                        executor,
+                        memory,
+                        executed_ids,
+                        aril,
+                        loop_started,
+                    )
 
             except Exception as step_err:
                 print(f"[WARN] [WorkflowEngine] Step '{step_to_run.step_id}' failed: {step_err}. Triggering replanning...")

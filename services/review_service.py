@@ -462,6 +462,101 @@ async def should_process_webhook(repo_id: str, target_branch: str) -> bool:
         return True  # Default to processing on error
 
 
+async def ingest_mr_from_webhook(payload: dict) -> dict:
+    """
+    Validate an MR webhook and persist merge request metadata for the frontend.
+
+    Returns:
+        dict with skipped (bool), reason (if skipped), project_id, mr_iid when processed.
+    """
+    object_attrs = payload.get("object_attributes", {})
+    state = object_attrs.get("state")
+
+    if state != "opened":
+        print(f"[ℹ] MR state is '{state}' - skipping audit")
+        return {"skipped": True, "reason": "skipped_state", "state": state}
+
+    project_id = payload.get("project", {}).get("id")
+    mr_iid = object_attrs.get("iid")
+    target_branch = object_attrs.get("target_branch", "main")
+
+    if not project_id or not mr_iid:
+        return {"skipped": True, "reason": "invalid_payload"}
+
+    project_id_str = str(project_id)
+    mr_iid_int = int(mr_iid)
+
+    if not await should_process_webhook(project_id_str, target_branch):
+        return {
+            "skipped": True,
+            "reason": "skipped_branch_not_monitored",
+            "target_branch": target_branch,
+        }
+
+    mr_title = object_attrs.get("title")
+    source_branch = object_attrs.get("source_branch")
+    mr_internal_id = object_attrs.get("id")
+    author = payload.get("user", {}).get("username", "unknown")
+    web_url = object_attrs.get("url", "")
+    created_at = object_attrs.get("created_at", "")
+    updated_at = object_attrs.get("updated_at", "")
+    description = object_attrs.get("description", "")
+
+    stats = object_attrs.get("stats", {})
+    additions = stats.get("additions", 0)
+    deletions = stats.get("deletions", 0)
+    files_changed = stats.get("total", 0)
+
+    is_auto_fix = source_branch.startswith("gatekeeper/")
+    auto_fix_for = None
+    if is_auto_fix:
+        import re
+
+        match = re.search(r"gatekeeper/atomic-fix-mr(\d+)", source_branch)
+        if match:
+            auto_fix_for = int(match.group(1))
+
+    mr_data = {
+        "gitlab_mr_id": mr_iid_int,
+        "gitlab_mr_internal_id": mr_internal_id,
+        "repository_id": project_id_str,
+        "repository_name": payload.get("project", {}).get("path_with_namespace", ""),
+        "title": mr_title,
+        "description": description,
+        "author": author,
+        "source_branch": source_branch,
+        "target_branch": target_branch,
+        "status": "open",
+        "web_url": web_url,
+        "created_at": created_at,
+        "updated_at": updated_at,
+        "changes": {
+            "additions": additions,
+            "deletions": deletions,
+            "files_changed": files_changed,
+        },
+        "analysis_status": "skipped" if is_auto_fix else "pending",
+        "is_auto_fix": is_auto_fix,
+        "auto_fix_for": auto_fix_for,
+        "auto_fix_mrs": [],
+        "auto_fix_status": "applied" if is_auto_fix else None,
+        "progress_logs": [],
+        "analysis_started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+
+    try:
+        await repository_service.store_mr_in_mongodb(mr_data)
+        print(f"[OK] MR {mr_iid_int} stored in MongoDB for frontend (agentic/legacy)")
+    except Exception as exc:
+        print(f"[WARN] Failed to store MR in MongoDB: {exc}")
+
+    return {
+        "skipped": False,
+        "project_id": project_id_str,
+        "mr_iid": mr_iid_int,
+    }
+
+
 async def orchestrate_review(payload: dict) -> dict:
     """
     Orchestrates the entire webhook auditing pipeline.

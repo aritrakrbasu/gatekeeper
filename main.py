@@ -236,14 +236,12 @@ async def gitlab_webhook(request: Request, x_gitlab_event: str = Header(None)):
     
     if agentic_mode:
         from agents import ContextBuilder, build_default_registry, WorkflowEngine
-        
+
         # 1. Handle GitLab Merge Request Event
         if x_gitlab_event == "Merge Request Hook":
-            context = ContextBuilder.build_from_gitlab_mr(payload)
-            engine = WorkflowEngine(await build_default_registry())
-            print(f"[INFO] [Agentic Mode] Executing agentic workflow for Merge Request: {context.task_id}")
-            result = await engine.run_task(context)
-            return result
+            from agents.webhook_mr import run_agentic_mr_webhook
+
+            return await run_agentic_mr_webhook(payload)
 
         # 2. Handle Dynatrace Incident/Production Crash Event
         if not x_gitlab_event:
