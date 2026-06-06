@@ -163,14 +163,140 @@ class BaseMCPTool(BaseTool):
 
 
 class GitLabMCPTool(BaseMCPTool):
-    """Wrapper for GitLab MCP tools."""
+    """Wrapper for GitLab MCP tools with dynamic session support."""
     def __init__(self, name: str, description: str, schema: Dict[str, Any]):
+        # Don't set a static session_getter - we'll override get_session
         super().__init__(
             name=name,
             description=description,
             schema=schema,
             session_name="gitlab",
-            session_getter=lambda: mcp_service.gitlab_session
+            session_getter=lambda: mcp_service.gitlab_session  # Fallback to global session
+        )
+
+    async def get_session(self, context: Optional[AgentContext] = None) -> Optional[Any]:
+        """
+        Get GitLab session for the current user from context.
+        Falls back to global session for system operations.
+        """
+        # If context has user info, try to get their specific session
+        if context and context.user and context.user.user_id:
+            user_id = context.user.user_id
+            project_id = context.repository.id if context.repository else None
+
+            print(f"[INFO] GitLabMCPTool: Getting session for user {user_id}, project {project_id}")
+
+            try:
+                session = await mcp_service.get_gitlab_session_for_user(user_id, project_id)
+                if session:
+                    return session
+                print(f"[WARN] GitLabMCPTool: Failed to get session for user {user_id}, falling back to global")
+            except Exception as e:
+                print(f"[ERROR] GitLabMCPTool: Error getting session for user {user_id}: {e}")
+
+        # Fallback to global session (for system operations or when context unavailable)
+        return mcp_service.gitlab_session
+
+    async def execute(self, arguments: Dict[str, Any], context: Optional[AgentContext] = None) -> ToolResult:
+        """Execute with dynamic session retrieval."""
+        try:
+            self.validate(arguments)
+        except Exception as ve:
+            return ToolResult(
+                status="error",
+                content=None,
+                error_message=f"Validation failed: {ve}",
+                execution_time_ms=0.0,
+                retry_count=0
+            )
+
+        # Get session dynamically based on context
+        session = await self.get_session(context)
+        if not session:
+            err_msg = f"Active session for {self.session_name} is not initialized/available"
+            return ToolResult(
+                status="error",
+                content=None,
+                error_message=err_msg,
+                execution_time_ms=0.0,
+                retry_count=0
+            )
+
+        start_time = time.time()
+        retries = 0
+        backoff = 1.0
+        last_err = None
+
+        while retries <= self.max_retries:
+            try:
+                print(f"[INFO] [MCPToolWrapper:{self.name}] Invoking... (Attempt {retries + 1}/{self.max_retries + 1})")
+
+                # Subprocess call wrapping with timeout
+                result = await asyncio.wait_for(
+                    session.call_tool(name=self.name, arguments=arguments),
+                    timeout=self.timeout
+                )
+
+                duration_ms = (time.time() - start_time) * 1000.0
+
+                # Normalize output
+                normalized_content = ""
+                if hasattr(result, "content") and result.content:
+                    normalized_content = result.content[0].text if hasattr(result.content[0], "text") else str(result.content[0])
+                else:
+                    normalized_content = str(result)
+
+                try:
+                    import json
+                    normalized_content = json.loads(normalized_content)
+                except:
+                    pass
+
+                # Record event using observability
+                event = ToolExecutionEvent(
+                    tool_name=self.name,
+                    arguments=arguments,
+                    status="success",
+                    duration_ms=duration_ms,
+                    retry_count=retries
+                )
+                await record_tool_event(event)
+
+                return ToolResult(
+                    status="success",
+                    content=normalized_content,
+                    execution_time_ms=duration_ms,
+                    retry_count=retries
+                )
+
+            except Exception as e:
+                last_err = e
+                print(f"[WARN] [MCPToolWrapper:{self.name}] Attempt {retries + 1} failed: {e}")
+                retries += 1
+                if retries <= self.max_retries:
+                    await asyncio.sleep(backoff)
+                    backoff *= 2.0
+
+        # Exceeded retries
+        duration_ms = (time.time() - start_time) * 1000.0
+        err_msg = f"Failed to execute tool {self.name} after {self.max_retries + 1} attempts. Last error: {last_err}"
+
+        event = ToolExecutionEvent(
+            tool_name=self.name,
+            arguments=arguments,
+            status="error",
+            duration_ms=duration_ms,
+            retry_count=retries,
+            error_message=err_msg
+        )
+        await record_tool_event(event)
+
+        return ToolResult(
+            status="error",
+            content=None,
+            error_message=err_msg,
+            execution_time_ms=duration_ms,
+            retry_count=retries
         )
 
 
@@ -207,4 +333,16 @@ class GitNexusMCPTool(BaseMCPTool):
             schema=schema,
             session_name="gitnexus",
             session_getter=lambda: mcp_service.nexus_session
+        )
+
+
+class SentryMCPTool(BaseMCPTool):
+    """Wrapper for Sentry MCP tools."""
+    def __init__(self, name: str, description: str, schema: Dict[str, Any]):
+        super().__init__(
+            name=name,
+            description=description,
+            schema=schema,
+            session_name="sentry",
+            session_getter=lambda: mcp_service.sentry_session
         )

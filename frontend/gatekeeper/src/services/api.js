@@ -23,8 +23,8 @@ export async function apiRequest(endpoint, options = {}) {
     ...options.headers,
   };
 
-  // Add auth token if available
-  if (token) {
+  // Add auth token if available (unless skipAuth is true)
+  if (token && !options.skipAuth) {
     headers["Authorization"] = `Bearer ${token}`;
   }
 
@@ -33,11 +33,18 @@ export async function apiRequest(endpoint, options = {}) {
     headers,
   };
 
+  // Debug logging
+  console.log(`[API] ${config.method || 'GET'} ${endpoint}`, {
+    hasAuth: !!headers["Authorization"],
+    skipAuth: options.skipAuth
+  });
+
   try {
     const response = await fetch(`${API_BASE_URL}${endpoint}`, config);
 
     // Handle 401 Unauthorized - token expired or invalid
     if (response.status === 401) {
+      console.error(`[API] 401 Unauthorized on ${endpoint} - logging out...`);
       localStorage.removeItem("access_token");
       localStorage.removeItem("refresh_token");
       localStorage.removeItem("user");
@@ -382,6 +389,61 @@ export const api = {
     apiRequest("/api/integrations/slack", {
       method: "PUT",
       body: JSON.stringify({ webhook_url: webhookUrl, channel }),
+    }),
+
+  // ============================================================================
+  // Sentry Integration
+  // ============================================================================
+
+  /**
+   * Initiate Sentry OAuth flow for a repository
+   */
+  initiateSentryOAuth: (repoId) =>
+    apiRequest("/api/auth/sentry/init", {
+      method: "POST",
+      body: JSON.stringify({ repo_id: repoId, user_id: localStorage.getItem("user_id") || "" }),
+    }),
+
+  /**
+   * Complete Sentry OAuth callback
+   */
+  completeSentryOAuth: (code, state) =>
+    apiRequest("/api/auth/sentry/callback", {
+      method: "POST",
+      body: JSON.stringify({ code, state }),
+      skipAuth: true, // Skip auth header for Sentry callback (public route)
+    }),
+
+  /**
+   * Get Sentry integration status for a repository
+   */
+  getSentryStatus: (repoId) =>
+    apiRequest(`/api/auth/sentry/status/${repoId}`),
+
+  /**
+   * Verify Sentry webhook configuration
+   */
+  verifySentryWebhook: (repoId) =>
+    apiRequest("/api/auth/sentry/verify-webhook", {
+      method: "POST",
+      body: JSON.stringify({ repo_id: repoId }),
+    }),
+
+  /**
+   * Confirm Sentry webhook is working after manual verification
+   */
+  confirmSentryWebhook: (repoId) =>
+    apiRequest("/api/auth/sentry/confirm-webhook", {
+      method: "POST",
+      body: JSON.stringify({ repo_id: repoId }),
+    }),
+
+  /**
+   * Disconnect Sentry integration for a repository
+   */
+  disconnectSentry: (repoId) =>
+    apiRequest(`/api/integrations/sentry/${repoId}/disconnect`, {
+      method: "POST",
     }),
 
   // ============================================================================

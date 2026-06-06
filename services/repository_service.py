@@ -1005,87 +1005,94 @@ async def install_gitlab_webhook(repo_id: str, gitlab_token: str, user_id: Optio
 
                     if existing_gatekeeper_token:
                         print(f"[INFO] Gatekeeper project access token already exists in GitLab (ID: {existing_gatekeeper_token.get('id')})")
-                        # Note: We can't retrieve the token value, only the metadata
-                        project_token_result = {
-                            "token_id": existing_gatekeeper_token.get("id"),
-                            "created": False,
-                            "already_existed": True,
-                            "expires_at": existing_gatekeeper_token.get("expires_at"),
-                            "note": "Token exists in GitLab but value not retrievable. May need to recreate."
-                        }
-                    else:
-                        # Create new project access token with appropriate scopes
-                        print(f"[INFO] Creating new project access token for repo {repo_id}...")
-                        token_data = {
-                            "name": f"gatekeeper-{repo_id}",
-                            "scopes": ["api", "read_repository"],
-                            "expires_at": (datetime.now() + timedelta(days=365)).isoformat()
-                        }
+                        # Token exists but we don't have its value - need to delete and recreate
+                        print(f"[WARN] Token exists but value not retrievable. Deleting and recreating...")
+                        token_id = existing_gatekeeper_token.get("id")
 
-                        print(f"[DEBUG] Token data being sent: {token_data}")
-                        print(f"[DEBUG] GitLab URL: {GITLAB_BASE_URL}/api/v4/projects/{repo_id}/access_tokens")
-
-                        token_response = await client.post(
-                            f"{GITLAB_BASE_URL}/api/v4/projects/{repo_id}/access_tokens",
+                        # Delete the existing token
+                        delete_response = await client.delete(
+                            f"{GITLAB_BASE_URL}/api/v4/projects/{repo_id}/access_tokens/{token_id}",
                             headers=headers,
-                            json=token_data,
                             timeout=30.0
                         )
 
-                        # Log response details for debugging
-                        import sys
-                        gitlab_error_message = None
-                        print(f"[DEBUG] Token creation response status: {token_response.status_code}", flush=True)
-                        if token_response.status_code != 201:
-                            error_text = token_response.text
-                            print(f"[ERROR] GitLab token creation failed with status {token_response.status_code}", flush=True)
-                            print(f"[ERROR] Response: {error_text}", flush=True)
-                            # Try to parse as JSON for better error message
-                            try:
-                                error_json = token_response.json()
-                                gitlab_error_message = error_json.get("message", error_text)
-                                print(f"[ERROR] Error details: {error_json}", flush=True)
-                            except:
-                                gitlab_error_message = error_text
+                        if delete_response.status_code in [200, 204, 202]:
+                            print(f"[OK] Deleted existing token (ID: {token_id}), will create new one")
+                        else:
+                            print(f"[WARN] Failed to delete existing token (ID: {token_id}), status: {delete_response.status_code}")
 
-                        token_response.raise_for_status()
-                        project_token = token_response.json()
+                    # Create new project access token with appropriate scopes
+                    print(f"[INFO] Creating new project access token for repo {repo_id}...")
+                    token_data = {
+                        "name": f"gatekeeper-{repo_id}",
+                        "scopes": ["api", "read_repository"],
+                        "expires_at": (datetime.now() + timedelta(days=365)).isoformat()
+                    }
 
-                        project_token_value = project_token.get("token")
-                        project_token_id = project_token.get("id")
+                    print(f"[DEBUG] Token data being sent: {token_data}")
+                    print(f"[DEBUG] GitLab URL: {GITLAB_BASE_URL}/api/v4/projects/{repo_id}/access_tokens")
 
-                        if project_token_value:
-                            print(f"[OK] Created project access token (ID: {project_token_id})")
+                    token_response = await client.post(
+                        f"{GITLAB_BASE_URL}/api/v4/projects/{repo_id}/access_tokens",
+                        headers=headers,
+                        json=token_data,
+                        timeout=30.0
+                    )
 
-                            # Encrypt and store the token in user's document
-                            from services.encryption_service import encrypt_value
-                            encrypted_token = encrypt_value(project_token_value)
+                    # Log response details for debugging
+                    import sys
+                    gitlab_error_message = None
+                    print(f"[DEBUG] Token creation response status: {token_response.status_code}", flush=True)
+                    if token_response.status_code != 201:
+                        error_text = token_response.text
+                        print(f"[ERROR] GitLab token creation failed with status {token_response.status_code}", flush=True)
+                        print(f"[ERROR] Response: {error_text}", flush=True)
+                        # Try to parse as JSON for better error message
+                        try:
+                            error_json = token_response.json()
+                            gitlab_error_message = error_json.get("message", error_text)
+                            print(f"[ERROR] Error details: {error_json}", flush=True)
+                        except:
+                            gitlab_error_message = error_text
 
-                            # Store in user document with repository mapping
-                            await mongo_client.update_one(
-                                collection_name="users",
-                                filter={"_id": user_id},
-                                update={
-                                    "$set": {
-                                        f"project_tokens.{repo_id}": {
-                                            "token_id": project_token_id,
-                                            "token_encrypted": encrypted_token,
-                                            "created_at": datetime.now().isoformat(),
-                                            "expires_at": token_data["expires_at"],
-                                            "scopes": token_data["scopes"]
-                                        }
+                    token_response.raise_for_status()
+                    project_token = token_response.json()
+
+                    project_token_value = project_token.get("token")
+                    project_token_id = project_token.get("id")
+
+                    if project_token_value:
+                        print(f"[OK] Created project access token (ID: {project_token_id})")
+
+                        # Encrypt and store the token in user's document
+                        from services.encryption_service import encrypt_value
+                        encrypted_token = encrypt_value(project_token_value)
+
+                        # Store in user document with repository mapping
+                        await mongo_client.update_one(
+                            collection_name="users",
+                            filter={"_id": user_id},
+                            update={
+                                "$set": {
+                                    f"project_tokens.{repo_id}": {
+                                        "token_id": project_token_id,
+                                        "token_encrypted": encrypted_token,
+                                        "created_at": datetime.now().isoformat(),
+                                        "expires_at": token_data["expires_at"],
+                                        "scopes": token_data["scopes"]
                                     }
                                 }
-                            )
-
-                            print(f"[OK] Stored project access token for user {user_id}, repo {repo_id}")
-                            project_token_result = {
-                                "token_id": project_token_id,
-                                "created": True,
-                                "expires_at": token_data["expires_at"]
                             }
-                        else:
-                            print(f"[WARN] Project token created but no token value returned")
+                        )
+
+                        print(f"[OK] Stored project access token for user {user_id}, repo {repo_id}")
+                        project_token_result = {
+                            "token_id": project_token_id,
+                            "created": True,
+                            "expires_at": token_data["expires_at"]
+                        }
+                    else:
+                        print(f"[WARN] Project token created but no token value returned")
 
         except Exception as token_err:
             print(f"[WARN] Failed to create/store project access token: {token_err}")

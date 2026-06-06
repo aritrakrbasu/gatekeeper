@@ -6,6 +6,71 @@ from pydantic import BaseModel, Field
 from services import repository_service, user_service, mongo_client
 
 
+def normalize_sentry_payload(payload: dict) -> dict:
+    """
+    Normalize Sentry webhook payload to a flat structure.
+
+    Sentry webhooks have nested structure (data.error) with tags as arrays.
+    This converts to the flat structure expected by ContextBuilder.
+    """
+    # If already normalized (has issue_id at root), return as-is
+    if "issue_id" in payload and isinstance(payload.get("tags"), dict):
+        return payload
+
+    # Extract the error event from nested structure
+    error_event = payload.get("data", {}).get("error", {})
+    if not error_event:
+        return payload
+
+    # Convert tags from array of [key, value] to dict
+    tags_array = error_event.get("tags", [])
+    tags_dict = {}
+    for tag_pair in tags_array:
+        if isinstance(tag_pair, (list, tuple)) and len(tag_pair) >= 2:
+            tags_dict[tag_pair[0]] = tag_pair[1]
+
+    # Build exception message from stacktrace
+    exception_values = error_event.get("exception", {}).get("values", [])
+    stack_trace = ""
+    if exception_values:
+        exc_value = exception_values[0]
+        stack_trace = exc_value.get("value", "")
+        if not stack_trace:
+            # Try to build from stacktrace frames
+            frames = exc_value.get("stacktrace", {}).get("frames", [])
+            if frames:
+                for frame in frames:
+                    func = frame.get("function", "?")
+                    filename = frame.get("filename", "?")
+                    lineno = frame.get("lineno", "?")
+                    stack_trace += f"  at {func} ({filename}:{lineno})\n"
+
+    # Get project ID (may be a number in webhooks)
+    project_id = error_event.get("project", "")
+    if isinstance(project_id, (int, float)):
+        project_id = str(project_id)
+
+    # Build normalized payload
+    normalized = {
+        "issue_id": error_event.get("issue_id", ""),
+        "title": error_event.get("title", ""),
+        "level": error_event.get("level", ""),
+        "environment": error_event.get("environment", ""),
+        "culprit": error_event.get("culprit", ""),
+        "message": stack_trace or error_event.get("message", ""),
+        "project": project_id,
+        "release": error_event.get("release", ""),
+        "platform": error_event.get("platform", ""),
+        "transaction": error_event.get("transaction", ""),
+        "event_id": error_event.get("event_id", ""),
+        "url": error_event.get("request", {}).get("url", ""),
+        "tags": tags_dict,
+        "stacktrace": exception_values[0].get("stacktrace", {}).get("frames", []) if exception_values else []
+    }
+
+    return normalized
+
+
 class RepositoryContext(BaseModel):
     id: str
     name: str
@@ -43,6 +108,18 @@ class IncidentContext(BaseModel):
     stack_trace: Optional[str] = None
 
 
+class SentryIssueContext(BaseModel):
+    """Context for Sentry issue events."""
+    issue_id: str
+    title: str
+    level: str
+    environment: str
+    culprit: Optional[str] = None
+    stack_trace: Optional[str] = None
+    affected_files: List[str] = Field(default_factory=list)
+    git_commit_sha: Optional[str] = None
+
+
 class DeploymentContext(BaseModel):
     environment: str = "production"
     cluster_name: Optional[str] = None
@@ -64,6 +141,7 @@ class AgentContext(BaseModel):
     user: UserContext
     schema_ctx: SchemaContext
     incident: Optional[IncidentContext] = None
+    sentry_issue: Optional[SentryIssueContext] = None
     deployment: Optional[DeploymentContext] = None
     history: HistoricalMemoryContext = Field(default_factory=HistoricalMemoryContext)
     metadata: Dict[str, Any] = Field(default_factory=dict)
@@ -363,6 +441,94 @@ class ContextBuilder:
             user=user_ctx,
             schema_ctx=schema_ctx,
             incident=incident_ctx,
+            metadata=metadata
+        )
+
+    @staticmethod
+    async def build_from_sentry_issue(payload: dict, repository_path: Optional[str] = None, target_project_id: Optional[str] = None, user_id: Optional[str] = None, username: Optional[str] = None) -> AgentContext:
+        """Build AgentContext from Sentry webhook payload.
+
+        Args:
+            payload: Normalized Sentry webhook payload
+            repository_path: Optional local path to repository
+            target_project_id: Optional target project ID
+            user_id: Optional user ID for GitLab operations (defaults to repository owner)
+            username: Optional username for GitLab operations
+        """
+        from services import mongo_client
+
+        issue_id = str(payload.get("issue_id", "unknown"))
+        project_id = str(target_project_id or payload.get("tags", {}).get("gitlab.project_id", "82576405"))
+
+        # Fetch repository from MongoDB to get the URL and other details
+        repo_url = None
+        repo_name = payload.get("project", "unknown")
+
+        if project_id and project_id != "82576405":  # Not the default
+            try:
+                repo_doc = await mongo_client.find_one(
+                    collection_name="connected_repositories",
+                    filter={"id": project_id}
+                )
+                if repo_doc:
+                    repo_url = repo_doc.get("url", "")
+                    repo_name = repo_doc.get("name", repo_name)
+                    print(f"[DEBUG] Found repository in MongoDB: {repo_name} ({project_id})", flush=True)
+                else:
+                    print(f"[WARN] Repository {project_id} not found in MongoDB", flush=True)
+            except Exception as e:
+                print(f"[WARN] Failed to fetch repository from MongoDB: {e}", flush=True)
+
+        task_id = f"sentry-bug-{issue_id}-{uuid.uuid4().hex[:8]}"
+        objective = f"Analyze and fix Sentry issue {issue_id}. Fetch issue details, identify root cause, and create a draft MR with the fix."
+
+        repo_ctx = RepositoryContext(
+            id=project_id,
+            name=repo_name,
+            git_url=repo_url,
+            repo_path=repository_path
+        )
+
+        branch_ctx = BranchContext(
+            source_branch="main",
+            target_branch="main"
+        )
+
+        # Use provided user credentials or fallback to sentry-operator
+        user_ctx = UserContext(
+            user_id=user_id or "sentry-operator",
+            username=username or "sentry",
+            permissions=["read", "write"]
+        )
+
+        schema_ctx = SchemaContext(
+            db_name="gatekeeper_dev"
+        )
+
+        sentry_ctx = SentryIssueContext(
+            issue_id=issue_id,
+            title=payload.get("title", ""),
+            level=str(payload.get("level", "")),
+            environment=str(payload.get("environment", "")),
+            culprit=payload.get("culprit"),
+            stack_trace=payload.get("message", ""),
+            git_commit_sha=payload.get("tags", {}).get("sentry.sha")
+        )
+
+        metadata = {
+            "trigger_type": "sentry_issue",
+            "issue_id": issue_id,
+            "severity": str(payload.get("level", ""))
+        }
+
+        return AgentContext(
+            task_id=task_id,
+            objective=objective,
+            repository=repo_ctx,
+            branch=branch_ctx,
+            user=user_ctx,
+            schema_ctx=schema_ctx,
+            sentry_issue=sentry_ctx,
             metadata=metadata
         )
 

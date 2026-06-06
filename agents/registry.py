@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from agents.base_tool import BaseTool, LocalTool
 from agents.context import AgentContext
-from agents.mcp_wrappers import GitLabMCPTool, MongoMCPTool, DynatraceMCPTool, GitNexusMCPTool
+from agents.mcp_wrappers import GitLabMCPTool, MongoMCPTool, DynatraceMCPTool, GitNexusMCPTool, SentryMCPTool
 from peil.capture.sanitize import mask_sensitive_arguments
 from peil.models.enums import CaptureEventType
 
@@ -62,6 +62,8 @@ class ToolRegistry:
                     wrapper = DynatraceMCPTool(name=tool.name, description=tool.description, schema=schema)
                 elif session_name == "gitnexus":
                     wrapper = GitNexusMCPTool(name=tool.name, description=tool.description, schema=schema)
+                elif session_name == "sentry":
+                    wrapper = SentryMCPTool(name=tool.name, description=tool.description, schema=schema)
                 else:
                     from agents.mcp_wrappers import BaseMCPTool
                     wrapper = BaseMCPTool(
@@ -193,6 +195,12 @@ async def build_default_registry(aril: Optional["ArilSession"] = None) -> ToolRe
     registry.register_local_tool("create_hotfix_branch_and_mr", tools.create_hotfix_branch_and_mr_schema, tools.create_hotfix_branch_and_mr)
     registry.register_local_tool("gitnexus_analyze", tools.gitnexus_analyze_schema, tools.gitnexus_analyze)
 
+    # GitLab REST API tools (direct API calls without MCP)
+    registry.register_local_tool("create_gitlab_branch", tools.create_gitlab_branch_schema, tools.create_gitlab_branch)
+    registry.register_local_tool("create_gitlab_merge_request", tools.create_gitlab_merge_request_schema, tools.create_gitlab_merge_request)
+    registry.register_local_tool("commit_file_to_branch", tools.commit_file_to_branch_schema, tools.commit_file_to_branch)
+
+    # 2. Register active Stdio MCP sessions dynamically if they are initialized
     if mcp_service.gitlab_session:
         await registry.register_mcp_session("gitlab", mcp_service.gitlab_session)
     if mcp_service.mongo_session:
@@ -201,5 +209,7 @@ async def build_default_registry(aril: Optional["ArilSession"] = None) -> ToolRe
         await registry.register_mcp_session("gitnexus", mcp_service.nexus_session)
     if mcp_service.dynatrace_session:
         await registry.register_mcp_session("dynatrace", mcp_service.dynatrace_session)
+    if mcp_service.sentry_session:
+        await registry.register_mcp_session("sentry", mcp_service.sentry_session)
 
     return registry

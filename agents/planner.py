@@ -4,7 +4,9 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from google.genai import types
 from pydantic import BaseModel, Field
-
+from google.genai import types
+from opentelemetry import trace
+from services.gemini_service import ai_client
 from agents.context import AgentContext
 from agents.registry import ToolRegistry
 from peil.models.enums import CaptureEventType
@@ -222,12 +224,13 @@ class PlannerAgent:
 
         print(f"[INFO] [Planner] Asking Gemini to build/adjust plan...")
 
-        from agents.aril_bridge import hash_text
+        # Get current span to add context attributes for observability
+        current_span = trace.get_current_span()
+        if current_span and current_span.is_recording():
+            # Log planning context for debugging
+            print(f"[INFO] [Planner] Planning within span context: {current_span.name}")
 
-        prompt_hash = hash_text(system_instruction + prompt)
-        start = time.time()
-        response = await call_gemini_with_retry(
-            ai_client.models.generate_content,
+        response = ai_client.models.generate_content(
             model=self.model_name,
             contents=prompt,
             config=types.GenerateContentConfig(
