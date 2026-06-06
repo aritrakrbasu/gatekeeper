@@ -24,6 +24,22 @@ def create_user_client(api_token: str) -> genai.Client:
 
 PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
 
+# Arize AX client for prompt management (lazy import)
+_ax_client_instance = None
+
+
+async def get_ax_client():
+    """Get or create the Arize AX client instance."""
+    global _ax_client_instance
+    if _ax_client_instance is None:
+        try:
+            from config.arize_ax_client import get_ax_client as get_ax
+            _ax_client_instance = await get_ax()
+        except ImportError as e:
+            print(f"[WARN] Arize AX client not available: {e}")
+            _ax_client_instance = False  # Mark as unavailable
+    return _ax_client_instance if _ax_client_instance is not False else None
+
 
 async def call_gemini_with_retry(func, *args, max_retries: int = 5, initial_backoff: float = 1.0, **kwargs):
     """Calls Gemini API function with exponential backoff on transient errors (503, 429, etc.)."""
@@ -68,13 +84,50 @@ async def call_gemini_with_retry(func, *args, max_retries: int = 5, initial_back
 
 
 def load_prompt(prompt_name: str) -> str:
-    """Load a prompt from the prompts directory."""
+    """
+    Load a prompt from the prompts directory (synchronous fallback).
+
+    Note: This is a synchronous fallback. For Arize AX integration,
+    use load_prompt_async() instead.
+    """
     prompt_path = PROMPTS_DIR / f"{prompt_name}.md"
     if prompt_path.exists():
         return prompt_path.read_text(encoding="utf-8")
     else:
         print(f"[WARN] Prompt file not found: {prompt_path}, using fallback")
         return "You are a senior code reviewer. Analyze the provided code changes for security, quality, and performance issues."
+
+
+async def load_prompt_async(prompt_name: str, label: Optional[str] = None) -> str:
+    """
+    Load a prompt from Arize AX with fallback to local file.
+
+    Args:
+        prompt_name: Name of the prompt to fetch (e.g., "senior_pr_reviewer_v1")
+        label: Optional prompt label to fetch (e.g., "production", "staging")
+               Defaults to env var ARIZE_AX_PROMPT_LABEL or "production"
+
+    Returns:
+        Prompt content string
+
+    Example:
+        prompt = await load_prompt_async("senior_pr_reviewer_v1")
+        prompt = await load_prompt_async("senior_pr_reviewer_v1", label="production")
+    """
+    # Try Arize AX first
+    ax_client = await get_ax_client()
+    if ax_client:
+        try:
+            prompt_content = await ax_client.get_prompt(prompt_name, label=label)
+            if prompt_content:
+                print(f"[INFO] Loaded prompt '{prompt_name}' from Arize AX")
+                return prompt_content
+        except Exception as e:
+            print(f"[WARN] Failed to load prompt from Arize AX: {e}")
+
+    # Fallback to local file
+    print(f"[INFO] Loading prompt '{prompt_name}' from local file (fallback)")
+    return load_prompt(prompt_name)
 
 
 async def track_llm_usage(
@@ -172,7 +225,8 @@ async def run_gemini_review(raw_diff_content: str, impact_context: str, user_con
     Returns:
         dict with "review_text" (str) and "usage" (dict with token counts and model)
     """
-    system_instruction = load_prompt("senior_pr_reviewer")
+    # Load prompt from Arize AX with fallback to local file
+    system_instruction = await load_prompt_async("senior_pr_reviewer_v1")
 
     review_prompt = f"""Review this raw pull request diff change stream:
 
@@ -468,7 +522,8 @@ async def run_gemini_review_with_gitnexus(
     Returns:
         dict with "review_text" (str), "usage" (dict), and "tools_called" (list)
     """
-    system_instruction = load_prompt("senior_pr_reviewer")
+    # Load prompt from Arize AX with fallback to local file
+    system_instruction = await load_prompt_async("senior_pr_reviewer_v1")
 
     review_prompt = f"""Review this raw pull request diff change stream:
 

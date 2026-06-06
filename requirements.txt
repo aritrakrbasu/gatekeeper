@@ -21,6 +21,7 @@ pydantic-core>=2.0.0
 # Arize AI Observability
 # arize-otel>=1.0.0
 # arize-phoenix>=6.0.0
+arize>=8.0.0
 # openinference-instrumentation-google-genai>=1.0.0
 # openinference-instrumentation-evaluation>=0.1.0
 # opentelemetry-api>=1.22.0

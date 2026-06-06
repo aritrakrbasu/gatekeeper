@@ -16,7 +16,7 @@ import traceback
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from enum import Enum
-
+from arize.prompts.types import LlmProvider
 import pandas as pd
 
 try:
@@ -354,7 +354,7 @@ Evaluate whether the fixes comprehensively address all identified issues.
         self.max_retries = max_retries
 
         # Initialize LLM wrapper for Gemini
-        self.llm = LLM(provider="google", model=model)
+        self.llm = LLM(provider=LlmProvider.VERTEX_AI, model=model)
 
         # Create evaluators for all criteria
         self.evaluators = self._create_evaluators()
