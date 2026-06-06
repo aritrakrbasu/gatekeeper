@@ -5,10 +5,12 @@ import time
 import json
 import re
 from typing import Optional
-from fastapi import FastAPI, Request, Header, HTTPException
+from datetime import datetime
+from fastapi import FastAPI, Request, Header, HTTPException, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from google.genai import types
+from services.gitnexus_manager import gitnexus_manager
 
 # Fix Windows console encoding for emoji characters
 if sys.platform == "win32":
@@ -18,7 +20,13 @@ if sys.platform == "win32":
     # Fix Windows subprocess issue with asyncio - MUST be set before event loop is created
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-load_dotenv()
+load_dotenv(verbose=True)  # Enable verbose logging to see if .env is found
+
+# Debug: Print Sentry env vars
+import os
+print(f"[DEBUG] Working directory: {os.getcwd()}", flush=True)
+print(f"[DEBUG] SENTRY_CLIENT_ID: {os.getenv('SENTRY_CLIENT_ID', 'NOT_SET')[:20]}...", flush=True)
+print(f"[DEBUG] .env file exists: {os.path.exists('.env')}", flush=True)
 
 # Import Gatekeeper Services
 from services import (
@@ -33,10 +41,33 @@ from api_models import (
     GeminiSettingsResponse, ValidateTokenRequest, ValidateTokenResponse,
     PolicySettingsResponse, UpdateGeminiSettingsRequest, UpdatePolicySettingsRequest,
     UpdateUserProfileRequest, IntegrationStatusResponse,
-    SyncRequest, BillingUsageResponse, InvoiceResponse
+    SyncRequest, BillingUsageResponse, InvoiceResponse,
+    SentryIntegrationInitiateRequest, SentryIntegrationInitiateResponse,
+    SentryCallbackRequest, SentryIntegrationResponse, SentryIntegrationDisconnectResponse,
+    SentryWebhookSetupStep, SentryWebhookSetupInstructions, SentryWebhookVerifyRequest, SentryWebhookVerifyResponse
 )
 
 app = FastAPI(title="The Gatekeeper Gemini Orchestrator")
+
+
+# ============================================================================
+# Background Session Cleanup Task
+# ============================================================================
+
+async def run_session_cleanup():
+    """Background task to periodically cleanup idle GitLab MCP sessions."""
+    while True:
+        try:
+            await asyncio.sleep(300)  # Check every 5 minutes
+            max_idle = int(os.getenv("GITLAB_SESSION_IDLE_TIMEOUT", "3600"))  # Default 1 hour
+            cleaned = await mcp_service.cleanup_idle_sessions(max_idle_seconds=max_idle)
+            if cleaned > 0:
+                print(f"[INFO] Background cleanup: Removed {cleaned} idle GitLab sessions")
+        except asyncio.CancelledError:
+            print("[INFO] Session cleanup task terminated")
+            break
+        except Exception as e:
+            print(f"[ERROR] Session cleanup task error: {e}")
 
 # ============================================================================
 # CORS Configuration
@@ -101,6 +132,9 @@ async def startup_event():
     # Launch Stdio MCP pipes in the background
     asyncio.create_task(mcp_service.boot_mcp_bridge())
 
+    # Launch background task to cleanup idle GitLab sessions
+    asyncio.create_task(run_session_cleanup())
+
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -131,7 +165,8 @@ async def health_check():
         "mcp_ready": mcp_service.mcp_ready,
         "mongo_connected": mcp_service.mongo_session is not None,
         "gitlab_connected": mcp_service.gitlab_session is not None,
-        "nexus_connected": mcp_service.nexus_session is not None
+        "nexus_connected": mcp_service.nexus_session is not None,
+        "gitlab_session_cache_size": mcp_service.get_session_cache_size()
     }
 
 
@@ -205,6 +240,175 @@ async def gitlab_webhook(request: Request, x_gitlab_event: str = Header(None)):
     return {"status": "event_ignored", "event": x_gitlab_event}
 
 
+@app.post("/webhooks/sentry")
+async def sentry_webhook(request: Request, x_sentry_signature: str = Header(None)):
+    """API endpoint to receive Sentry issue events for automated bug fix."""
+    import sys
+    sys.stderr.write(f"\n[WEBHOOK HIT!] Sentry webhook received\n")
+    sys.stderr.flush()
+
+    print(f"[DEBUG] ===== SENTRY WEBHOOK RECEIVED =====", flush=True)
+    print(f"[DEBUG] X-Sentry-Signature header: {x_sentry_signature}", flush=True)
+    print(f"[DEBUG] MCP ready: {mcp_service.mcp_ready}", flush=True)
+
+    # Extract project/org info from payload to auto-mark webhook as configured
+    payload = await request.json()
+
+    # Variables to store repository owner and GitLab project info for workflow
+    repo_owner_user_id = None
+    repo_owner_username = None
+    gitlab_project_id = None  # The actual GitLab project ID to use for cloning
+
+    # Auto-mark webhook as configured when we receive the first webhook
+    try:
+        # Extract org slug from the webhook payload
+        # Sentry webhook structure has org slug in data.issue.web_url (e.g., https://gatekeeper-nj.sentry.io/...)
+        org_slug = None
+
+        if isinstance(payload, dict):
+            # Try multiple paths to find the organization slug
+            # Path 1: Direct organization field (some webhook types)
+            org_slug = payload.get("organization", {}).get("slug")
+
+            # Path 2: From issue web_url (issue.created events)
+            if not org_slug and payload.get("data", {}).get("issue", {}).get("web_url"):
+                web_url = payload["data"]["issue"]["web_url"]
+                # Extract org slug from URL like "https://gatekeeper-nj.sentry.io/issues/..."
+                if "sentry.io" in web_url:
+                    org_slug = web_url.split("//")[1].split(".sentry.io")[0]
+                    print(f"[DEBUG] Extracted org_slug from web_url: {org_slug}", flush=True)
+
+            # Path 2.5: From error.url (error.created events) - NEW
+            if not org_slug and payload.get("data", {}).get("error", {}).get("url"):
+                error_url = payload["data"]["error"]["url"]
+                # Extract org slug from URL like "https://sentry.io/api/0/projects/gatekeeper-nj/gitnexus-demo/events/..."
+                if "sentry.io" in error_url and "/projects/" in error_url:
+                    # Format: https://sentry.io/api/0/projects/{org_slug}/{project_slug}/events/...
+                    url_parts = error_url.split("/projects/")
+                    if len(url_parts) > 1:
+                        org_slug = url_parts[1].split("/")[0]
+                        print(f"[DEBUG] Extracted org_slug from error.url: {org_slug}", flush=True)
+
+            # Path 3: From project slug as fallback (find repo by project slug instead)
+            project_slug = None
+            if not org_slug and payload.get("data", {}).get("issue", {}).get("project", {}).get("slug"):
+                project_slug = payload["data"]["issue"]["project"]["slug"]
+                print(f"[DEBUG] Using project_slug as fallback: {project_slug}", flush=True)
+
+        if org_slug:
+            # Find all repositories with this Sentry organization and mark webhook as configured
+            connected_repos = await mongo_client.find(
+                collection_name="connected_repositories",
+                filter={"sentry_integration.organizations.slug": org_slug}
+            )
+
+            for repo in connected_repos:
+                # Always update webhook_registered to true when data is reported
+                print(f"[DEBUG] Updating webhook_registered for repo: {repo.get('id')}", flush=True)
+
+                # Check if this is the first webhook or a subsequent one
+                is_first_webhook = repo.get("sentry_integration", {}).get("webhook_registered") is False
+
+                update_data = {
+                    "sentry_integration.webhook_registered": True,
+                    "sentry_integration.last_webhook_at": datetime.utcnow().isoformat()
+                }
+
+                # Set first_webhook_at and webhook_id only on first webhook
+                if is_first_webhook:
+                    update_data["sentry_integration.webhook_id"] = f"auto-{org_slug}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+                    update_data["sentry_integration.first_webhook_at"] = datetime.utcnow().isoformat()
+                    print(f"[DEBUG] First webhook received for repo: {repo.get('id')}", flush=True)
+                else:
+                    print(f"[DEBUG] Subsequent webhook received for repo: {repo.get('id')}", flush=True)
+
+                await mongo_client.update_one(
+                    collection_name="connected_repositories",
+                    filter={"id": repo.get("id")},
+                    update={"$set": update_data}
+                )
+                print(f"[DEBUG] webhook_registered updated to true for repo: {repo.get('id')}", flush=True)
+
+                # Capture repository owner info for workflow (use first repo found)
+                if repo_owner_user_id is None:
+                    repo_owner_user_id = repo.get("user_id")
+                    gitlab_project_id = repo.get("id")  # GitLab project ID
+                    print(f"[DEBUG] Using repo owner user_id: {repo_owner_user_id}, GitLab project: {gitlab_project_id}", flush=True)
+
+        elif project_slug:
+            # Fallback: Try to find repositories by project slug (in case org slug wasn't available)
+            # This matches repositories that might have this Sentry project connected
+            connected_repos = await mongo_client.find(
+                collection_name="connected_repositories",
+                filter={"sentry_integration.organizations.slug": {"$exists": True}}  # Has Sentry integration
+            )
+
+            for repo in connected_repos:
+                # Check if this repo might be related (same org could have multiple projects)
+                sentry_org = repo.get("sentry_integration", {}).get("organizations", [{}])[0].get("slug") if repo.get("sentry_integration", {}).get("organizations") else None
+
+                if sentry_org:
+                    # We found a repo with Sentry integration, update it
+                    print(f"[DEBUG] Found repo with Sentry integration for project: {project_slug}, org: {sentry_org}", flush=True)
+
+                    is_first_webhook = repo.get("sentry_integration", {}).get("webhook_registered") is False
+
+                    update_data = {
+                        "sentry_integration.webhook_registered": True,
+                        "sentry_integration.last_webhook_at": datetime.utcnow().isoformat()
+                    }
+
+                    if is_first_webhook:
+                        update_data["sentry_integration.webhook_id"] = f"auto-{sentry_org}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+                        update_data["sentry_integration.first_webhook_at"] = datetime.utcnow().isoformat()
+                        print(f"[DEBUG] First webhook received for repo: {repo.get('id')} (via project_slug)", flush=True)
+
+                    await mongo_client.update_one(
+                        collection_name="connected_repositories",
+                        filter={"id": repo.get("id")},
+                        update={"$set": update_data}
+                    )
+                    print(f"[DEBUG] webhook_registered updated to true for repo: {repo.get('id')} (via project_slug)", flush=True)
+
+                    # Capture repository owner info for workflow (use first repo found)
+                    if repo_owner_user_id is None:
+                        repo_owner_user_id = repo.get("user_id")
+                        gitlab_project_id = repo.get("id")  # GitLab project ID
+                        print(f"[DEBUG] Using repo owner user_id: {repo_owner_user_id}, GitLab project: {gitlab_project_id}", flush=True)
+    except Exception as e:
+        print(f"[WARN] Failed to auto-mark webhook as configured: {e}", flush=True)
+
+    # Log webhook to MongoDB
+    await mongo_client.insert_one(
+        collection_name="sentry_webhooks",
+        document={**payload, "received_at": datetime.utcnow().isoformat()}
+    )
+
+    # Check MCP readiness
+    if not mcp_service.mcp_ready:
+        print("[⚠️] MCP sessions not ready yet - cannot process webhook")
+        print("[ℹ️] Please wait a few seconds for the MCP bridge to initialize")
+        return {"status": "mcp_not_ready", "message": "MCP sessions still initializing. Please retry in a few seconds."}
+
+    # Invoke Sentry workflow with Gemini AI and full tool access
+    import logging
+    logger = logging.getLogger(__name__)
+    from agents.workflows import run_sentry_bug_workflow
+
+    # Extract issue_id for logging
+    issue_id = payload.get("data", {}).get("error", {}).get("issue_id", "unknown")
+    logger.info(f"Invoking Sentry workflow for issue {issue_id}")
+
+    # Pass repository owner info and GitLab project ID if available
+    if repo_owner_user_id:
+        logger.info(f"Using repository owner: {repo_owner_username} ({repo_owner_user_id}), GitLab project: {gitlab_project_id}")
+        result = await run_sentry_bug_workflow(payload, user_id=repo_owner_user_id, username=repo_owner_username, target_project_id=gitlab_project_id)
+    else:
+        logger.warning("No repository owner found, using default sentry-operator user")
+        result = await run_sentry_bug_workflow(payload)
+    return result
+
+
 # ============================================================================
 # Authentication Endpoints
 # ============================================================================
@@ -241,6 +445,89 @@ async def gitlab_oauth_callback(code: str, state: str):
         raise e
     except Exception as e:
         print(f"[ERROR] OAuth callback failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/auth/sentry/init")
+async def initiate_sentry_oauth(request: SentryIntegrationInitiateRequest):
+    """Initiate Sentry OAuth flow for a repository."""
+    try:
+        import os
+        print(f"[DEBUG /api/auth/sentry/init] SENTRY_CLIENT_ID from os.getenv: {os.getenv('SENTRY_CLIENT_ID', 'NOT_SET')[:20]}...", flush=True)
+
+        from services.sentry_oauth_service import get_sentry_oauth_service
+        service = get_sentry_oauth_service()
+        print(f"[DEBUG /api/auth/sentry/init] service.client_id: {service.client_id[:20] if service.client_id else 'EMPTY'}", flush=True)
+
+        result = await service.initiate_oauth(request.user_id, request.repo_id)
+        print(f"[DEBUG /api/auth/sentry/init] result oauth_url: {result.get('oauth_url', 'NO_URL')[:100]}...", flush=True)
+        return SentryIntegrationInitiateResponse(**result)
+    except Exception as e:
+        print(f"[ERROR] Failed to initiate Sentry OAuth: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/auth/sentry/callback")
+async def sentry_oauth_callback(request: SentryCallbackRequest):
+    """Handle Sentry OAuth callback and auto-register webhook."""
+    try:
+        from services.sentry_oauth_service import get_sentry_oauth_service
+        service = get_sentry_oauth_service()
+        result = await service.handle_callback(request.code, request.state)
+        return result
+    except ValueError as e:
+        print(f"[ERROR] Sentry OAuth callback failed: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        print(f"[ERROR] Sentry OAuth callback error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/auth/sentry/status/{repo_id}", response_model=SentryIntegrationResponse)
+async def get_sentry_integration_status(repo_id: str):
+    """Get Sentry integration status for a repository, including webhook setup instructions."""
+    try:
+        from services.sentry_oauth_service import get_sentry_oauth_service
+        service = get_sentry_oauth_service()
+        status = await service.get_integration_status(repo_id)
+
+        # Transform the response to match the expected format
+        return SentryIntegrationResponse(
+            connected=status.get("connected", False),
+            org_slug=status.get("org_slug"),
+            webhook_registered=status.get("webhook_registered", False),
+            connected_at=status.get("connected_at"),
+            webhook_id=status.get("webhook_id"),
+            webhook_config=status.get("webhook_setup_instructions")
+        )
+    except Exception as e:
+        print(f"[ERROR] Failed to get Sentry integration status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/auth/sentry/verify-webhook", response_model=SentryWebhookVerifyResponse)
+async def verify_sentry_webhook(request: SentryWebhookVerifyRequest):
+    """Verify if Sentry webhook is properly configured and working."""
+    try:
+        from services.sentry_oauth_service import get_sentry_oauth_service
+        service = get_sentry_oauth_service()
+        result = await service.verify_webhook(request.repo_id)
+        return SentryWebhookVerifyResponse(**result)
+    except Exception as e:
+        print(f"[ERROR] Failed to verify Sentry webhook: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/auth/sentry/confirm-webhook")
+async def confirm_sentry_webhook(request: SentryWebhookVerifyRequest):
+    """Confirm that the Sentry webhook is working after manual verification."""
+    try:
+        from services.sentry_oauth_service import get_sentry_oauth_service
+        service = get_sentry_oauth_service()
+        result = await service.confirm_webhook(request.repo_id)
+        return result
+    except Exception as e:
+        print(f"[ERROR] Failed to confirm Sentry webhook: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -901,6 +1188,70 @@ async def disconnect_gitlab_integration(authorization: str = Header(None)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/debug/env")
+async def debug_env():
+    """Debug endpoint to check environment variables."""
+    import os
+    from dotenv import load_dotenv
+    load_dotenv()
+    return {
+        "SENTRY_CLIENT_ID": os.getenv("SENTRY_CLIENT_ID", "NOT_SET"),
+        "SENTRY_CLIENT_SECRET": os.getenv("SENTRY_CLIENT_SECRET", "NOT_SET")[:20] + "..." if os.getenv("SENTRY_CLIENT_SECRET") else "NOT_SET",
+        "SENTRY_REDIRECT_URI": os.getenv("SENTRY_REDIRECT_URI", "NOT_SET"),
+        "FRONTEND_URL": os.getenv("FRONTEND_URL", "NOT_SET"),
+        "env_file_loaded": "YES"
+    }
+
+@app.get("/api/integrations/sentry/{repo_id}", response_model=SentryIntegrationResponse)
+async def get_sentry_integration_status(repo_id: str, authorization: str = Header(None)):
+    """Get Sentry integration status for a repository."""
+    try:
+        if not authorization:
+            raise HTTPException(status_code=401, detail="Authorization required")
+
+        token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+        user_info = auth_service.verify_token(token)
+
+        if not user_info:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        from services.sentry_oauth_service import get_sentry_oauth_service
+        service = get_sentry_oauth_service()
+        status = await service.get_integration_status(repo_id)
+
+        return SentryIntegrationResponse(**status)
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        print(f"[ERROR] Failed to get Sentry integration status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/integrations/sentry/{repo_id}/disconnect", response_model=SentryIntegrationDisconnectResponse)
+async def disconnect_sentry_integration(repo_id: str, authorization: str = Header(None)):
+    """Disconnect Sentry integration for a repository."""
+    try:
+        if not authorization:
+            raise HTTPException(status_code=401, detail="Authorization required")
+
+        token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+        user_info = auth_service.verify_token(token)
+
+        if not user_info:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        from services.sentry_oauth_service import get_sentry_oauth_service
+        service = get_sentry_oauth_service()
+        result = await service.disconnect(repo_id)
+
+        return SentryIntegrationDisconnectResponse(**result)
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        print(f"[ERROR] Failed to disconnect Sentry integration: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ============================================================================
 # Billing Endpoints
 # ============================================================================
@@ -1165,3 +1516,50 @@ async def get_billing_summary_debug(authorization: str = Header(None)):
     except Exception as e:
         print(f"[ERROR] Failed to get billing summary debug: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+# ============================================================================
+# GitNexus API Proxy Endpoints
+# ============================================================================
+
+@app.get("/api/grep")
+async def gitnexus_grep_proxy(
+    pattern: str = Query(...),
+    repo: Optional[str] = None,
+    limit: int = Query(100)
+):
+    """
+    Proxy for GitNexus grep API.
+    Converts GET /api/grep to GitNexus MCP tool call.
+    """
+    try:
+        result = await gitnexus_manager.grep(pattern=pattern, repo=repo, limit=limit)
+        return result
+    except Exception as e:
+        print(f"[ERROR] GitNexus grep proxy error: {e}")
+        return {"error": str(e), "results": []}
+
+
+@app.get("/api/file")
+async def gitnexus_file_proxy(
+    path: str = Query(...),
+    repo: Optional[str] = None,
+    start_line: Optional[int] = None,
+    end_line: Optional[int] = None
+):
+    """
+    Proxy for GitNexus file read API.
+    Converts GET /api/file to GitNexus MCP tool call.
+    """
+    try:
+        result = await gitnexus_manager.file(
+            path=path,
+            repo=repo,
+            start_line=start_line,
+            end_line=end_line
+        )
+        return result
+    except Exception as e:
+        print(f"[ERROR] GitNexus file proxy error: {e}")
+        return {"error": str(e)}
+
+
+# ============================================================================

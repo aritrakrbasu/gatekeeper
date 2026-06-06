@@ -1,7 +1,9 @@
 import os
 import asyncio
+import time
 from pathlib import Path
 from contextlib import AsyncExitStack
+from typing import Dict, Tuple, Optional, Any
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.types import Implementation
@@ -11,12 +13,18 @@ mongo_session = None
 gitlab_session = None
 nexus_session = None
 dynatrace_session = None
+sentry_session = None
 mcp_ready = False  # Track when MCP sessions are ready
+
+# Session cache for per-user GitLab MCP sessions
+# {user_id: (session, stdio_read, stdio_write, last_used_timestamp, background_task)}
+_gitlab_session_cache: Dict[str, Tuple[ClientSession, Any, Any, float, asyncio.Task]] = {}
+_cache_lock = asyncio.Lock()
 
 
 async def boot_mcp_bridge():
-    """Spins up and maintains persistent stdio pipes to MongoDB, GitLab, GitNexus, and Dynatrace MCP servers"""
-    global mongo_session, gitlab_session, nexus_session, dynatrace_session, mcp_ready
+    """Spins up and maintains persistent stdio pipes to MongoDB, GitLab, GitNexus, Dynatrace, and Sentry MCP servers"""
+    global mongo_session, gitlab_session, nexus_session, dynatrace_session, sentry_session, mcp_ready
 
     # Detect platform and configure paths dynamically
     is_windows = Path(__file__).parent.name == "Windows"
@@ -109,7 +117,16 @@ async def boot_mcp_bridge():
     else:
         print("[WARN] Dynatrace not configured. (DT_ENVIRONMENT and DT_PLATFORM_TOKEN/DT_API_TOKEN environment variables missing)")
 
-    print("[INFO] Igniting MCP Orchestrator Core (MongoDB + GitLab + optional GitNexus + optional Dynatrace)...")
+    # Check if Sentry is configured
+    sentry_org_slug = os.getenv("SENTRY_ORGANIZATION_SLUG", "")
+    sentry_token = os.getenv("SENTRY_AUTH_TOKEN", "")
+    sentry_configured = bool(sentry_org_slug and sentry_token)
+    if sentry_configured:
+        print(f"[OK] Sentry configured: {sentry_org_slug}")
+    else:
+        print("[WARN] Sentry not configured. (SENTRY_ORGANIZATION_SLUG and SENTRY_AUTH_TOKEN environment variables missing)")
+
+    print("[INFO] Igniting MCP Orchestrator Core (MongoDB + GitLab + optional GitNexus + optional Dynatrace + optional Sentry)...")
     print("[INFO] This may take 10-30 seconds to initialize all connections...")
 
 
@@ -166,6 +183,25 @@ async def boot_mcp_bridge():
                     print(f"[WARN] Failed to connect to Dynatrace MCP: {e}")
                     dynatrace_configured = False
 
+            # 5. Connect Sentry stdio client (optional)
+            s_read, s_write = None, None
+            if sentry_configured:
+                try:
+                    sentry_params = StdioServerParameters(
+                        command=npx_cmd,
+                        args=["-y", "@sentryio/mcp-server@latest"],
+                        env={
+                            **os.environ,
+                            "SENTRY_AUTH_TOKEN": sentry_token,
+                            "SENTRY_ORGANIZATION_SLUG": sentry_org_slug
+                        }
+                    )
+                    s_read, s_write = await stack.enter_async_context(stdio_client(sentry_params))
+                    print("[OK] Sentry stdio client connected")
+                except Exception as e:
+                    print(f"[WARN] Failed to connect to Sentry MCP: {e}")
+                    sentry_configured = False
+
             # 5. Initialize client sessions
             m_sess = await stack.enter_async_context(ClientSession(m_read, m_write, client_info=Implementation(name="gk-db", version="1.0.0")))
             g_sess = await stack.enter_async_context(ClientSession(g_read, g_write, client_info=Implementation(name="gk-git", version="1.0.0")))
@@ -177,6 +213,10 @@ async def boot_mcp_bridge():
             d_sess = None
             if d_read and d_write:
                 d_sess = await stack.enter_async_context(ClientSession(d_read, d_write, client_info=Implementation(name="gk-dynatrace", version="1.0.0")))
+
+            s_sess = None
+            if s_read and s_write:
+                s_sess = await stack.enter_async_context(ClientSession(s_read, s_write, client_info=Implementation(name="gk-sentry", version="1.0.0")))
 
             # 6. Initialize protocol handshakes
             print("[INFO] Initializing MongoDB MCP session...")
@@ -228,6 +268,20 @@ async def boot_mcp_bridge():
                 except Exception as e:
                     print(f"[WARN] Dynatrace initialization failed: {e}")
 
+            # Initialize Sentry (optional)
+            if s_sess:
+                print("[INFO] Initializing Sentry MCP session (optional)...")
+                try:
+                    await asyncio.wait_for(s_sess.initialize(), timeout=15.0)
+                    try:
+                        sentry_tools = await s_sess.list_tools()
+                        sentry_session = s_sess
+                        print(f"[OK] Sentry MCP initialized successfully: {[t.name for t in sentry_tools.tools[:3]]}")
+                    except Exception as e:
+                        print(f"[WARN] Sentry tool verification failed: {e}")
+                except Exception as e:
+                    print(f"[WARN] Sentry initialization failed: {e}")
+
             print("[OK] MCP Bridge fully initialized!")
 
             # Keep the background process streams alive indefinitely
@@ -251,4 +305,289 @@ async def boot_mcp_bridge():
             print("[ERROR] Critical MCP connections failed - webhooks will not be processed")
             mcp_ready = False
         raise
+
+
+# ============================================================================
+# Dynamic GitLab Session Management (Token Refresh Pattern)
+# ============================================================================
+
+async def get_gitlab_session_for_user(user_id: str, project_id: Optional[str] = None) -> Optional[ClientSession]:
+    """
+    Get or create a GitLab MCP session for a specific user with their token.
+    Implements Token Refresh Pattern with caching.
+
+    Args:
+        user_id: User ID to get session for
+        project_id: Optional project ID for project-specific tokens
+
+    Returns:
+        ClientSession for GitLab MCP or None if unavailable
+    """
+    # Check cache first (thread-safe)
+    async with _cache_lock:
+        if user_id in _gitlab_session_cache:
+            sess, r, w, last_used, task = _gitlab_session_cache[user_id]
+            _gitlab_session_cache[user_id] = (sess, r, w, time.time(), task)  # Update last used
+            print(f"[INFO] Using cached GitLab session for user {user_id}")
+            return sess
+
+    # Get user's GitLab token from MongoDB
+    from services.user_service import get_user_gitlab_token
+    token = await get_user_gitlab_token(user_id, project_id or "")
+
+    if not token:
+        # Fallback to env token (for system operations)
+        token = os.getenv("GITLAB_PERSONAL_ACCESS_TOKEN", "")
+        if not token:
+            print(f"[WARN] No GitLab token available for user {user_id}")
+            return None
+        print(f"[INFO] Using fallback env token for user {user_id}")
+    else:
+        print(f"[INFO] Retrieved project-specific token from MongoDB for user {user_id}")
+
+    # Create new session with user's token
+    return await _create_gitlab_session_with_token(user_id, token)
+
+
+async def _create_gitlab_session_with_token(user_id: str, token: str) -> Optional[ClientSession]:
+    """
+    Create a new GitLab MCP session with a specific token and cache it.
+    Creates a background task to keep the stdio client alive.
+
+    Args:
+        user_id: User ID for cache key
+        token: GitLab PAT token
+
+    Returns:
+        ClientSession or None if creation fails
+    """
+    # Detect platform and configure paths
+    is_windows = Path(__file__).parent.name == "Windows"
+
+    if is_windows:
+        node_cmd = r"C:\Program Files\nodejs\node.exe" if Path(r"C:\Program Files\nodejs\node.exe").exists() else "node"
+    else:
+        node_cmd = "node"
+
+    # Find GitLab MCP server path
+    root_dir = Path(__file__).parent.parent
+    local_gitlab = root_dir / "node_modules" / "@zereight" / "mcp-gitlab" / "build" / "index.js"
+    if local_gitlab.exists():
+        gitlab_js_path = str(local_gitlab.resolve())
+    else:
+        gitlab_js_path = r"C:\Users\BCSKOL36\AppData\Roaming\npm\node_modules\@zereight\mcp-gitlab\build\index.js"
+
+    # Validate that the MCP server file exists
+    if not Path(gitlab_js_path).exists():
+        print(f"[ERROR] GitLab MCP server not found at: {gitlab_js_path}")
+        return None
+
+    # Validate that Node.js exists
+    if not Path(node_cmd).exists() and node_cmd != "node":
+        print(f"[ERROR] Node.js not found at: {node_cmd}")
+        return None
+
+    print(f"[INFO] Creating new GitLab MCP session for user {user_id}...")
+    print(f"[DEBUG] Using Node.js: {node_cmd}")
+    print(f"[DEBUG] Using MCP server: {gitlab_js_path}")
+
+    # Create stdio server parameters with user's token
+    gitlab_params = StdioServerParameters(
+        command=node_cmd,
+        args=[gitlab_js_path],
+        env={
+            **os.environ,
+            "GITLAB_PERSONAL_ACCESS_TOKEN": token,
+            "GITLAB_URL": "https://gitlab.com"
+        }
+    )
+
+    # Create an event to signal when the session is ready
+    ready_event = asyncio.Event()
+    init_result = {"session": None, "error": None}
+
+    async def keep_session_alive():
+        """Background task to keep the stdio client alive."""
+        try:
+            print(f"[DEBUG] User {user_id}: Starting stdio_client...")
+            async with stdio_client(gitlab_params) as (read, write):
+                print(f"[DEBUG] User {user_id}: stdio_client connected, creating ClientSession...")
+
+                # Small delay to let subprocess fully start
+                await asyncio.sleep(0.5)
+
+                # Create session
+                sess = ClientSession(read, write, client_info=Implementation(name="gk-git-dynamic", version="1.0.0"))
+
+                # Initialize with timeout
+                try:
+                    print(f"[DEBUG] User {user_id}: Calling sess.initialize()...")
+                    await asyncio.wait_for(sess.initialize(), timeout=30.0)
+                    print(f"[DEBUG] User {user_id}: sess.initialize() completed")
+
+                    # Verify by listing tools
+                    tools = await sess.list_tools()
+                    print(f"[OK] GitLab session created for user {user_id}. Tools: {[t.name for t in tools.tools[:2]]}")
+
+                    # Signal that session is ready
+                    init_result["session"] = sess
+                    ready_event.set()
+
+                    # Cache the session (with this background task)
+                    current_task = asyncio.current_task()
+                    async with _cache_lock:
+                        _gitlab_session_cache[user_id] = (sess, read, write, time.time(), current_task)
+
+                    # Keep the stdio client alive indefinitely
+                    print(f"[DEBUG] User {user_id}: Session cached, keeping alive...")
+                    await asyncio.sleep(float('inf'))
+
+                except asyncio.TimeoutError:
+                    print(f"[ERROR] User {user_id}: Session initialization timed out after 30 seconds")
+                    init_result["error"] = asyncio.TimeoutError("Initialization timed out")
+                    ready_event.set()
+                    raise
+                except asyncio.CancelledError:
+                    print(f"[INFO] GitLab session for user {user_id} cancelled during initialization")
+                    init_result["error"] = asyncio.CancelledError("Cancelled during initialization")
+                    ready_event.set()
+                    raise
+                except Exception as e:
+                    print(f"[ERROR] User {user_id}: Failed to initialize session: {type(e).__name__}: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    init_result["error"] = e
+                    ready_event.set()
+                    raise
+
+        except asyncio.CancelledError:
+            print(f"[INFO] GitLab session task for user {user_id} cancelled")
+            if not ready_event.is_set():
+                ready_event.set()
+        except Exception as e:
+            print(f"[ERROR] GitLab session task for user {user_id} failed: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
+            if not ready_event.is_set():
+                init_result["error"] = e
+                ready_event.set()
+
+    # Start the background task
+    task = asyncio.create_task(keep_session_alive())
+
+    # Wait for the session to be ready or timeout
+    try:
+        await asyncio.wait_for(ready_event.wait(), timeout=20.0)
+
+        if init_result["error"]:
+            raise init_result["error"]
+
+        session = init_result["session"]
+        if not session:
+            raise RuntimeError("Session initialization failed")
+
+        return session
+
+    except asyncio.TimeoutError:
+        print(f"[ERROR] Timeout waiting for GitLab session for user {user_id}")
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return None
+    except Exception as e:
+        print(f"[ERROR] Failed to create GitLab session for user {user_id}: {e}")
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return None
+
+
+async def cleanup_gitlab_session(user_id: str) -> bool:
+    """
+    Close and remove a user's GitLab session from cache.
+    Cancels the background task keeping the session alive.
+
+    Args:
+        user_id: User ID whose session to cleanup
+
+    Returns:
+        True if session was found and cleaned up
+    """
+    global _gitlab_session_cache
+
+    async with _cache_lock:
+        if user_id not in _gitlab_session_cache:
+            return False
+
+        sess, read, write, last_used, task = _gitlab_session_cache.pop(user_id)
+
+    try:
+        # Cancel the background task
+        if task and not task.done():
+            task.cancel()
+            try:
+                await asyncio.wait_for(task, timeout=5.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+
+        print(f"[INFO] Cleaned up GitLab session for user {user_id}")
+        return True
+    except Exception as e:
+        print(f"[WARN] Error cleaning up session for user {user_id}: {e}")
+        return False
+
+
+async def cleanup_idle_sessions(max_idle_seconds: int = 3600) -> int:
+    """
+    Background task to cleanup idle sessions.
+
+    Args:
+        max_idle_seconds: Maximum idle time before cleanup (default: 1 hour)
+
+    Returns:
+        Number of sessions cleaned up
+    """
+    global _gitlab_session_cache
+
+    current_time = time.time()
+    idle_users = []
+
+    async with _cache_lock:
+        for user_id, (sess, read, write, last_used, task) in _gitlab_session_cache.items():
+            idle_time = current_time - last_used
+            if idle_time > max_idle_seconds:
+                idle_users.append((user_id, task))
+
+    cleaned_count = 0
+    for user_id, task in idle_users:
+        try:
+            # Cancel the background task
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await asyncio.wait_for(task, timeout=5.0)
+                except (asyncio.CancelledError, asyncio.TimeoutError):
+                    pass
+
+            async with _cache_lock:
+                _gitlab_session_cache.pop(user_id, None)
+
+            cleaned_count += 1
+            print(f"[INFO] Cleaned up idle session for user {user_id}")
+        except Exception as e:
+            print(f"[WARN] Error cleaning up idle session for user {user_id}: {e}")
+
+    if cleaned_count > 0:
+        print(f"[INFO] Cleaned up {cleaned_count} idle GitLab sessions")
+
+    return cleaned_count
+
+
+def get_session_cache_size() -> int:
+    """Get the current size of the GitLab session cache."""
+    return len(_gitlab_session_cache)
 

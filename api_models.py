@@ -4,7 +4,7 @@ Used for request validation and response serialization across all API endpoints.
 """
 
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 from enum import Enum
 
@@ -427,4 +427,137 @@ class UpdateRepositoryResponse(BaseModel):
     fivetran_key_configured: bool
     fivetran_secret_configured: bool
     credentials_encrypted: bool
+
+
+# ============================================================================
+# Sentry Webhook Models
+# ============================================================================
+
+
+class SentryIssueSeverity(str, Enum):
+    """Sentry issue severity levels."""
+    FATAL = "fatal"
+    ERROR = "error"
+    WARNING = "warning"
+    INFO = "info"
+    DEBUG = "debug"
+
+
+class SentryEnvironment(str, Enum):
+    """Sentry environment names."""
+    PRODUCTION = "production"
+    STAGING = "staging"
+    DEVELOPMENT = "development"
+    TESTING = "testing"
+
+
+class SentryStacktraceFrame(BaseModel):
+    """Single stack trace frame from Sentry."""
+    filename: str = Field(..., description="File where the error occurred")
+    function: str = Field(..., description="Function name where the error occurred")
+    lineno: int = Field(..., description="Line number of the error")
+    colno: Optional[int] = Field(None, description="Column number of the error")
+    context_line: Optional[str] = Field(None, description="Line of code that caused the error")
+    pre_context: List[str] = Field(default_factory=list, description="Lines before the error")
+    post_context: List[str] = Field(default_factory=list, description="Lines after the error")
+
+
+class SentryWebhookPayload(BaseModel):
+    """Complete Sentry webhook payload for issue events."""
+    issue_id: str = Field(..., description="Unique Sentry issue identifier")
+    title: str = Field(..., description="Issue title")
+    level: SentryIssueSeverity = Field(..., description="Severity level of the issue")
+    environment: SentryEnvironment = Field(..., description="Environment where the issue occurred")
+    culprit: Optional[str] = Field(None, description="Function or location that caused the issue")
+    message: str = Field(..., description="Error message")
+    stacktrace: Optional[List[SentryStacktraceFrame]] = Field(default_factory=list, description="Stack trace frames")
+    project: str = Field(..., description="Sentry project slug")
+    release: Optional[str] = Field(None, description="Release version")
+    tags: Dict[str, str] = Field(default_factory=dict, description="Custom tags including git commit SHA")
+    first_seen: datetime = Field(..., description="First time the issue was seen")
+    last_seen: datetime = Field(..., description="Last time the issue was seen")
+    transaction: Optional[str] = Field(None, description="Transaction name")
+    event_id: Optional[str] = Field(None, description="Unique event identifier")
+    platform: Optional[str] = Field(None, description="Platform (e.g., python, node, javascript)")
+    request: Optional[Dict[str, Any]] = Field(None, description="Request context data")
+
+
+class SentryBugFixResponse(BaseModel):
+    """Response after processing a Sentry bug and creating a fix."""
+    status: str = Field(..., description="Status of the bug fix workflow")
+    issue_id: str = Field(..., description="Sentry issue ID")
+    mr_created: bool = Field(..., description="Whether a merge request was created")
+    mr_iid: Optional[int] = Field(None, description="Merge request IID")
+    mr_url: Optional[str] = Field(None, description="Merge request URL")
+    fix_summary: Optional[str] = Field(None, description="Summary of the fix applied")
+    error: Optional[str] = Field(None, description="Error message if the workflow failed")
+
+
+class SentryIntegrationInitiateRequest(BaseModel):
+    """Request to initiate Sentry OAuth for a repository."""
+    user_id: str = Field(..., description="User ID initiating the OAuth flow")
+    repo_id: str = Field(..., description="Repository ID to connect Sentry to")
+
+
+class SentryIntegrationInitiateResponse(BaseModel):
+    """Response with Sentry OAuth URL."""
+    oauth_url: str = Field(..., description="Sentry OAuth authorization URL")
+    state: str = Field(..., description="State parameter for CSRF protection")
+
+
+class SentryCallbackRequest(BaseModel):
+    """Request to handle Sentry OAuth callback."""
+    code: str = Field(..., description="Authorization code from Sentry")
+    state: str = Field(..., description="State parameter for validation")
+
+
+class SentryIntegrationResponse(BaseModel):
+    """Sentry integration status response."""
+    connected: bool = Field(..., description="Whether Sentry is connected")
+    org_slug: Optional[str] = Field(None, description="Sentry organization slug")
+    webhook_registered: bool = Field(..., description="Whether webhook is registered")
+    connected_at: Optional[str] = Field(None, description="ISO timestamp of connection")
+    webhook_id: Optional[str] = Field(None, description="Sentry webhook ID")
+    webhook_config: Optional[dict] = Field(None, description="Webhook configuration for manual setup")
+
+
+class SentryIntegrationDisconnectResponse(BaseModel):
+    """Response after disconnecting Sentry integration."""
+    status: str = Field(..., description="Status of the disconnection")
+    message: str = Field(..., description="Human-readable message")
+
+
+class SentryWebhookSetupStep(BaseModel):
+    """Single step in webhook setup instructions."""
+    step: int = Field(..., description="Step number")
+    title: str = Field(..., description="Step title")
+    description: str = Field(..., description="Step description")
+    url: Optional[str] = Field(None, description="URL to open for this step")
+    action_text: str = Field(..., description="Action text for the button")
+    config_value: Optional[str] = Field(None, description="Configuration value to copy")
+    config_label: Optional[str] = Field(None, description="Label for configuration value")
+
+
+class SentryWebhookSetupInstructions(BaseModel):
+    """Webhook setup instructions."""
+    webhook_url: str = Field(..., description="Webhook URL to configure")
+    events: List[str] = Field(..., description="Events to subscribe to")
+    steps: List[SentryWebhookSetupStep] = Field(..., description="Setup steps")
+    verification_note: str = Field(..., description="Note about verification")
+    troubleshooting: List[str] = Field(..., description="Troubleshooting tips")
+
+
+class SentryWebhookVerifyRequest(BaseModel):
+    """Request to verify Sentry webhook configuration."""
+    repo_id: str = Field(..., description="Repository ID to verify webhook for")
+
+
+class SentryWebhookVerifyResponse(BaseModel):
+    """Response after verifying Sentry webhook configuration."""
+    verified: bool = Field(..., description="Whether webhook is verified and working")
+    message: str = Field(..., description="Human-readable message")
+    webhook_id: Optional[str] = Field(None, description="Webhook ID if verified")
+    webhook: Optional[Dict[str, Any]] = Field(None, description="Webhook details if verified")
+    steps_required: Optional[List[str]] = Field(None, description="Steps to fix if not verified")
+    setup_instructions: Optional[SentryWebhookSetupInstructions] = Field(None, description="Setup instructions if needed")
 

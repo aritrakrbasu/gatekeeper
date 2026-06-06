@@ -152,6 +152,55 @@ gitnexus_analyze_schema = {
     }
 }
 
+create_gitlab_branch_schema = {
+    "name": "create_gitlab_branch",
+    "description": "Create a new branch in a GitLab repository using the GitLab REST API.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "user_id": {"type": "STRING", "description": "The user ID for authentication lookups."},
+            "project_id": {"type": "STRING", "description": "GitLab project ID."},
+            "branch_name": {"type": "STRING", "description": "The name of the new branch to create."},
+            "ref": {"type": "STRING", "description": "The branch name or commit SHA to create the branch from (defaults to 'main')."}
+        },
+        "required": ["user_id", "project_id", "branch_name"]
+    }
+}
+
+create_gitlab_merge_request_schema = {
+    "name": "create_gitlab_merge_request",
+    "description": "Create a new merge request in GitLab using the REST API.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "user_id": {"type": "STRING", "description": "The user ID for authentication lookups."},
+            "project_id": {"type": "STRING", "description": "GitLab project ID."},
+            "source_branch": {"type": "STRING", "description": "The source branch for the merge request."},
+            "target_branch": {"type": "STRING", "description": "The target branch to merge into."},
+            "title": {"type": "STRING", "description": "Title of the merge request."},
+            "description": {"type": "STRING", "description": "Description of the merge request (supports markdown)."}
+        },
+        "required": ["user_id", "project_id", "source_branch", "target_branch", "title"]
+    }
+}
+
+commit_file_to_branch_schema = {
+    "name": "commit_file_to_branch",
+    "description": "Commit a file to a GitLab branch using the REST API. Creates a new commit with the file content.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "user_id": {"type": "STRING", "description": "The user ID for authentication lookups."},
+            "project_id": {"type": "STRING", "description": "GitLab project ID."},
+            "file_path": {"type": "STRING", "description": "The full path to the file in the repository (e.g., 'src/app.py')."},
+            "branch_name": {"type": "STRING", "description": "The branch name to commit to."},
+            "content": {"type": "STRING", "description": "The file content to write."},
+            "commit_message": {"type": "STRING", "description": "The commit message."}
+        },
+        "required": ["user_id", "project_id", "file_path", "branch_name", "content", "commit_message"]
+    }
+}
+
 # ============================================================================
 # Tool callback functions
 # ============================================================================
@@ -412,7 +461,7 @@ async def gitnexus_analyze(repo_path: str) -> Dict[str, Any]:
             npx_cmd = nodejs_dir / "npx.cmd"
             if npx_cmd.exists():
                 npx_executable = str(npx_cmd)
-                
+
     try:
         res = subprocess.run(
             [npx_executable, "gitnexus", "analyze"],
@@ -429,3 +478,278 @@ async def gitnexus_analyze(repo_path: str) -> Dict[str, Any]:
         }
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+
+# ============================================================================
+# GitLab REST API Helper Functions (for direct API calls without MCP)
+# ============================================================================
+
+async def _get_gitlab_token_for_user(user_id: str, project_id: str) -> str:
+    """
+    Get GitLab token for a user and project.
+    Priority:
+    1. User's project-specific token (from user_service)
+    2. Global GITLAB_PERSONAL_ACCESS_TOKEN
+
+    Args:
+        user_id: User ID
+        project_id: Project ID
+
+    Returns:
+        GitLab access token or empty string if not found
+    """
+    # Try project-specific token first
+    project_token = await user_service.get_user_gitlab_token(str(user_id), str(project_id))
+    if project_token:
+        return project_token
+
+    # Fallback to global token
+    global_token = os.getenv("GITLAB_PERSONAL_ACCESS_TOKEN", "")
+    if global_token:
+        print(f"[INFO] Using global GitLab token for user {user_id}, project {project_id}")
+        return global_token
+
+    print(f"[WARN] No GitLab token found for user {user_id}, project {project_id}")
+    return ""
+
+
+async def _gitlab_rest_api_call(
+    user_id: str,
+    project_id: str,
+    method: str,
+    endpoint: str,
+    params: Dict = None,
+    json_data: Dict = None,
+    use_fallback: bool = True
+) -> Dict[str, Any]:
+    """
+    Direct GitLab REST API call using httpx with user token authentication.
+
+    Args:
+        user_id: User ID for authentication
+        project_id: Project ID for authentication
+        method: HTTP method (GET, POST, PUT, DELETE)
+        endpoint: API endpoint path (e.g., "/projects/123/repository/branches")
+        params: Query parameters
+        json_data: Request body for POST/PUT
+        use_fallback: If True, fall back to global token on 401
+
+    Returns:
+        Response JSON as dict
+
+    Raises:
+        Exception: If API call fails or no token available
+    """
+    gitlab_base_url = os.getenv("GITLAB_BASE_URL", "https://gitlab.com")
+    token = await _get_gitlab_token_for_user(user_id, project_id)
+
+    if not token:
+        raise Exception(f"No GitLab token found for user {user_id}, project {project_id}")
+
+    url = f"{gitlab_base_url}/api/v4{endpoint}"
+    headers = {"Authorization": f"Bearer {token}"}
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        # Try with user's token first
+        if method.upper() == "GET":
+            response = await client.get(url, headers=headers, params=params)
+        elif method.upper() == "POST":
+            response = await client.post(url, headers=headers, params=params, json=json_data)
+        elif method.upper() == "PUT":
+            response = await client.put(url, headers=headers, params=params, json=json_data)
+        elif method.upper() == "DELETE":
+            response = await client.delete(url, headers=headers, params=params)
+        else:
+            raise ValueError(f"Unsupported method: {method}")
+
+        # If user's token fails with 401, try with global token as fallback
+        if response.status_code == 401 and use_fallback:
+            print(f"[WARN] User token failed with 401, trying fallback to global token...")
+            global_token = os.getenv("GITLAB_PERSONAL_ACCESS_TOKEN")
+            if global_token and global_token != token:
+                headers["Authorization"] = f"Bearer {global_token}"
+
+                if method.upper() == "GET":
+                    response = await client.get(url, headers=headers, params=params)
+                elif method.upper() == "POST":
+                    response = await client.post(url, headers=headers, params=params, json=json_data)
+                elif method.upper() == "PUT":
+                    response = await client.put(url, headers=headers, params=params, json=json_data)
+                elif method.upper() == "DELETE":
+                    response = await client.delete(url, headers=headers, params=params)
+
+                print(f"[INFO] Retried with global token, status: {response.status_code}")
+            else:
+                print(f"[WARN] No global token available for fallback")
+
+        if response.status_code >= 400:
+            error_msg = response.text if response.text else f"HTTP {response.status_code}"
+            raise Exception(f"GitLab API error: {error_msg}")
+
+        return response.json() if response.text else {}
+
+
+# ============================================================================
+# GitLab REST API Tool Callbacks
+# ============================================================================
+
+async def create_gitlab_branch(
+    user_id: str,
+    project_id: str,
+    branch_name: str,
+    ref: str = "main"
+) -> Dict[str, Any]:
+    """
+    Create a new branch in GitLab using direct REST API call.
+
+    Args:
+        user_id: User ID for authentication
+        project_id: GitLab project ID
+        branch_name: Name of the new branch
+        ref: Branch name or commit SHA to create from (default: main)
+
+    Returns:
+        Dictionary with branch info (name, commit, etc.)
+    """
+    payload = {
+        "branch": branch_name,
+        "ref": ref
+    }
+
+    result = await _gitlab_rest_api_call(
+        user_id=user_id,
+        project_id=project_id,
+        method="POST",
+        endpoint=f"/projects/{project_id}/repository/branches",
+        json_data=payload
+    )
+
+    return {
+        "status": "success",
+        "branch_name": result.get("name"),
+        "commit": result.get("commit", {}),
+        "web_url": result.get("web_url")
+    }
+
+
+async def create_gitlab_merge_request(
+    user_id: str,
+    project_id: str,
+    source_branch: str,
+    target_branch: str,
+    title: str,
+    description: str = ""
+) -> Dict[str, Any]:
+    """
+    Create a merge request in GitLab using direct REST API call.
+
+    Args:
+        user_id: User ID for authentication
+        project_id: GitLab project ID
+        source_branch: Source branch name
+        target_branch: Target branch name
+        title: MR title
+        description: MR description (markdown supported)
+
+    Returns:
+        Dictionary with MR info (iid, web_url, etc.)
+    """
+    payload = {
+        "source_branch": source_branch,
+        "target_branch": target_branch,
+        "title": title,
+        "description": description
+    }
+
+    result = await _gitlab_rest_api_call(
+        user_id=user_id,
+        project_id=project_id,
+        method="POST",
+        endpoint=f"/projects/{project_id}/merge_requests",
+        json_data=payload
+    )
+
+    return {
+        "status": "success",
+        "iid": result.get("iid"),
+        "web_url": result.get("web_url"),
+        "title": result.get("title"),
+        "state": result.get("state")
+    }
+
+
+async def commit_file_to_branch(
+    user_id: str,
+    project_id: str,
+    file_path: str,
+    branch_name: str,
+    content: str,
+    commit_message: str
+) -> Dict[str, Any]:
+    """
+    Commit a file to a GitLab branch using direct REST API call.
+
+    This creates or updates a file on the specified branch with a new commit.
+
+    Args:
+        user_id: User ID for authentication
+        project_id: GitLab project ID
+        file_path: Full path to the file in repository (e.g., 'src/app.py')
+        branch_name: Branch name to commit to
+        content: File content to write
+        commit_message: Commit message
+
+    Returns:
+        Dictionary with commit info (sha, message, etc.)
+    """
+    import base64
+
+    # Encode content as base64
+    content_b64 = base64.b64encode(content.encode("utf-8")).decode("utf-8")
+
+    payload = {
+        "branch": branch_name,
+        "content": content_b64,
+        "commit_message": commit_message,
+        "encoding": "base64"
+    }
+
+    try:
+        result = await _gitlab_rest_api_call(
+            user_id=user_id,
+            project_id=project_id,
+            method="POST",
+            endpoint=f"/projects/{project_id}/repository/files/{file_path}",
+            json_data=payload
+        )
+
+        return {
+            "status": "success",
+            "file_path": result.get("file_path"),
+            "branch": result.get("branch"),
+            "commit_short_id": result.get("commit_short_id"),
+            "commit_message": result.get("commit_message")
+        }
+    except Exception as e:
+        # If file already exists (400 error), try updating it instead
+        if "400" in str(e) or "already exists" in str(e):
+            # Use PUT to update existing file
+            payload["start_branch"] = branch_name
+
+            result = await _gitlab_rest_api_call(
+                user_id=user_id,
+                project_id=project_id,
+                method="PUT",
+                endpoint=f"/projects/{project_id}/repository/files/{file_path}",
+                json_data=payload
+            )
+
+            return {
+                "status": "success",
+                "file_path": result.get("file_path"),
+                "branch": result.get("branch"),
+                "commit_short_id": result.get("commit_short_id"),
+                "commit_message": result.get("commit_message"),
+                "updated": True
+            }
+        raise

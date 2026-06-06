@@ -9,6 +9,7 @@ import {
   useUpdateRepositoryCredentials,
 } from "../services/queries";
 import { formatLastSync } from "../utils/formatLastSync";
+import { SentryIntegration } from "../components/SentryIntegration";
 
 const RepoDetails = () => {
   const { id } = useParams();
@@ -961,6 +962,9 @@ const RepoDetails = () => {
               </div>
             </div>
           </div>
+
+          {/* Sentry Integration */}
+          <SentryIntegration repoId={id} />
 
           {/* Monitored Branches - Credentials Overrides */}
           <div className="bg-white/70 backdrop-blur-xl rounded-[2rem] border border-white/80 shadow-sm p-6 lg:p-8">

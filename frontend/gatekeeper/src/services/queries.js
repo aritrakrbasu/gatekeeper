@@ -543,6 +543,78 @@ export function useUpdateSlack() {
   });
 }
 
+// ============================================================================
+// Sentry Integration Hooks
+// ============================================================================
+
+/**
+ * Get Sentry integration status for a repository
+ * @param {string} repoId - Repository ID
+ */
+export function useSentryIntegration(repoId) {
+  return useQuery({
+    queryKey: ['sentry-integration', repoId],
+    queryFn: () => api.getSentryStatus(repoId),
+    enabled: !!repoId,
+    staleTime: 10 * 1000, // 10 seconds (reduced from 2 minutes for faster webhook status updates)
+    retry: false,
+  });
+}
+
+/**
+ * Connect Sentry mutation
+ */
+export function useConnectSentry() {
+  return useMutation({
+    mutationFn: (repoId) => api.initiateSentryOAuth(repoId),
+  });
+}
+
+/**
+ * Disconnect Sentry mutation
+ */
+export function useDisconnectSentry() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (repoId) => api.disconnectSentry(repoId),
+    onSuccess: (_, repoId) => {
+      // Invalidate Sentry integration status
+      queryClient.invalidateQueries({ queryKey: ['sentry-integration', repoId] });
+    },
+  });
+}
+
+/**
+ * Verify Sentry webhook configuration
+ */
+export function useVerifySentryWebhook() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (repoId) => api.verifySentryWebhook(repoId),
+    onSuccess: (_, repoId) => {
+      // Invalidate Sentry integration status to refresh webhook status
+      queryClient.invalidateQueries({ queryKey: ['sentry-integration', repoId] });
+    },
+  });
+}
+
+/**
+ * Confirm Sentry webhook is working after manual verification
+ */
+export function useConfirmSentryWebhook() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (repoId) => api.confirmSentryWebhook(repoId),
+    onSuccess: (_, repoId) => {
+      // Invalidate Sentry integration status to refresh webhook status
+      queryClient.invalidateQueries({ queryKey: ['sentry-integration', repoId] });
+    },
+  });
+}
+
 /**
  * Submit feedback mutation
  */

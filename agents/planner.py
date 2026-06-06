@@ -2,6 +2,7 @@ import json
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel, Field
 from google.genai import types
+from opentelemetry import trace
 from services.gemini_service import ai_client
 from agents.context import AgentContext
 from agents.registry import ToolRegistry
@@ -112,7 +113,13 @@ class PlannerAgent:
             )
             
         print(f"[INFO] [Planner] Asking Gemini to build/adjust plan...")
-        
+
+        # Get current span to add context attributes for observability
+        current_span = trace.get_current_span()
+        if current_span and current_span.is_recording():
+            # Log planning context for debugging
+            print(f"[INFO] [Planner] Planning within span context: {current_span.name}")
+
         response = ai_client.models.generate_content(
             model=self.model_name,
             contents=prompt,

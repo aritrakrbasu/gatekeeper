@@ -11,6 +11,7 @@ import { ToastContainer } from "react-toastify";
 import "react-toastify/dist/ReactToastify.css";
 import Login from "./pages/Login";
 import AuthCallback from "./pages/AuthCallback";
+import SentryCallback from "./pages/SentryCallback";
 import Dashboard from "./pages/Dashboard";
 import Repositories from "./pages/Repositories";
 import RepoDetails from "./pages/RepoDetails";
@@ -31,6 +32,7 @@ function App() {
             <Route path="/login" element={<Login />} />
 
             <Route path="/auth/callback" element={<AuthCallback />} />
+            <Route path="/auth/sentry/callback" element={<SentryCallback />} />
             <Route path="/onboarding" element={<Onboarding />} />
             <Route element={<Layout />}>
               <Route

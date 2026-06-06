@@ -25,21 +25,36 @@ export const AuthProvider = ({ children }) => {
 
   /**
    * Check if user has a valid token on mount
+   * Skip verification for Sentry OAuth callback (no auth required)
    */
   useEffect(() => {
     const checkAuth = async () => {
+      // Skip auth check for Sentry callback (public route)
+      if (window.location.pathname === "/auth/sentry/callback") {
+        console.log("[AuthContext] Skipping auth check for Sentry callback");
+        setLoading(false);
+        return;
+      }
+
+      console.log("[AuthContext] Checking auth for path:", window.location.pathname);
       const token = localStorage.getItem("access_token");
       const storedUser = localStorage.getItem("user");
+
+      console.log("[AuthContext] Token exists:", !!token, "User exists:", !!storedUser);
+      console.log("[AuthContext] isAuthenticated before check:", isAuthenticated);
 
       if (token && storedUser) {
         try {
           // Verify token is still valid
+          console.log("[AuthContext] Verifying token...");
           await api.verifyToken(token);
           setUser(JSON.parse(storedUser));
           setIsAuthenticated(true);
+          console.log("[AuthContext] Token verified successfully");
         } catch (error) {
           // Token invalid, clear storage
-          console.error("Token verification failed:", error);
+          console.error("[AuthContext] Token verification failed:", error);
+          console.error("[AuthContext] Clearing localStorage and redirecting to login");
           localStorage.removeItem("access_token");
           localStorage.removeItem("refresh_token");
           localStorage.removeItem("user");
