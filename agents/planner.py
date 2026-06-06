@@ -3,12 +3,22 @@ import time
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from google.genai import types
+import time
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+from google.genai import types
 from pydantic import BaseModel, Field
 from google.genai import types
 from opentelemetry import trace
 from services.gemini_service import ai_client
 from agents.context import AgentContext
 from agents.registry import ToolRegistry
+from peil.models.enums import CaptureEventType
+from services.gemini_service import ai_client
+
+if TYPE_CHECKING:
+    from agents.aril_bridge import ArilSession
+
 from peil.models.enums import CaptureEventType
 from services.gemini_service import ai_client, call_gemini_with_retry
 
@@ -230,6 +240,11 @@ class PlannerAgent:
             # Log planning context for debugging
             print(f"[INFO] [Planner] Planning within span context: {current_span.name}")
 
+
+        from agents.aril_bridge import hash_text
+
+        prompt_hash = hash_text(system_instruction + prompt)
+        start = time.time()
         response = ai_client.models.generate_content(
             model=self.model_name,
             contents=prompt,

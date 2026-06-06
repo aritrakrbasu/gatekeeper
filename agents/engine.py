@@ -3,6 +3,7 @@ import sys
 import datetime
 from typing import Dict, Any, List, Set, Optional
 
+
 from agents.context import AgentContext
 from agents.registry import ToolRegistry
 from agents.memory import MemoryStore
@@ -20,6 +21,7 @@ from peil.config import get_aril_settings
 from peil.graph.builder import GraphBuilder
 from peil.models.enums import CaptureEventType, ExecutionStatus
 from services import mongo_client
+
 
 WEBHOOK_UNATTENDED_TRIGGERS = frozenset({"gitlab_mr", "dynatrace_crash"})
 
@@ -285,6 +287,66 @@ class WorkflowEngine:
         except Exception as exc:
             print(f"[WARN] [WorkflowEngine] ARIL graph build failed: {exc}")
 
+    async def _emit_terminal(
+        self,
+        aril: Optional[ArilSession],
+        status: str,
+        *,
+        error: Optional[str] = None,
+        step_count: int = 0,
+        last_step_id: Optional[str] = None,
+        duration_ms: Optional[float] = None,
+    ) -> None:
+        if aril is None:
+            return
+        try:
+            event_type = CaptureEventType.EXECUTION_COMPLETED
+            exec_status = ExecutionStatus.COMPLETE
+            if status == "failed":
+                event_type = CaptureEventType.EXECUTION_FAILED
+                exec_status = ExecutionStatus.FAILED
+            elif status == "awaiting_approval":
+                event_type = CaptureEventType.EXECUTION_PAUSED
+                exec_status = ExecutionStatus.PAUSED
+
+            payload: Dict[str, Any] = {
+                "status": status,
+                "step_count": step_count,
+            }
+            if error:
+                payload["error"] = error
+            if last_step_id:
+                payload["last_step_id"] = last_step_id
+            if duration_ms is not None:
+                payload["duration_ms"] = duration_ms
+
+            aril.emit(event_type, payload)
+            await aril.flush()
+            await aril.update_status(
+                exec_status,
+                completed_at=datetime.datetime.now(datetime.timezone.utc),
+            )
+            await self._maybe_build_decision_graph(aril, status)
+        except Exception as exc:
+            print(f"[WARN] [WorkflowEngine] ARIL terminal emit failed: {exc}")
+
+    async def _maybe_build_decision_graph(
+        self,
+        aril: ArilSession,
+        status: str,
+    ) -> None:
+        settings = get_aril_settings()
+        should_build = status in ("completed", "failed") or (
+            status == "awaiting_approval" and settings.graph_build_on_pause
+        )
+        if not should_build:
+            return
+        try:
+            builder = GraphBuilder()
+            await builder.build_and_persist(aril.execution_id)
+        except Exception as exc:
+            print(f"[WARN] [WorkflowEngine] ARIL graph build failed: {exc}")
+
     async def _run_execution_loop(
         self,
         context: AgentContext,
@@ -335,7 +397,7 @@ class WorkflowEngine:
 
             step_to_run = ready_steps[0]
 
-            if self._should_pause_for_approval(context, step_to_run.tool_name):
+            if self.planner._is_mutate_action(step_to_run.tool_name):
                 approval_status = await self.approval.check_approval_status(context.task_id, step_to_run.step_id)
 
                 if approval_status == "rejected":
@@ -343,6 +405,7 @@ class WorkflowEngine:
                     memory.status = "failed"
                     memory.log_message("system", err_msg)
                     await memory.persist_to_mongodb()
+                    await self._emit_terminal(aril, "failed", error=err_msg, step_count=len(executed_ids))
                     await self._emit_terminal(aril, "failed", error=err_msg, step_count=len(executed_ids))
                     return {"status": "failed", "error": err_msg}
 
@@ -365,9 +428,22 @@ class WorkflowEngine:
                     )
                     await self.approval.submit_for_approval(package)
 
+
                     memory.status = "awaiting_approval"
                     memory.log_message("system", f"Mutating step '{step_to_run.step_id}' requires human approval. Loop paused.")
                     await memory.persist_to_mongodb()
+
+                    await self.save_execution_state(
+                        context,
+                        executed_ids,
+                        executor.step_results,
+                        active_plan,
+                        memory,
+                        aril=aril,
+                        plan_revision=plan_revision,
+                    )
+                    await self._emit_terminal(aril, "awaiting_approval", step_count=len(executed_ids))
+
 
                     await self.save_execution_state(
                         context,
@@ -386,15 +462,9 @@ class WorkflowEngine:
                         "approval_id": package.approval_id,
                         "approval_package": package.model_dump(),
                         "execution_id": aril.execution_id if aril else context.metadata.get("execution_id"),
+                        "approval_package": package.model_dump(),
+                        "execution_id": aril.execution_id if aril else context.metadata.get("execution_id"),
                     }
-
-            elif self.planner._is_mutate_action(step_to_run.tool_name):
-                trigger = context.metadata.get("trigger_type", "")
-                sys.stderr.write(
-                    f"[INFO] Webhook unattended mode: auto-executing mutating step "
-                    f"'{step_to_run.tool_name}' (trigger={trigger})\n"
-                )
-                sys.stderr.flush()
 
             total_steps_run += 1
             try:
@@ -403,16 +473,6 @@ class WorkflowEngine:
                 executed_ids.add(step_to_run.step_id)
                 if aril is not None:
                     await aril.flush()
-
-                if self._is_webhook_mr_terminal_step(context, step_to_run):
-                    return await self._return_completed(
-                        context,
-                        executor,
-                        memory,
-                        executed_ids,
-                        aril,
-                        loop_started,
-                    )
 
             except Exception as step_err:
                 print(f"[WARN] [WorkflowEngine] Step '{step_to_run.step_id}' failed: {step_err}. Triggering replanning...")

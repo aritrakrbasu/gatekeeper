@@ -200,7 +200,22 @@ async def build_default_registry(aril: Optional["ArilSession"] = None) -> ToolRe
     registry.register_local_tool("create_gitlab_merge_request", tools.create_gitlab_merge_request_schema, tools.create_gitlab_merge_request)
     registry.register_local_tool("commit_file_to_branch", tools.commit_file_to_branch_schema, tools.commit_file_to_branch)
 
-    # 2. Register active Stdio MCP sessions dynamically if they are initialized
+    # 1. Register local python tools (including GitLab REST API wrappers)
+    registry.register_local_tool("clone_repo", tools.clone_repo_schema, tools.clone_repo)
+    registry.register_local_tool("run_impact_analysis", tools.run_impact_analysis_schema, tools.run_impact_analysis)
+    registry.register_local_tool("run_schema_inspection", tools.run_schema_inspection_schema, tools.run_schema_inspection)
+    registry.register_local_tool("get_gitlab_mr_diffs", tools.get_gitlab_mr_diffs_schema, tools.get_gitlab_mr_diffs)
+    registry.register_local_tool("post_gitlab_mr_comment", tools.post_gitlab_mr_comment_schema, tools.post_gitlab_mr_comment)
+    registry.register_local_tool("get_dynatrace_incident_details", tools.get_dynatrace_incident_details_schema, tools.get_dynatrace_incident_details)
+    registry.register_local_tool("apply_hotfix_patch", tools.apply_hotfix_patch_schema, tools.apply_hotfix_patch)
+    registry.register_local_tool("create_hotfix_branch_and_mr", tools.create_hotfix_branch_and_mr_schema, tools.create_hotfix_branch_and_mr)
+    registry.register_local_tool("gitnexus_analyze", tools.gitnexus_analyze_schema, tools.gitnexus_analyze)
+
+    # GitLab REST API tools (direct API calls without MCP)
+    registry.register_local_tool("create_gitlab_branch", tools.create_gitlab_branch_schema, tools.create_gitlab_branch)
+    registry.register_local_tool("create_gitlab_merge_request", tools.create_gitlab_merge_request_schema, tools.create_gitlab_merge_request)
+    registry.register_local_tool("commit_file_to_branch", tools.commit_file_to_branch_schema, tools.commit_file_to_branch)
+
     if mcp_service.gitlab_session:
         await registry.register_mcp_session("gitlab", mcp_service.gitlab_session)
     if mcp_service.mongo_session:
