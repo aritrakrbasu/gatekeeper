@@ -1011,7 +1011,7 @@ This allows you to compare architectural impact between the current state and pr
                                         print(f"[DEBUG][GitNexus Grep] Tool response added to history", flush=True)
 
                                         # Send completion for this tool
-                                        await _send_progress_update(progress_callback, func_call.name, status="completed")
+                                        # await _send_progress_update(progress_callback, func_call.name, status="completed")
 
                                         continue  # Continue to next iteration
 
@@ -1090,7 +1090,7 @@ This allows you to compare architectural impact between the current state and pr
                                         print(f"[DEBUG][GitNexus File] Tool response added to history", flush=True)
 
                                         # Send completion for this tool
-                                        await _send_progress_update(progress_callback, func_call.name, status="completed")
+                                        # await _send_progress_update(progress_callback, func_call.name, status="completed")
 
                                         continue  # Continue to next iteration
 
