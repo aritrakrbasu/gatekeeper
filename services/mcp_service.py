@@ -25,6 +25,29 @@ nexus_session = None
 dynatrace_session = None
 sentry_session = None
 mcp_ready = False  # Track when MCP sessions are ready
+_critical_ready_event = asyncio.Event()
+
+
+def mark_unready(reason: str = "") -> None:
+    """Reset readiness when the MCP bridge task stops or crashes."""
+    global mongo_session, gitlab_session, nexus_session, dynatrace_session, mcp_ready
+    mcp_ready = False
+    mongo_session = None
+    gitlab_session = None
+    nexus_session = None
+    dynatrace_session = None
+    _critical_ready_event.clear()
+    if reason:
+        mcp_log(f"[WARN] MCP bridge offline: {reason}")
+
+
+async def wait_for_critical_ready(timeout: float = 120.0) -> bool:
+    """Block until MongoDB + GitLab MCP sessions are ready."""
+    try:
+        await asyncio.wait_for(_critical_ready_event.wait(), timeout=timeout)
+        return True
+    except asyncio.TimeoutError:
+        return False
 
 # Session cache for per-user GitLab MCP sessions
 # {user_id: (session, stdio_read, stdio_write, last_used_timestamp, background_task)}

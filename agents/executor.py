@@ -62,6 +62,20 @@ def resolve_arguments(arguments: Any, step_results: Dict[str, Any]) -> Any:
         return arguments
 
 
+def derive_mr_comment_from_results(step_results: Dict[str, Any]) -> Optional[str]:
+    """Build a postable MR comment from the most recent step outputs."""
+    comment_keys = ("markdown_report", "comment", "report", "summary", "content")
+    for result in reversed(list(step_results.values())):
+        if isinstance(result, str) and result.strip():
+            return result
+        if isinstance(result, dict):
+            for key in comment_keys:
+                value = result.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value
+    return None
+
+
 _JINJA_DEFAULT_PATTERN = re.compile(
     r"\{\{\s*([a-zA-Z0-9_\-]+)\.result(?:\.([a-zA-Z0-9_\-]+))?\s*\|\s*default\((?:'([^']*)'|\"([^\"]*)\")\)\s*\}\}"
 )
@@ -227,6 +241,10 @@ class ExecutorAgent:
                 mr_iid = context.metadata.get("mr_iid")
                 if mr_iid is not None and str(mr_iid) not in ("", "unknown"):
                     resolved_args["mr_iid"] = int(mr_iid)
+            if "mr_iid" in props and "mr_iid" not in resolved_args:
+                mr_iid = context.metadata.get("mr_iid")
+                if mr_iid is not None and str(mr_iid) not in ("", "unknown"):
+                    resolved_args["mr_iid"] = int(mr_iid)
 
     async def execute_step(self, step: StepSchema, context: AgentContext) -> Any:
         """
@@ -251,17 +269,6 @@ class ExecutorAgent:
         
         # Auto-inject standard parameters
         self._inject_context_args(tool_name, resolved_args, context)
-
-        if tool_name == "post_gitlab_mr_comment":
-            if not resolved_args.get("comment"):
-                comment = derive_mr_comment_from_results(self.step_results)
-                if comment:
-                    resolved_args["comment"] = comment
-            if isinstance(resolved_args.get("comment"), str):
-                resolved_args["comment"] = sanitize_comment_templates(
-                    resolved_args["comment"],
-                    self.step_results,
-                )
         
         # Register rollback hooks automatically
         self._auto_register_rollbacks(tool_name, resolved_args)

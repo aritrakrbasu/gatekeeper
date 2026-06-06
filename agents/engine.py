@@ -1,5 +1,6 @@
 import json
 import sys
+import sys
 import datetime
 from typing import Dict, Any, List, Set, Optional
 
@@ -21,6 +22,8 @@ from peil.config import get_aril_settings
 from peil.graph.builder import GraphBuilder
 from peil.models.enums import CaptureEventType, ExecutionStatus
 from services import mongo_client
+
+WEBHOOK_UNATTENDED_TRIGGERS = frozenset({"gitlab_mr", "dynatrace_crash"})
 
 
 WEBHOOK_UNATTENDED_TRIGGERS = frozenset({"gitlab_mr", "dynatrace_crash"})
@@ -49,6 +52,13 @@ class WorkflowEngine:
         self.planner = Planner()
         self.reflection = ReflectionLayer()
         self.approval = HumanApprovalLayer()
+
+    def _should_pause_for_approval(self, context: AgentContext, tool_name: str) -> bool:
+        """Pause before mutating tools unless the workflow was webhook-triggered."""
+        if not self.planner._is_mutate_action(tool_name):
+            return False
+        trigger = context.metadata.get("trigger_type", "")
+        return trigger not in WEBHOOK_UNATTENDED_TRIGGERS
 
     def _is_webhook_mr_terminal_step(self, context: AgentContext, step: StepSchema) -> bool:
         """Successful MR comment post completes unattended webhook reviews."""
@@ -397,7 +407,7 @@ class WorkflowEngine:
 
             step_to_run = ready_steps[0]
 
-            if self.planner._is_mutate_action(step_to_run.tool_name):
+            if self._should_pause_for_approval(context, step_to_run.tool_name):
                 approval_status = await self.approval.check_approval_status(context.task_id, step_to_run.step_id)
 
                 if approval_status == "rejected":
@@ -462,9 +472,15 @@ class WorkflowEngine:
                         "approval_id": package.approval_id,
                         "approval_package": package.model_dump(),
                         "execution_id": aril.execution_id if aril else context.metadata.get("execution_id"),
-                        "approval_package": package.model_dump(),
-                        "execution_id": aril.execution_id if aril else context.metadata.get("execution_id"),
                     }
+
+            elif self.planner._is_mutate_action(step_to_run.tool_name):
+                trigger = context.metadata.get("trigger_type", "")
+                sys.stderr.write(
+                    f"[INFO] Webhook unattended mode: auto-executing mutating step "
+                    f"'{step_to_run.tool_name}' (trigger={trigger})\n"
+                )
+                sys.stderr.flush()
 
             total_steps_run += 1
             try:

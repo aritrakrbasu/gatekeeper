@@ -142,6 +142,8 @@ async def startup_event():
     sys.stderr.flush()
     sys.stderr.write("[*] MCP Bridge initialization starting (startup waits for MongoDB + GitLab)...\n")
     sys.stderr.flush()
+    sys.stderr.write("[*] MCP Bridge initialization starting (startup waits for MongoDB + GitLab)...\n")
+    sys.stderr.flush()
 
     # Initialize Arize observability for LLM usage tracking
     try:
