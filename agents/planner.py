@@ -1,10 +1,18 @@
 import json
-from typing import Dict, Any, List, Optional
-from pydantic import BaseModel, Field
+import time
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
 from google.genai import types
-from services.gemini_service import ai_client
+from pydantic import BaseModel, Field
+
 from agents.context import AgentContext
 from agents.registry import ToolRegistry
+from peil.models.enums import CaptureEventType
+from services.gemini_service import ai_client
+
+if TYPE_CHECKING:
+    from agents.aril_bridge import ArilSession
+
 
 class StepSchema(BaseModel):
     step_id: str = Field(description="Unique identifier for the step (e.g. clone_step, schema_step)")
@@ -14,16 +22,18 @@ class StepSchema(BaseModel):
     action: str = Field(description="Human readable description of what action is taken in this step")
     reason: str = Field(description="Explicit reasoning and tool justification for running this step")
 
+
 class PlanSchema(BaseModel):
     explanation: str = Field(description="Brief explanation of the plan strategy")
     steps: List[StepSchema] = Field(description="The steps of the DAG plan")
+
 
 class PlannerAgent:
     """
     Constructs and refines step-by-step DAG execution plans using Gemini.
     Enforces maximum 10 steps and maximum 3 mutating (write) actions.
     """
-    
+
     def __init__(self, model_name: str = "gemini-2.5-flash"):
         self.model_name = model_name
 
@@ -47,19 +57,113 @@ class PlannerAgent:
             )
         return "\n".join(serialized)
 
+    def _emit_plan_events(
+        self,
+        aril: Optional["ArilSession"],
+        *,
+        explanation: str,
+        steps: List[StepSchema],
+        plan_revision: int,
+        history_steps: Optional[List[Dict[str, Any]]],
+        prompt_hash: str,
+        response_hash: str,
+        token_count: Optional[int],
+        knowledge_manifest: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if aril is None:
+            return
+        try:
+            step_snapshots = [
+                {
+                    "step_id": s.step_id,
+                    "tool_name": s.tool_name,
+                    "action": s.action,
+                    "reason": s.reason,
+                    "arguments_json": s.arguments_json,
+                    "dependencies": s.dependencies,
+                }
+                for s in steps
+            ]
+            aril.emit(
+                CaptureEventType.MODEL_TURN,
+                {
+                    "source": "planner",
+                    "prompt_hash": prompt_hash,
+                    "response_hash": response_hash,
+                    "token_count": token_count,
+                },
+            )
+            manifest_payload = knowledge_manifest or {}
+            if history_steps:
+                aril.emit(
+                    CaptureEventType.PLAN_REVISED,
+                    {
+                        "explanation": explanation,
+                        "steps": step_snapshots,
+                        "plan_revision": plan_revision,
+                        "history_steps": history_steps,
+                        "supersedes_plan_revision": max(0, plan_revision - 1),
+                        "knowledge_manifest": manifest_payload,
+                    },
+                )
+            else:
+                aril.emit(
+                    CaptureEventType.PLAN_EMITTED,
+                    {
+                        "explanation": explanation,
+                        "steps": step_snapshots,
+                        "plan_revision": plan_revision,
+                        "knowledge_manifest": manifest_payload,
+                    },
+                )
+            aril.plan_revision = plan_revision
+        except Exception as exc:
+            print(f"[WARN] [Planner] ARIL plan emit failed: {exc}")
+
+    async def _persist_knowledge_manifest(
+        self,
+        aril: Optional["ArilSession"],
+        knowledge_manifest: Dict[str, Any],
+    ) -> None:
+        if aril is None or not knowledge_manifest:
+            return
+        try:
+            await aril.execution_repo.update_fields(
+                aril.execution_id,
+                {"knowledge_manifest": knowledge_manifest},
+            )
+        except Exception as exc:
+            print(f"[WARN] [Planner] knowledge_manifest persist failed: {exc}")
+
     async def generate_plan(
         self,
         context: AgentContext,
         registry: ToolRegistry,
         history_steps: Optional[List[Dict[str, Any]]] = None,
-        memories: Optional[List[Dict[str, Any]]] = None
+        memories: Optional[List[Dict[str, Any]]] = None,
+        aril: Optional["ArilSession"] = None,
+        plan_revision: int = 0,
     ) -> List[StepSchema]:
         """
         Queries Gemini to construct a dependency-based PlanStep DAG.
         Enforces strict limits of <= 10 steps and <= 3 write actions.
         """
         tools_description = self._serialize_tools(registry)
-        
+
+        knowledge_context = None
+        knowledge_manifest: Dict[str, Any] = {}
+        try:
+            from knowledge.resolver.resolver import KnowledgeResolver
+
+            resolver_db = None
+            if aril is not None:
+                resolver_db = getattr(aril.execution_repo, "_db", None)
+            resolver = KnowledgeResolver(resolver_db)
+            knowledge_context = await resolver.resolve_for_context(context)
+            knowledge_manifest = knowledge_context.to_manifest_dict()
+        except Exception as exc:
+            print(f"[WARN] [Planner] KnowledgeResolver failed: {exc}")
+
         system_instruction = (
             "You are the elite Gatekeeper AI Planner. Your job is to construct a DAG execution plan (list of steps with dependencies) to satisfy the given objective.\n\n"
             "CRITICAL CONSTRAINTS:\n"
@@ -85,7 +189,7 @@ class PlannerAgent:
             "   d. Apply diff patch to file using 'apply_hotfix_patch'.\n"
             "   e. Commit, push branch and open GitLab MR using 'create_hotfix_branch_and_mr'.\n"
         )
-        
+
         prompt = (
             f"OBJECTIVE: {context.objective}\n"
             f"REPOSITORY ID: {context.repository.id}\n"
@@ -96,7 +200,7 @@ class PlannerAgent:
             f"USER ID: {context.user.user_id}\n\n"
             f"AVAILABLE TOOLS:\n{tools_description}\n\n"
         )
-        
+
         if memories:
             prompt += (
                 f"HISTORICAL SIMILAR MEMORIES RETRIEVED:\n"
@@ -104,15 +208,24 @@ class PlannerAgent:
                 f"Use this context to inform your plan strategy (e.g. reuse successful patch designs or root causes).\n\n"
             )
 
+        if knowledge_context is not None:
+            knowledge_section = knowledge_context.to_prompt_section()
+            if knowledge_section:
+                prompt += f"{knowledge_section}\n\n"
+
         if history_steps:
             prompt += (
                 f"PREVIOUS EXECUTION STEPS HISTORY (some steps may have failed):\n"
                 f"{json.dumps(history_steps, indent=2)}\n\n"
                 f"Please adjust the plan to recover from any failures. If a recovery is not possible, design a step to report/post the failure comment and exit cleanly.\n\n"
             )
-            
+
         print(f"[INFO] [Planner] Asking Gemini to build/adjust plan...")
-        
+
+        from agents.aril_bridge import hash_text
+
+        prompt_hash = hash_text(system_instruction + prompt)
+        start = time.time()
         response = ai_client.models.generate_content(
             model=self.model_name,
             contents=prompt,
@@ -120,29 +233,50 @@ class PlannerAgent:
                 system_instruction=system_instruction,
                 temperature=0.1,
                 response_mime_type="application/json",
-                response_schema=PlanSchema
-            )
+                response_schema=PlanSchema,
+            ),
         )
-        
+        response_text = (response.text or "").strip()
+        response_hash = hash_text(response_text)
+        token_count = None
+        usage = getattr(response, "usage_metadata", None)
+        if usage is not None:
+            token_count = getattr(usage, "total_token_count", None)
+
         try:
-            plan_data = PlanSchema.model_validate_json(response.text.strip())
-            
-            # Guardrail Validations
+            plan_data = PlanSchema.model_validate_json(response_text)
+
             steps = plan_data.steps
             if len(steps) > 10:
                 raise ValueError(f"Plan validation failed: plan has {len(steps)} steps, which exceeds the max limit of 10.")
-                
+
             write_count = sum(1 for s in steps if self._is_mutate_action(s.tool_name))
             if write_count > 3:
                 raise ValueError(f"Plan validation failed: plan has {write_count} write/mutating actions, which exceeds the max limit of 3.")
+
+            effective_revision = plan_revision if not history_steps else plan_revision + 1
+            self._emit_plan_events(
+                aril,
+                explanation=plan_data.explanation,
+                steps=steps,
+                plan_revision=effective_revision,
+                history_steps=history_steps,
+                prompt_hash=prompt_hash,
+                response_hash=response_hash,
+                token_count=token_count,
+                knowledge_manifest=knowledge_manifest,
+            )
+            await self._persist_knowledge_manifest(aril, knowledge_manifest)
+            if aril is not None:
+                await aril.flush()
 
             print(f"[OK] [Planner] Plan successfully generated. Explanation: '{plan_data.explanation}'")
             for i, step in enumerate(plan_data.steps):
                 print(f"     Step {i+1}: {step.step_id} -> {step.tool_name} (depends on: {step.dependencies})")
             return plan_data.steps
         except Exception as e:
-            print(f"[ERROR] [Planner] Failed to parse planning output: {e}\nResponse text:\n{response.text}")
+            print(f"[ERROR] [Planner] Failed to parse planning output: {e}\nResponse text:\n{response_text}")
             raise
 
-# Export alias to avoid breaking imports in other modules
+
 Planner = PlannerAgent

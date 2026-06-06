@@ -5,7 +5,7 @@ import time
 import json
 import re
 from typing import Optional
-from fastapi import FastAPI, Request, Header, HTTPException
+from fastapi import Depends, FastAPI, Request, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from google.genai import types
@@ -25,6 +25,11 @@ from services import (
     mcp_service, review_service, auth_service, repository_service,
     mongo_client, user_service, billing_service, incident_service
 )
+from copilot.api import copilot_router
+from copilot.resolution.mr_execution import resolve_mr_execution_response
+from peil.api.auth import require_jwt_user
+from knowledge.api import knowledge_router
+from peil.api import aril_router
 from api_models import (
     OAuthCallbackRequest, TokenResponse, UserResponse,
     VerifyTokenRequest, VerifyTokenResponse, LogoutResponse,
@@ -37,6 +42,9 @@ from api_models import (
 )
 
 app = FastAPI(title="The Gatekeeper Gemini Orchestrator")
+app.include_router(aril_router)
+app.include_router(copilot_router)
+app.include_router(knowledge_router)
 
 # ============================================================================
 # CORS Configuration
@@ -97,6 +105,23 @@ async def startup_event():
     except Exception as e:
         print(f"[⚠️] Failed to initialize Arize/Phoenix: {e}")
         print("[ℹ️] LLM usage tracking will be unavailable")
+
+    # Initialize ARIL Mongo collections and indexes (non-fatal)
+    try:
+        from peil.store import initialize_aril_collections
+
+        aril_summary = await initialize_aril_collections()
+        print(f"[OK] ARIL collections initialized: {aril_summary.get('indexes', {})}")
+    except Exception as e:
+        print(f"[WARN] ARIL collection initialization failed (capture may be degraded): {e}")
+
+    try:
+        from copilot.store.init_collections import initialize_copilot_collections
+
+        copilot_summary = await initialize_copilot_collections()
+        print(f"[OK] Copilot collections initialized: {copilot_summary.get('indexes', {})}")
+    except Exception as e:
+        print(f"[WARN] Copilot collection initialization failed: {e}")
 
     # Launch Stdio MCP pipes in the background
     asyncio.create_task(mcp_service.boot_mcp_bridge())
@@ -177,8 +202,7 @@ async def gitlab_webhook(request: Request, x_gitlab_event: str = Header(None)):
         # 1. Handle GitLab Merge Request Event
         if x_gitlab_event == "Merge Request Hook":
             context = ContextBuilder.build_from_gitlab_mr(payload)
-            registry = await build_default_registry()
-            engine = WorkflowEngine(registry)
+            engine = WorkflowEngine(await build_default_registry())
             print(f"[INFO] [Agentic Mode] Executing agentic workflow for Merge Request: {context.task_id}")
             result = await engine.run_task(context)
             return result
@@ -187,8 +211,7 @@ async def gitlab_webhook(request: Request, x_gitlab_event: str = Header(None)):
         if not x_gitlab_event:
             if isinstance(payload, dict) and "problem_id" in payload:
                 context = ContextBuilder.build_from_dynatrace_crash(payload)
-                registry = await build_default_registry()
-                engine = WorkflowEngine(registry)
+                engine = WorkflowEngine(await build_default_registry())
                 print(f"[INFO] [Agentic Mode] Executing agentic workflow for Production Incident: {context.task_id}")
                 result = await engine.run_task(context)
                 return result
@@ -457,6 +480,20 @@ async def submit_mr_feedback(
     except Exception as e:
         print(f"[ERROR] Failed to submit feedback: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/repositories/{repository_id}/mrs/{mr_iid}/execution")
+async def get_mr_execution(
+    repository_id: str,
+    mr_iid: int,
+    user: dict = Depends(require_jwt_user),
+):
+    """Resolve graph-backed ARIL execution for an MR (Copilot entry point)."""
+    return await resolve_mr_execution_response(
+        repository_id,
+        mr_iid,
+        str(user["id"]),
+    )
 
 
 @app.get("/api/repositories/{repo_id}/mrs/{mr_iid}/progress")

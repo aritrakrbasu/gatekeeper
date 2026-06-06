@@ -7,7 +7,7 @@
 
 // In development with Vite proxy, use empty string for relative URLs
 // In production, use the full API URL
-const API_BASE_URL =
+export const API_BASE_URL =
   import.meta.env.MODE === "production"
     ? import.meta.env.VITE_API_URL || "http://localhost:8000"
     : "";
@@ -15,7 +15,7 @@ const API_BASE_URL =
 /**
  * Generic API wrapper that handles authentication and errors
  */
-async function apiRequest(endpoint, options = {}) {
+export async function apiRequest(endpoint, options = {}) {
   const token = localStorage.getItem("access_token");
 
   const headers = {

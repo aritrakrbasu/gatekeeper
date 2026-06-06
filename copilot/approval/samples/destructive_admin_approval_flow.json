@@ -1,0 +1,32 @@
+{
+  "conversation_id": "conv-approval-02",
+  "thread_id": "conv-approval-02",
+  "copilot_execution_id": "exec-copilot-approval-02",
+  "interrupt_payload": {
+    "reason": "Open remediation branch and merge request",
+    "tool_name": "create_hotfix_branch_and_mr",
+    "tool_args": {
+      "source_branch": "hotfix/investigation-fix"
+    },
+    "risk_level": "destructive",
+    "estimated_scope": "repository-wide branch and merge-request changes",
+    "step_id": "inv-04",
+    "requires_admin": true
+  },
+  "resume_without_admin": {
+    "decision": "approve",
+    "admin_confirmed": false,
+    "expected_error": "Admin approval required for destructive tools"
+  },
+  "resume_with_admin": {
+    "decision": "approve",
+    "admin_confirmed": true
+  },
+  "expected_aril_events": [
+    "approval_required",
+    "execution_paused",
+    "approval_granted",
+    "approval_resolved",
+    "execution_completed"
+  ]
+}

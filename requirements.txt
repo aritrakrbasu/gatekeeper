@@ -19,21 +19,21 @@ pydantic>=2.0.0
 pydantic-core>=2.0.0
 
 # Arize AI Observability
-arize-otel>=1.0.0
-arize-phoenix>=6.0.0
-openinference-instrumentation-google-genai>=1.0.0
-openinference-instrumentation-evaluation>=0.1.0
-opentelemetry-api>=1.22.0
-opentelemetry-sdk>=1.22.0
-opentelemetry-instrumentation-fastapi>=0.43b0
-opentelemetry-instrumentation-httpx>=0.43b0
-opentelemetry-semantic-conventions>=0.43b0
+# arize-otel>=1.0.0
+# arize-phoenix>=6.0.0
+# openinference-instrumentation-google-genai>=1.0.0
+# openinference-instrumentation-evaluation>=0.1.0
+# opentelemetry-api>=1.22.0
+# opentelemetry-sdk>=1.22.0
+# opentelemetry-instrumentation-fastapi>=0.43b0
+# opentelemetry-instrumentation-httpx>=0.43b0
+# opentelemetry-semantic-conventions>=0.43b0
 
 # OpenTelemetry Exporters
 opentelemetry-exporter-otlp>=1.22.0
 
 # Phoenix SDK for evaluations and tracing
-phoenix>=6.0.0
+# phoenix>=6.0.0
 
 # Additional utilities
 pyjwt>=2.0.0
@@ -42,3 +42,11 @@ annotated-doc>=0.0.0
 
 # MongoDB async driver
 motor>=3.6.0
+
+# LangGraph Copilot v2
+langgraph>=1.2.0
+langgraph-checkpoint-mongodb>=0.1.0
+
+# Testing
+pytest>=8.0.0
+pytest-asyncio>=0.24.0

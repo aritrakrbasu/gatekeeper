@@ -1,0 +1,37 @@
+{
+  "conversation_id": "conv-approval-01",
+  "thread_id": "conv-approval-01",
+  "copilot_execution_id": "exec-copilot-approval-01",
+  "interrupt_payload": {
+    "reason": "Post review comment after replay validation",
+    "tool_name": "post_gitlab_mr_comment",
+    "tool_args": {
+      "mr_iid": 42,
+      "comment": "Investigation supports the original finding."
+    },
+    "risk_level": "mutating",
+    "estimated_scope": "scoped write via post_gitlab_mr_comment",
+    "step_id": "inv-03",
+    "requires_admin": false
+  },
+  "resume_approve": {
+    "decision": "approve",
+    "admin_confirmed": false
+  },
+  "resume_modify": {
+    "decision": "modify",
+    "modified_tool_args": {
+      "mr_iid": 42,
+      "comment": "Investigation supports the finding with minor wording changes."
+    }
+  },
+  "resume_reject": {
+    "decision": "reject"
+  },
+  "expected_aril_events": [
+    "approval_required",
+    "execution_paused",
+    "approval_granted",
+    "approval_resolved"
+  ]
+}

@@ -1,0 +1,384 @@
+{
+  "execution_id": "exec-mr-42-sample",
+  "task_id": "mr-review-sample01",
+  "repository_id": "82576405",
+  "graph_version": 1,
+  "builder_version": "graph_builder_v1",
+  "graph_hash": "889193d8c92e025e5700083c2415f6068e1e9ed46054f2b37c810d032a76e71f",
+  "status": "completed",
+  "metadata": {
+    "root_node_ids": [
+      "execution:exec-mr-42-sample"
+    ],
+    "terminal_node_ids": [
+      "outcome:terminal",
+      "reflection:0006",
+      "reflection:0009",
+      "reflection:0012"
+    ],
+    "outcome_node_ids": [
+      "outcome:terminal"
+    ],
+    "node_count": 16,
+    "edge_count": 17,
+    "graph_revision": 0
+  },
+  "nodes": [
+    {
+      "node_id": "execution:exec-mr-42-sample",
+      "type": "execution",
+      "content": {
+        "objective": "Perform GitLab Merge Request Review for MR 42",
+        "trigger_type": "gitlab_mr",
+        "execution_type": "mr_review",
+        "repository_id": "82576405",
+        "subject_id": "mr:42:82576405",
+        "sequence": 1
+      },
+      "evidence_refs": [],
+      "created_at": "2026-06-06T10:00:01Z"
+    },
+    {
+      "node_id": "model_turn:0002",
+      "type": "model_turn",
+      "content": {
+        "source": "planner",
+        "prompt_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "response_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "token_count": 1200,
+        "sequence": 2
+      },
+      "evidence_refs": [],
+      "created_at": "2026-06-06T10:00:02Z"
+    },
+    {
+      "node_id": "outcome:terminal",
+      "type": "outcome",
+      "content": {
+        "status": "completed",
+        "error": null,
+        "step_count": 3,
+        "duration_ms": 12000.0,
+        "event_type": "execution_completed",
+        "sequence": 13
+      },
+      "evidence_refs": [],
+      "created_at": "2026-06-06T10:00:13Z"
+    },
+    {
+      "node_id": "plan:0",
+      "type": "plan",
+      "content": {
+        "explanation": "Clone, analyze, diff, inspect schema, post MR comment.",
+        "plan_revision": 0,
+        "event_type": "plan_emitted",
+        "step_count": 3,
+        "sequence": 3
+      },
+      "evidence_refs": [],
+      "created_at": "2026-06-06T10:00:03Z"
+    },
+    {
+      "node_id": "plan_step:0:analyze",
+      "type": "plan_step",
+      "content": {
+        "step_id": "analyze",
+        "tool_name": "gitnexus_analyze",
+        "action": "Run call-graph analysis",
+        "reason": "Impact surface",
+        "arguments_json": "{}",
+        "dependencies": [
+          "clone"
+        ],
+        "plan_revision": 0,
+        "sequence": 3
+      },
+      "evidence_refs": [],
+      "created_at": "2026-06-06T10:00:03Z"
+    },
+    {
+      "node_id": "plan_step:0:clone",
+      "type": "plan_step",
+      "content": {
+        "step_id": "clone",
+        "tool_name": "clone_repo",
+        "action": "Clone repository",
+        "reason": "Workspace required",
+        "arguments_json": "{}",
+        "dependencies": [],
+        "plan_revision": 0,
+        "sequence": 3
+      },
+      "evidence_refs": [],
+      "created_at": "2026-06-06T10:00:03Z"
+    },
+    {
+      "node_id": "plan_step:0:comment",
+      "type": "plan_step",
+      "content": {
+        "step_id": "comment",
+        "tool_name": "post_gitlab_mr_comment",
+        "action": "Post review comment",
+        "reason": "Deliver findings",
+        "arguments_json": "{}",
+        "dependencies": [
+          "analyze"
+        ],
+        "plan_revision": 0,
+        "sequence": 3
+      },
+      "evidence_refs": [],
+      "created_at": "2026-06-06T10:00:03Z"
+    },
+    {
+      "node_id": "reflection:0006",
+      "type": "reflection",
+      "content": {
+        "step_id": "clone",
+        "passed": true,
+        "reason": null,
+        "warning": null,
+        "sequence": 6
+      },
+      "evidence_refs": [],
+      "created_at": "2026-06-06T10:00:06Z"
+    },
+    {
+      "node_id": "reflection:0009",
+      "type": "reflection",
+      "content": {
+        "step_id": "analyze",
+        "passed": true,
+        "reason": null,
+        "warning": null,
+        "sequence": 9
+      },
+      "evidence_refs": [],
+      "created_at": "2026-06-06T10:00:09Z"
+    },
+    {
+      "node_id": "reflection:0012",
+      "type": "reflection",
+      "content": {
+        "step_id": "comment",
+        "passed": true,
+        "reason": null,
+        "warning": null,
+        "sequence": 12
+      },
+      "evidence_refs": [],
+      "created_at": "2026-06-06T10:00:12Z"
+    },
+    {
+      "node_id": "tool_call:0004",
+      "type": "tool_call",
+      "content": {
+        "tool_name": "clone_repo",
+        "masked_arguments": {
+          "repo_path": "workspace/gatekeeper"
+        },
+        "step_id": "clone",
+        "sequence": 4
+      },
+      "evidence_refs": [],
+      "created_at": "2026-06-06T10:00:04Z"
+    },
+    {
+      "node_id": "tool_call:0007",
+      "type": "tool_call",
+      "content": {
+        "tool_name": "gitnexus_analyze",
+        "masked_arguments": {
+          "repo_path": "workspace/gatekeeper"
+        },
+        "step_id": "analyze",
+        "sequence": 7
+      },
+      "evidence_refs": [],
+      "created_at": "2026-06-06T10:00:07Z"
+    },
+    {
+      "node_id": "tool_call:0010",
+      "type": "tool_call",
+      "content": {
+        "tool_name": "post_gitlab_mr_comment",
+        "masked_arguments": {
+          "mr_iid": "42"
+        },
+        "step_id": "comment",
+        "sequence": 10
+      },
+      "evidence_refs": [],
+      "created_at": "2026-06-06T10:00:10Z"
+    },
+    {
+      "node_id": "tool_result:0005",
+      "type": "tool_result",
+      "content": {
+        "tool_name": "clone_repo",
+        "status": "success",
+        "duration_ms": 2100.0,
+        "step_id": "clone",
+        "error_message": null,
+        "sequence": 5
+      },
+      "evidence_refs": [
+        "inline:abc123"
+      ],
+      "created_at": "2026-06-06T10:00:05Z"
+    },
+    {
+      "node_id": "tool_result:0008",
+      "type": "tool_result",
+      "content": {
+        "tool_name": "gitnexus_analyze",
+        "status": "success",
+        "duration_ms": 5400.0,
+        "step_id": "analyze",
+        "error_message": null,
+        "sequence": 8
+      },
+      "evidence_refs": [
+        "inline:def456"
+      ],
+      "created_at": "2026-06-06T10:00:08Z"
+    },
+    {
+      "node_id": "tool_result:0011",
+      "type": "tool_result",
+      "content": {
+        "tool_name": "post_gitlab_mr_comment",
+        "status": "success",
+        "duration_ms": 800.0,
+        "step_id": "comment",
+        "error_message": null,
+        "sequence": 11
+      },
+      "evidence_refs": [
+        "inline:ghi789"
+      ],
+      "created_at": "2026-06-06T10:00:11Z"
+    }
+  ],
+  "edges": [
+    {
+      "edge_id": "execution:exec-mr-42-sample|produces|outcome:terminal",
+      "from_node_id": "execution:exec-mr-42-sample",
+      "to_node_id": "outcome:terminal",
+      "relation": "produces",
+      "weight": null
+    },
+    {
+      "edge_id": "execution:exec-mr-42-sample|triggers|model_turn:0002",
+      "from_node_id": "execution:exec-mr-42-sample",
+      "to_node_id": "model_turn:0002",
+      "relation": "triggers",
+      "weight": null
+    },
+    {
+      "edge_id": "model_turn:0002|produces|plan:0",
+      "from_node_id": "model_turn:0002",
+      "to_node_id": "plan:0",
+      "relation": "produces",
+      "weight": null
+    },
+    {
+      "edge_id": "plan:0|produces|plan_step:0:analyze",
+      "from_node_id": "plan:0",
+      "to_node_id": "plan_step:0:analyze",
+      "relation": "produces",
+      "weight": null
+    },
+    {
+      "edge_id": "plan:0|produces|plan_step:0:clone",
+      "from_node_id": "plan:0",
+      "to_node_id": "plan_step:0:clone",
+      "relation": "produces",
+      "weight": null
+    },
+    {
+      "edge_id": "plan:0|produces|plan_step:0:comment",
+      "from_node_id": "plan:0",
+      "to_node_id": "plan_step:0:comment",
+      "relation": "produces",
+      "weight": null
+    },
+    {
+      "edge_id": "plan_step:0:analyze|depends_on|plan_step:0:comment",
+      "from_node_id": "plan_step:0:analyze",
+      "to_node_id": "plan_step:0:comment",
+      "relation": "depends_on",
+      "weight": null
+    },
+    {
+      "edge_id": "plan_step:0:analyze|triggers|tool_call:0007",
+      "from_node_id": "plan_step:0:analyze",
+      "to_node_id": "tool_call:0007",
+      "relation": "triggers",
+      "weight": null
+    },
+    {
+      "edge_id": "plan_step:0:clone|depends_on|plan_step:0:analyze",
+      "from_node_id": "plan_step:0:clone",
+      "to_node_id": "plan_step:0:analyze",
+      "relation": "depends_on",
+      "weight": null
+    },
+    {
+      "edge_id": "plan_step:0:clone|triggers|tool_call:0004",
+      "from_node_id": "plan_step:0:clone",
+      "to_node_id": "tool_call:0004",
+      "relation": "triggers",
+      "weight": null
+    },
+    {
+      "edge_id": "plan_step:0:comment|triggers|tool_call:0010",
+      "from_node_id": "plan_step:0:comment",
+      "to_node_id": "tool_call:0010",
+      "relation": "triggers",
+      "weight": null
+    },
+    {
+      "edge_id": "tool_call:0004|produces|tool_result:0005",
+      "from_node_id": "tool_call:0004",
+      "to_node_id": "tool_result:0005",
+      "relation": "produces",
+      "weight": null
+    },
+    {
+      "edge_id": "tool_call:0007|produces|tool_result:0008",
+      "from_node_id": "tool_call:0007",
+      "to_node_id": "tool_result:0008",
+      "relation": "produces",
+      "weight": null
+    },
+    {
+      "edge_id": "tool_call:0010|produces|tool_result:0011",
+      "from_node_id": "tool_call:0010",
+      "to_node_id": "tool_result:0011",
+      "relation": "produces",
+      "weight": null
+    },
+    {
+      "edge_id": "tool_result:0005|validates|reflection:0006",
+      "from_node_id": "tool_result:0005",
+      "to_node_id": "reflection:0006",
+      "relation": "validates",
+      "weight": null
+    },
+    {
+      "edge_id": "tool_result:0008|validates|reflection:0009",
+      "from_node_id": "tool_result:0008",
+      "to_node_id": "reflection:0009",
+      "relation": "validates",
+      "weight": null
+    },
+    {
+      "edge_id": "tool_result:0011|validates|reflection:0012",
+      "from_node_id": "tool_result:0011",
+      "to_node_id": "reflection:0012",
+      "relation": "validates",
+      "weight": null
+    }
+  ]
+}

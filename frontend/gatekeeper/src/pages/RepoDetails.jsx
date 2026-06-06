@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { Link, useParams } from "react-router-dom";
-import ReactMarkdown from "react-markdown";
+import { GlassOverlay, TerminalMarkdown, ActivityLog } from "../components/shared";
+import { CopilotDrawer, CopilotLauncher } from "../features/copilot";
 import {
   useRepository,
   useRepositoryMRs,
@@ -13,6 +14,8 @@ import { formatLastSync } from "../utils/formatLastSync";
 const RepoDetails = () => {
   const { id } = useParams();
   const [selectedMR, setSelectedMR] = useState(null);
+  const [copilotOpen, setCopilotOpen] = useState(false);
+  const [copilotMr, setCopilotMr] = useState(null);
   const [showLogs, setShowLogs] = useState(false);
   const [feedback, setFeedback] = useState({
     vote: null,
@@ -147,6 +150,18 @@ const RepoDetails = () => {
     fivetranKey: !!repoData.fivetran_api_key,
     fivetranSecret: !!repoData.fivetran_api_secret,
     credentialsEncrypted: repoData.credentials_encrypted || false,
+  };
+
+  const openCopilotDrawer = (mr) => {
+    setCopilotMr(mr);
+    setCopilotOpen(true);
+    if (window.matchMedia("(max-width: 767px)").matches) {
+      closeModal();
+    }
+  };
+
+  const closeCopilotDrawer = () => {
+    setCopilotOpen(false);
   };
 
   const closeModal = () => {
@@ -1056,13 +1071,13 @@ const RepoDetails = () => {
           MR DETAILS POPUP / MODAL OVERLAY
           ========================================= */}
       {selectedMR && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 sm:p-6">
-          <div
-            className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm transition-opacity"
-            onClick={closeModal}
-          ></div>
-
-          <div className="relative w-full max-w-3xl bg-white/95 backdrop-blur-2xl border border-white rounded-[2rem] shadow-2xl overflow-hidden flex flex-col max-h-[90vh] animate-in fade-in zoom-in-95 duration-200">
+        <GlassOverlay
+          onClose={closeModal}
+          maxWidth="max-w-3xl"
+          rounded="rounded-[2rem]"
+          maxHeight="max-h-[90vh]"
+          panelClassName="flex flex-col"
+        >
             {/* Modal Header */}
             <div className="px-6 py-5 border-b border-slate-100 flex items-center justify-between bg-white/50">
               <div className="flex items-center gap-3">
@@ -1218,6 +1233,13 @@ const RepoDetails = () => {
                 />
               )}
 
+              {/* Copilot launcher */}
+              <CopilotLauncher
+                repositoryId={id}
+                mrIid={selectedMR.iid || selectedMR.gitlab_mr_id}
+                onOpen={() => openCopilotDrawer(selectedMR)}
+              />
+
               {/* Gatekeeper AI Inside-Modal Analysis Feedback */}
               <div
                 className={`rounded-2xl overflow-hidden shadow-xl flex flex-col ${selectedMR.isAutoFix ? "bg-slate-950 border border-[#FC6D26]/30" : "bg-slate-900 border border-slate-800"}`}
@@ -1241,105 +1263,11 @@ const RepoDetails = () => {
                   {selectedMR.isAutoFix && (
                     <div className="absolute right-[-10%] top-[-10%] w-32 h-32 bg-[#FC6D26]/10 rounded-full blur-2xl pointer-events-none"></div>
                   )}
-                  <div className="text-slate-300 text-sm leading-relaxed relative z-10 prose prose-invert prose-sm max-w-none">
-                    <ReactMarkdown
-                      components={{
-                        h1: ({ node, ...props }) => (
-                          <h1
-                            className="text-lg font-bold text-white mb-3"
-                            {...props}
-                          />
-                        ),
-                        h2: ({ node, ...props }) => (
-                          <h2
-                            className="text-base font-bold text-white mb-2 mt-4"
-                            {...props}
-                          />
-                        ),
-                        h3: ({ node, ...props }) => (
-                          <h3
-                            className="text-sm font-bold text-white mb-2 mt-3"
-                            {...props}
-                          />
-                        ),
-                        p: ({ node, ...props }) => (
-                          <p className="mb-2 text-slate-300" {...props} />
-                        ),
-                        ul: ({ node, ...props }) => (
-                          <ul
-                            className="list-disc list-inside mb-3 text-slate-300"
-                            {...props}
-                          />
-                        ),
-                        ol: ({ node, ...props }) => (
-                          <ol
-                            className="list-decimal list-inside mb-3 text-slate-300"
-                            {...props}
-                          />
-                        ),
-                        li: ({ node, ...props }) => (
-                          <li className="mb-1" {...props} />
-                        ),
-                        code: ({ node, inline, ...props }) =>
-                          inline ? (
-                            <code
-                              className="bg-slate-800 px-1 py-0.5 rounded text-emerald-400 text-xs"
-                              {...props}
-                            />
-                          ) : (
-                            <code
-                              className="block bg-slate-800 p-2 rounded text-emerald-400 text-xs my-2 overflow-x-auto"
-                              {...props}
-                            />
-                          ),
-                        pre: ({ node, ...props }) => (
-                          <pre
-                            className="bg-slate-900 p-3 rounded-lg overflow-x-auto my-3"
-                            {...props}
-                          />
-                        ),
-                        strong: ({ node, ...props }) => (
-                          <strong className="font-bold text-white" {...props} />
-                        ),
-                        blockquote: ({ node, ...props }) => (
-                          <blockquote
-                            className="border-l-4 border-slate-600 pl-4 italic text-slate-400 my-3"
-                            {...props}
-                          />
-                        ),
-                        a: ({ node, ...props }) => (
-                          <a
-                            className="text-[#FC6D26] hover:text-[#FC6D26]/80 underline"
-                            {...props}
-                          />
-                        ),
-                        table: ({ node, ...props }) => (
-                          <div className="overflow-x-auto my-3">
-                            <table
-                              className="min-w-full divide-y divide-slate-700"
-                              {...props}
-                            />
-                          </div>
-                        ),
-                        th: ({ node, ...props }) => (
-                          <th
-                            className="px-3 py-2 text-left text-xs font-medium text-slate-300 uppercase tracking-wider"
-                            {...props}
-                          />
-                        ),
-                        td: ({ node, ...props }) => (
-                          <td
-                            className="px-3 py-2 text-sm text-slate-400 whitespace-nowrap"
-                            {...props}
-                          />
-                        ),
-                      }}
-                    >
-                      {selectedMR.aiSummary ||
-                        selectedMR.description ||
-                        "AI analysis not available."}
-                    </ReactMarkdown>
-                  </div>
+                  <TerminalMarkdown>
+                    {selectedMR.aiSummary ||
+                      selectedMR.description ||
+                      "AI analysis not available."}
+                  </TerminalMarkdown>
 
                   {selectedMR.aiIssues.length > 0 && (
                     <div className="mt-4 space-y-2 relative z-10">
@@ -1549,21 +1477,28 @@ const RepoDetails = () => {
                 </a>
               </div>
             </div>
-          </div>
-        </div>
+        </GlassOverlay>
+      )}
+
+      {copilotMr && (
+        <CopilotDrawer
+          isOpen={copilotOpen}
+          onClose={closeCopilotDrawer}
+          repositoryId={id}
+          mrIid={copilotMr.iid || copilotMr.gitlab_mr_id}
+          mrTitle={copilotMr.title}
+        />
       )}
 
       {/* =========================================
           CREDENTIAL UPDATE MODAL
           ========================================= */}
       {credentialModal.isOpen && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 sm:p-6">
-          <div
-            className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm transition-opacity"
-            onClick={closeCredentialModal}
-          ></div>
-
-          <div className="relative w-full max-w-md bg-white/95 backdrop-blur-2xl border border-white rounded-2xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+        <GlassOverlay
+          onClose={closeCredentialModal}
+          maxWidth="max-w-md"
+          rounded="rounded-2xl"
+        >
             {/* Modal Header */}
             <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-white/50">
               <h2 className="text-lg font-bold text-slate-900">
@@ -1711,23 +1646,20 @@ const RepoDetails = () => {
                 )}
               </button>
             </div>
-          </div>
-        </div>
+        </GlassOverlay>
       )}
 
       {/* =========================================
           BRANCH CREDENTIAL UPDATE MODAL
           ========================================= */}
       {branchCredsModal.isOpen && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 sm:p-6">
-          <div
-            className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm transition-opacity"
-            onClick={() =>
-              setBranchCredsModal({ ...branchCredsModal, isOpen: false })
-            }
-          ></div>
-
-          <div className="relative w-full max-w-md bg-white/95 backdrop-blur-2xl border border-white rounded-2xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+        <GlassOverlay
+          onClose={() =>
+            setBranchCredsModal({ ...branchCredsModal, isOpen: false })
+          }
+          maxWidth="max-w-md"
+          rounded="rounded-2xl"
+        >
             {/* Modal Header */}
             <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-white/50">
               <div className="flex flex-col">
@@ -2036,8 +1968,7 @@ const RepoDetails = () => {
                 </button>
               </div>
             </div>
-          </div>
-        </div>
+        </GlassOverlay>
       )}
     </div>
   );
@@ -2050,55 +1981,8 @@ const ProgressLogsViewer = ({ repoId, mrIid, isReviewing }) => {
   });
   const logs = logsData?.logs || [];
 
-  if (logs.length === 0 && !isLoading) {
-    return null;
-  }
-
   return (
-    <div className="bg-slate-900 rounded-2xl border border-slate-800 overflow-hidden">
-      <div className="px-4 py-3 bg-slate-800/50 border-b border-slate-700/50 flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          {isReviewing && (
-            <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse"></span>
-          )}
-          <span className="text-xs font-bold uppercase tracking-wider text-slate-300">
-            Analysis Progress
-          </span>
-        </div>
-        {isReviewing && (
-          <span className="text-[10px] text-blue-400 font-medium">Live</span>
-        )}
-      </div>
-      <div className="p-4 max-h-48 overflow-y-auto space-y-2 font-mono text-xs">
-        {logs.map((log, idx) => (
-          <div key={idx} className="flex items-start gap-2">
-            <span className="text-slate-500 shrink-0">
-              {new Date(log.timestamp).toLocaleTimeString("en-US", {
-                hour: "2-digit",
-                minute: "2-digit",
-                second: "2-digit",
-              })}
-            </span>
-            <span
-              className={`flex-1 ${
-                log.status === "running"
-                  ? "text-blue-400"
-                  : log.status === "completed"
-                    ? "text-emerald-400"
-                    : log.status === "failed"
-                      ? "text-rose-400"
-                      : "text-slate-300"
-              }`}
-            >
-              {log.message}
-            </span>
-          </div>
-        ))}
-        {isLoading && (
-          <div className="text-slate-500 text-center py-2">Loading logs...</div>
-        )}
-      </div>
-    </div>
+    <ActivityLog logs={logs} isLoading={isLoading} isLive={isReviewing} />
   );
 };
 

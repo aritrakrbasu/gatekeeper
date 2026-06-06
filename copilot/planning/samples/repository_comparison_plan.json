@@ -1,0 +1,28 @@
+{
+  "plan_id": "plan-sample-compare",
+  "conversation_id": "conv-sample-02",
+  "question_type": "what_alternatives",
+  "profile": "repository_comparison",
+  "steps": [
+    {
+      "step_id": "inv-01",
+      "rationale": "Gather evidence via run_schema_inspection to support or refute the user question.",
+      "tool_name": "run_schema_inspection",
+      "tool_args": {
+        "collection": "peil_executions"
+      },
+      "expected_evidence": "[repository_comparison] Collection schema fields for repository comparison."
+    },
+    {
+      "step_id": "inv-02",
+      "rationale": "Cross-check replay against accepted knowledge [assert-def456]: Repository patterns may differ across services.",
+      "tool_name": "run_impact_analysis",
+      "tool_args": {
+        "repo_path": "/tmp/repos/82576405"
+      },
+      "expected_evidence": "[repository_comparison] Blast-radius summary for changed symbols."
+    }
+  ],
+  "knowledge_assertion_ids": ["assert-def456"],
+  "replay_execution_id": "exec-mr-42-sample"
+}

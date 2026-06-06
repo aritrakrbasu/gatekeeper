@@ -1,0 +1,37 @@
+{
+  "plan_id": "plan-sample-deep",
+  "conversation_id": "conv-sample-03",
+  "question_type": "investigate_further",
+  "profile": "deep_investigation",
+  "steps": [
+    {
+      "step_id": "inv-01",
+      "rationale": "Inspect get_gitlab_mr_diffs output to validate replay conclusions.",
+      "tool_name": "get_gitlab_mr_diffs",
+      "tool_args": {
+        "repository_id": "82576405"
+      },
+      "expected_evidence": "[deep_investigation] MR diff hunks and file paths relevant to the finding."
+    },
+    {
+      "step_id": "inv-02",
+      "rationale": "Accepted knowledge [assert-ghi789] references gitnexus_analyze; verify: Tool gitnexus_analyze is invoked for impact surface.",
+      "tool_name": "gitnexus_analyze",
+      "tool_args": {
+        "repo_path": "/tmp/repos/82576405"
+      },
+      "expected_evidence": "[deep_investigation] Dependency/impact graph nodes supporting the review conclusion."
+    },
+    {
+      "step_id": "inv-03",
+      "rationale": "Gather evidence via run_impact_analysis to support or refute the user question.",
+      "tool_name": "run_impact_analysis",
+      "tool_args": {
+        "repo_path": "/tmp/repos/82576405"
+      },
+      "expected_evidence": "[deep_investigation] Blast-radius summary for changed symbols."
+    }
+  ],
+  "knowledge_assertion_ids": ["assert-ghi789"],
+  "replay_execution_id": "exec-mr-42-sample"
+}

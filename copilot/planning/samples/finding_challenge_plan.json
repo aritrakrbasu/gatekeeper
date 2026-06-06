@@ -1,0 +1,28 @@
+{
+  "plan_id": "plan-sample-finding",
+  "conversation_id": "conv-sample-01",
+  "question_type": "is_finding_correct",
+  "profile": "finding_challenge",
+  "steps": [
+    {
+      "step_id": "inv-01",
+      "rationale": "Accepted knowledge [assert-abc123] references get_gitlab_mr_diffs; verify: MR diff must support the raised finding.",
+      "tool_name": "get_gitlab_mr_diffs",
+      "tool_args": {
+        "repository_id": "82576405"
+      },
+      "expected_evidence": "[finding_challenge] MR diff hunks and file paths relevant to the finding."
+    },
+    {
+      "step_id": "inv-02",
+      "rationale": "Cross-check replay against accepted knowledge [assert-abc123]: Impact graph should confirm blast radius.",
+      "tool_name": "gitnexus_analyze",
+      "tool_args": {
+        "repo_path": "/tmp/repos/82576405"
+      },
+      "expected_evidence": "[finding_challenge] Dependency/impact graph nodes supporting the review conclusion."
+    }
+  ],
+  "knowledge_assertion_ids": ["assert-abc123"],
+  "replay_execution_id": "exec-mr-42-sample"
+}

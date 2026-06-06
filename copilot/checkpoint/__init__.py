@@ -1,0 +1,1 @@
+"""Copilot checkpoint persistence."""

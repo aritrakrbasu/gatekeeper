@@ -128,4 +128,20 @@ export const queryKeys = {
     gitlab: () => ["integrations", "gitlab"],
     slack: () => ["integrations", "slack"],
   },
+
+  // ============================================================================
+  // Copilot
+  // ============================================================================
+  copilot: {
+    all: ["copilot"],
+    bootstrap: (conversationId) => ["copilot", "bootstrap", conversationId],
+    state: (conversationId) => ["copilot", "state", conversationId],
+    conversations: (filters) => ["copilot", "conversations", filters],
+    execution: (conversationId) => ["copilot", "execution", conversationId],
+    pendingApprovals: (repositoryId) => [
+      "copilot",
+      "approvals",
+      repositoryId ?? "all",
+    ],
+  },
 };

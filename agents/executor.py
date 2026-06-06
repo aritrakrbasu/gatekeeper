@@ -2,12 +2,18 @@ import re
 import json
 import asyncio
 import inspect
+import time
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Callable
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
+
 from agents.context import AgentContext
-from agents.registry import ToolRegistry
 from agents.memory import MemoryStore
 from agents.planner import StepSchema
+from agents.registry import ToolRegistry
+from peil.models.enums import CaptureEventType
+
+if TYPE_CHECKING:
+    from agents.aril_bridge import ArilSession
 
 def resolve_arguments(arguments: Any, step_results: Dict[str, Any]) -> Any:
     """
@@ -69,10 +75,12 @@ class ExecutorAgent:
         step_timeout: float = 60.0,
         max_retries: int = 3,
         initial_retry_delay: float = 1.0,
-        backoff_factor: float = 2.0
+        backoff_factor: float = 2.0,
+        aril: Optional["ArilSession"] = None,
     ):
         self.registry = registry
         self.memory = memory
+        self.aril = aril
         self.step_timeout = step_timeout
         self.max_retries = max_retries
         self.initial_retry_delay = initial_retry_delay
@@ -192,7 +200,22 @@ class ExecutorAgent:
         self._auto_register_rollbacks(tool_name, resolved_args)
         
         print(f"[INFO] [Executor] Executing step '{step.step_id}' using tool '{tool_name}'...")
-        
+
+        if self.aril is not None:
+            try:
+                from peil.capture.sanitize import mask_sensitive_arguments
+
+                self.aril.emit(
+                    CaptureEventType.STEP_STARTED,
+                    {
+                        "step_id": step.step_id,
+                        "tool_name": tool_name,
+                        "arguments": mask_sensitive_arguments(resolved_args),
+                    },
+                )
+            except Exception as exc:
+                print(f"[WARN] [Executor] ARIL step_started emit failed: {exc}")
+
         # Log start status to memory
         self.memory.add_step(
             step_id=step.step_id,
@@ -204,6 +227,7 @@ class ExecutorAgent:
         
         # 2. Execution Loop with Retries
         last_error = None
+        step_start = time.time()
         for attempt in range(self.max_retries + 1):
             if attempt > 0:
                 delay = self.initial_retry_delay * (self.backoff_factor ** (attempt - 1))
@@ -216,9 +240,10 @@ class ExecutorAgent:
                     self.registry.execute_tool(
                         name=tool_name,
                         arguments=resolved_args,
-                        context=context
+                        context=context,
+                        step_id=step.step_id,
                     ),
-                    timeout=self.step_timeout
+                    timeout=self.step_timeout,
                 )
                 
                 # Success: Reset Circuit Breaker for this tool
@@ -236,7 +261,22 @@ class ExecutorAgent:
                     result=res
                 )
                 await self.memory.persist_to_mongodb()
-                
+
+                if self.aril is not None:
+                    try:
+                        duration_ms = (time.time() - step_start) * 1000.0
+                        self.aril.emit(
+                            CaptureEventType.STEP_COMPLETED,
+                            {
+                                "step_id": step.step_id,
+                                "tool_name": tool_name,
+                                "duration_ms": duration_ms,
+                            },
+                        )
+                        await self.aril.flush()
+                    except Exception as exc:
+                        print(f"[WARN] [Executor] ARIL step_completed emit failed: {exc}")
+
                 print(f"[OK] [Executor] Step '{step.step_id}' completed successfully.")
                 return res
                 
@@ -262,7 +302,24 @@ class ExecutorAgent:
             error=str(last_error)
         )
         await self.memory.persist_to_mongodb()
-        
+
+        if self.aril is not None:
+            try:
+                duration_ms = (time.time() - step_start) * 1000.0
+                self.aril.emit(
+                    CaptureEventType.STEP_FAILED,
+                    {
+                        "step_id": step.step_id,
+                        "tool_name": tool_name,
+                        "error": str(last_error),
+                        "retry_count": self.max_retries,
+                        "duration_ms": duration_ms,
+                    },
+                )
+                await self.aril.flush()
+            except Exception as exc:
+                print(f"[WARN] [Executor] ARIL step_failed emit failed: {exc}")
+
         # Rollback actions
         print(f"[WARN] [Executor] Step '{step.step_id}' failed. Initiating rollbacks...")
         await self.rollback()

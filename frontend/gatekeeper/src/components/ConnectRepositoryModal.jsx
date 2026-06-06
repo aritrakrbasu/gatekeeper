@@ -6,6 +6,7 @@
  */
 
 import React, { useState, useEffect } from "react";
+import { GlassOverlay } from "./shared";
 import {
   useAvailableRepositories,
   useScanRepository,
@@ -308,8 +309,14 @@ const ConnectRepositoryModal = ({ isOpen, onClose, onConnect }) => {
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 transition-all duration-300">
-      <div className="bg-white rounded-[2rem] border border-slate-100 shadow-2xl max-w-2xl w-full max-h-[85vh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+    <GlassOverlay
+      variant="unified"
+      zIndex="z-50"
+      maxWidth="max-w-2xl"
+      maxHeight="max-h-[85vh]"
+      backdropClass="bg-slate-900/60"
+      panelClassName="flex flex-col overflow-hidden"
+    >
         {/* Render List Step */}
         {step === "list" && (
           <>
@@ -1583,8 +1590,7 @@ const ConnectRepositoryModal = ({ isOpen, onClose, onConnect }) => {
             </div>
           </form>
         )}
-      </div>
-    </div>
+    </GlassOverlay>
   );
 };
 

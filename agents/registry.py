@@ -1,7 +1,14 @@
-from typing import Dict, Any, List, Optional
+import time
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
 from agents.base_tool import BaseTool, LocalTool
 from agents.context import AgentContext
 from agents.mcp_wrappers import GitLabMCPTool, MongoMCPTool, DynatraceMCPTool, GitNexusMCPTool
+from peil.capture.sanitize import mask_sensitive_arguments
+from peil.models.enums import CaptureEventType
+
+if TYPE_CHECKING:
+    from agents.aril_bridge import ArilSession
 
 
 class ToolRegistry:
@@ -11,8 +18,12 @@ class ToolRegistry:
     """
 
     def __init__(self):
-        # Map of tool_name -> BaseTool instance
         self._tools: Dict[str, BaseTool] = {}
+        self._aril: Optional["ArilSession"] = None
+
+    def attach_aril(self, aril: Optional["ArilSession"]) -> None:
+        """Attach ARIL session for tool lifecycle capture."""
+        self._aril = aril
 
     def register_tool(self, tool: BaseTool) -> None:
         """Registers a formal BaseTool instance."""
@@ -40,10 +51,9 @@ class ToolRegistry:
                 schema = {
                     "name": tool.name,
                     "description": tool.description,
-                    "parameters": tool.inputSchema
+                    "parameters": tool.inputSchema,
                 }
-                
-                # Instantiate respective wrapper
+
                 if session_name == "gitlab":
                     wrapper = GitLabMCPTool(name=tool.name, description=tool.description, schema=schema)
                 elif session_name == "mongodb":
@@ -53,16 +63,15 @@ class ToolRegistry:
                 elif session_name == "gitnexus":
                     wrapper = GitNexusMCPTool(name=tool.name, description=tool.description, schema=schema)
                 else:
-                    # Fallback to base wrapper
                     from agents.mcp_wrappers import BaseMCPTool
                     wrapper = BaseMCPTool(
                         name=tool.name,
                         description=tool.description,
                         schema=schema,
                         session_name=session_name,
-                        session_getter=lambda: mcp_session
+                        session_getter=lambda: mcp_session,
                     )
-                
+
                 self.register_tool(wrapper)
                 registered_count += 1
             print(f"[OK] [ToolRegistry] Registered {registered_count} tools from MCP session '{session_name}'")
@@ -85,7 +94,13 @@ class ToolRegistry:
         adapter = GeminiToolAdapter(self)
         return adapter.get_gemini_tools()
 
-    async def execute_tool(self, name: str, arguments: Dict[str, Any], context: Optional[AgentContext] = None) -> Any:
+    async def execute_tool(
+        self,
+        name: str,
+        arguments: Dict[str, Any],
+        context: Optional[AgentContext] = None,
+        step_id: Optional[str] = None,
+    ) -> Any:
         """
         Resolves, validates, and executes the specified tool.
         Returns the output from the tool execution (normalizing errors).
@@ -102,17 +117,62 @@ class ToolRegistry:
                 repository=repo,
                 branch=branch,
                 user=user,
-                schema_ctx=schema
+                schema_ctx=schema,
             )
-            
+
+        masked_args = mask_sensitive_arguments(arguments)
+        aril = self._aril
+        if aril is not None:
+            try:
+                aril.emit(
+                    CaptureEventType.TOOL_INVOKED,
+                    {
+                        "tool_name": name,
+                        "masked_arguments": masked_args,
+                        "step_id": step_id,
+                    },
+                )
+            except Exception as exc:
+                print(f"[WARN] [ToolRegistry] ARIL tool_invoked emit failed: {exc}")
+
+        start = time.time()
         tool = self.get_tool(name)
         result = await tool.execute(arguments, context)
+        duration_ms = (time.time() - start) * 1000.0
+
+        result_ref: Optional[str] = None
+        if aril is not None:
+            try:
+                from agents.aril_bridge import serialize_for_evidence
+
+                if result.content is not None:
+                    result_ref = await aril.evidence_repo.store(
+                        execution_id=aril.execution_id,
+                        payload=serialize_for_evidence(result.content),
+                        content_type="application/json",
+                    )
+                status = "success" if result.status != "error" else "error"
+                aril.emit(
+                    CaptureEventType.TOOL_COMPLETED,
+                    {
+                        "tool_name": name,
+                        "result_ref": result_ref,
+                        "duration_ms": duration_ms,
+                        "status": status,
+                        "step_id": step_id,
+                        "error_message": result.error_message,
+                    },
+                )
+                await aril.flush()
+            except Exception as exc:
+                print(f"[WARN] [ToolRegistry] ARIL tool_completed emit failed: {exc}")
+
         if result.status == "error":
             raise RuntimeError(result.error_message)
         return result.content
 
 
-async def build_default_registry() -> ToolRegistry:
+async def build_default_registry(aril: Optional["ArilSession"] = None) -> ToolRegistry:
     """
     Creates and populates a ToolRegistry with all active local services and MCP servers.
     """
@@ -120,8 +180,9 @@ async def build_default_registry() -> ToolRegistry:
     from agents import tools
 
     registry = ToolRegistry()
+    if aril is not None:
+        registry.attach_aril(aril)
 
-    # 1. Register local Python tools
     registry.register_local_tool("clone_repo", tools.clone_repo_schema, tools.clone_repo)
     registry.register_local_tool("run_impact_analysis", tools.run_impact_analysis_schema, tools.run_impact_analysis)
     registry.register_local_tool("run_schema_inspection", tools.run_schema_inspection_schema, tools.run_schema_inspection)
@@ -132,7 +193,6 @@ async def build_default_registry() -> ToolRegistry:
     registry.register_local_tool("create_hotfix_branch_and_mr", tools.create_hotfix_branch_and_mr_schema, tools.create_hotfix_branch_and_mr)
     registry.register_local_tool("gitnexus_analyze", tools.gitnexus_analyze_schema, tools.gitnexus_analyze)
 
-    # 2. Register active Stdio MCP sessions dynamically if they are initialized
     if mcp_service.gitlab_session:
         await registry.register_mcp_session("gitlab", mcp_service.gitlab_session)
     if mcp_service.mongo_session:

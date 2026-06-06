@@ -1,0 +1,319 @@
+{
+  "execution_id": "exec-mr-42-sample",
+  "outcome_node_id": "outcome:terminal",
+  "mode": "forensic",
+  "graph_id": "graph-2bc60fea344b37af",
+  "graph_hash": "889193d8c92e025e5700083c2415f6068e1e9ed46054f2b37c810d032a76e71f",
+  "graph_revision": 0,
+  "execution_summary": {
+    "execution_id": "exec-mr-42-sample",
+    "task_id": "mr-review-sample01",
+    "execution_type": "mr_review",
+    "execution_source": "workflow_engine",
+    "repository_id": "82576405",
+    "subject_id": "mr:42:82576405",
+    "objective": "Perform GitLab Merge Request Review for MR 42",
+    "status": "graph_built",
+    "graph_id": "graph-2bc60fea344b37af",
+    "created_at": "2026-06-06T12:12:46.730092Z",
+    "updated_at": "2026-06-06T12:12:46.734216Z",
+    "completed_at": null
+  },
+  "graph_path": [
+    {
+      "index": 0,
+      "node_id": "execution:exec-mr-42-sample",
+      "node_type": "execution",
+      "edge_relation": null,
+      "parent_node_id": null
+    },
+    {
+      "index": 1,
+      "node_id": "model_turn:0002",
+      "node_type": "model_turn",
+      "edge_relation": "triggers",
+      "parent_node_id": "execution:exec-mr-42-sample"
+    },
+    {
+      "index": 2,
+      "node_id": "plan:0",
+      "node_type": "plan",
+      "edge_relation": "produces",
+      "parent_node_id": "model_turn:0002"
+    },
+    {
+      "index": 3,
+      "node_id": "plan_step:0:clone",
+      "node_type": "plan_step",
+      "edge_relation": "produces",
+      "parent_node_id": "plan:0"
+    },
+    {
+      "index": 4,
+      "node_id": "tool_call:0004",
+      "node_type": "tool_call",
+      "edge_relation": "triggers",
+      "parent_node_id": "plan_step:0:clone"
+    },
+    {
+      "index": 5,
+      "node_id": "tool_result:0005",
+      "node_type": "tool_result",
+      "edge_relation": "produces",
+      "parent_node_id": "tool_call:0004"
+    },
+    {
+      "index": 6,
+      "node_id": "reflection:0006",
+      "node_type": "reflection",
+      "edge_relation": "validates",
+      "parent_node_id": "tool_result:0005"
+    },
+    {
+      "index": 7,
+      "node_id": "plan_step:0:analyze",
+      "node_type": "plan_step",
+      "edge_relation": "produces",
+      "parent_node_id": "plan:0"
+    },
+    {
+      "index": 8,
+      "node_id": "tool_call:0007",
+      "node_type": "tool_call",
+      "edge_relation": "triggers",
+      "parent_node_id": "plan_step:0:analyze"
+    },
+    {
+      "index": 9,
+      "node_id": "tool_result:0008",
+      "node_type": "tool_result",
+      "edge_relation": "produces",
+      "parent_node_id": "tool_call:0007"
+    },
+    {
+      "index": 10,
+      "node_id": "reflection:0009",
+      "node_type": "reflection",
+      "edge_relation": "validates",
+      "parent_node_id": "tool_result:0008"
+    },
+    {
+      "index": 11,
+      "node_id": "plan_step:0:comment",
+      "node_type": "plan_step",
+      "edge_relation": "produces",
+      "parent_node_id": "plan:0"
+    },
+    {
+      "index": 12,
+      "node_id": "tool_call:0010",
+      "node_type": "tool_call",
+      "edge_relation": "triggers",
+      "parent_node_id": "plan_step:0:comment"
+    },
+    {
+      "index": 13,
+      "node_id": "tool_result:0011",
+      "node_type": "tool_result",
+      "edge_relation": "produces",
+      "parent_node_id": "tool_call:0010"
+    },
+    {
+      "index": 14,
+      "node_id": "reflection:0012",
+      "node_type": "reflection",
+      "edge_relation": "validates",
+      "parent_node_id": "tool_result:0011"
+    },
+    {
+      "index": 15,
+      "node_id": "outcome:terminal",
+      "node_type": "outcome",
+      "edge_relation": "produces",
+      "parent_node_id": "execution:exec-mr-42-sample"
+    }
+  ],
+  "model_turns": [
+    {
+      "node_id": "model_turn:0002",
+      "source": "planner",
+      "prompt_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "response_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "token_count": 1200,
+      "sequence": 2,
+      "created_at": "2026-06-06T10:00:02Z"
+    }
+  ],
+  "plan_steps": [
+    {
+      "node_id": "plan_step:0:clone",
+      "step_id": "clone",
+      "tool_name": "clone_repo",
+      "action": "Clone repository",
+      "reason": "Workspace required",
+      "plan_revision": 0,
+      "dependencies": [],
+      "sequence": 3,
+      "created_at": "2026-06-06T10:00:03Z"
+    },
+    {
+      "node_id": "plan_step:0:analyze",
+      "step_id": "analyze",
+      "tool_name": "gitnexus_analyze",
+      "action": "Run call-graph analysis",
+      "reason": "Impact surface",
+      "plan_revision": 0,
+      "dependencies": [
+        "clone"
+      ],
+      "sequence": 3,
+      "created_at": "2026-06-06T10:00:03Z"
+    },
+    {
+      "node_id": "plan_step:0:comment",
+      "step_id": "comment",
+      "tool_name": "post_gitlab_mr_comment",
+      "action": "Post review comment",
+      "reason": "Deliver findings",
+      "plan_revision": 0,
+      "dependencies": [
+        "analyze"
+      ],
+      "sequence": 3,
+      "created_at": "2026-06-06T10:00:03Z"
+    }
+  ],
+  "tool_calls": [
+    {
+      "node_id": "tool_call:0004",
+      "tool_name": "clone_repo",
+      "step_id": "clone",
+      "masked_arguments": {
+        "repo_path": "workspace/gatekeeper"
+      },
+      "sequence": 4,
+      "created_at": "2026-06-06T10:00:04Z"
+    },
+    {
+      "node_id": "tool_call:0007",
+      "tool_name": "gitnexus_analyze",
+      "step_id": "analyze",
+      "masked_arguments": {
+        "repo_path": "workspace/gatekeeper"
+      },
+      "sequence": 7,
+      "created_at": "2026-06-06T10:00:07Z"
+    },
+    {
+      "node_id": "tool_call:0010",
+      "tool_name": "post_gitlab_mr_comment",
+      "step_id": "comment",
+      "masked_arguments": {
+        "mr_iid": "42"
+      },
+      "sequence": 10,
+      "created_at": "2026-06-06T10:00:10Z"
+    }
+  ],
+  "tool_results": [
+    {
+      "node_id": "tool_result:0005",
+      "tool_name": "clone_repo",
+      "step_id": "clone",
+      "status": "success",
+      "duration_ms": 2100.0,
+      "error_message": null,
+      "evidence_refs": [
+        "inline:abc123"
+      ],
+      "sequence": 5,
+      "created_at": "2026-06-06T10:00:05Z"
+    },
+    {
+      "node_id": "tool_result:0008",
+      "tool_name": "gitnexus_analyze",
+      "step_id": "analyze",
+      "status": "success",
+      "duration_ms": 5400.0,
+      "error_message": null,
+      "evidence_refs": [
+        "inline:def456"
+      ],
+      "sequence": 8,
+      "created_at": "2026-06-06T10:00:08Z"
+    },
+    {
+      "node_id": "tool_result:0011",
+      "tool_name": "post_gitlab_mr_comment",
+      "step_id": "comment",
+      "status": "success",
+      "duration_ms": 800.0,
+      "error_message": null,
+      "evidence_refs": [
+        "inline:ghi789"
+      ],
+      "sequence": 11,
+      "created_at": "2026-06-06T10:00:11Z"
+    }
+  ],
+  "reflections": [
+    {
+      "node_id": "reflection:0006",
+      "step_id": "clone",
+      "passed": true,
+      "reason": null,
+      "warning": null,
+      "sequence": 6,
+      "created_at": "2026-06-06T10:00:06Z"
+    },
+    {
+      "node_id": "reflection:0009",
+      "step_id": "analyze",
+      "passed": true,
+      "reason": null,
+      "warning": null,
+      "sequence": 9,
+      "created_at": "2026-06-06T10:00:09Z"
+    },
+    {
+      "node_id": "reflection:0012",
+      "step_id": "comment",
+      "passed": true,
+      "reason": null,
+      "warning": null,
+      "sequence": 12,
+      "created_at": "2026-06-06T10:00:12Z"
+    }
+  ],
+  "evidence_references": [
+    {
+      "ref": "inline:abc123",
+      "node_id": "tool_result:0005",
+      "excerpt": "{\"cloned\": true}",
+      "byte_length": 16
+    },
+    {
+      "ref": "inline:def456",
+      "node_id": "tool_result:0008",
+      "excerpt": "{\"findings\": 2}",
+      "byte_length": 15
+    },
+    {
+      "ref": "inline:ghi789",
+      "node_id": "tool_result:0011",
+      "excerpt": "{\"comment_id\": 99}",
+      "byte_length": 18
+    }
+  ],
+  "outcome": {
+    "node_id": "outcome:terminal",
+    "status": "completed",
+    "step_count": 3,
+    "duration_ms": 12000.0,
+    "error": null,
+    "event_type": "execution_completed",
+    "sequence": 13,
+    "created_at": "2026-06-06T10:00:13Z"
+  },
+  "narrative": null
+}
