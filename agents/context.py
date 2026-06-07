@@ -10,62 +10,80 @@ def normalize_sentry_payload(payload: dict) -> dict:
     """
     Normalize Sentry webhook payload to a flat structure.
 
-    Sentry webhooks have nested structure (data.error) with tags as arrays.
+    Sentry webhooks have nested structure (data.issue or data.error) with tags as arrays.
     This converts to the flat structure expected by ContextBuilder.
     """
+    import sys
+    import json
+
+    # Debug: Print the full raw Sentry payload for inspection
+    sys.stderr.write(f"[DEBUG] ===== RAW SENTRY WEBHOOK PAYLOAD =====\n")
+    sys.stderr.write(f"{json.dumps(payload, indent=2, default=str)}\n")
+    sys.stderr.write(f"[DEBUG] ===== END RAW PAYLOAD =====\n")
+    sys.stderr.flush()
+
     # If already normalized (has issue_id at root), return as-is
     if "issue_id" in payload and isinstance(payload.get("tags"), dict):
         return payload
 
-    # Extract the error event from nested structure
-    error_event = payload.get("data", {}).get("error", {})
-    if not error_event:
+    # Extract the event from nested structure
+    # Handle both data.issue (issue webhook) and data.error (error event webhook)
+    data = payload.get("data", {})
+    issue_event = data.get("issue", {})
+    error_event = data.get("error", {})
+
+    # Prefer issue event for issue webhooks, fall back to error event
+    event_data = issue_event if issue_event else error_event
+    if not event_data:
         return payload
 
-    # Convert tags from array of [key, value] to dict
-    tags_array = error_event.get("tags", [])
-    tags_dict = {}
-    for tag_pair in tags_array:
-        if isinstance(tag_pair, (list, tuple)) and len(tag_pair) >= 2:
-            tags_dict[tag_pair[0]] = tag_pair[1]
+    # For issue events, extract metadata for error details
+    metadata = event_data.get("metadata", {})
+    error_type = metadata.get("type", "")
+    error_value = metadata.get("value", "")
 
-    # Build exception message from stacktrace
-    exception_values = error_event.get("exception", {}).get("values", [])
-    stack_trace = ""
-    if exception_values:
-        exc_value = exception_values[0]
-        stack_trace = exc_value.get("value", "")
-        if not stack_trace:
-            # Try to build from stacktrace frames
-            frames = exc_value.get("stacktrace", {}).get("frames", [])
-            if frames:
-                for frame in frames:
-                    func = frame.get("function", "?")
-                    filename = frame.get("filename", "?")
-                    lineno = frame.get("lineno", "?")
-                    stack_trace += f"  at {func} ({filename}:{lineno})\n"
+    # Build stack trace string from metadata
+    stack_trace = f"{error_type}: {error_value}" if error_type and error_value else ""
 
-    # Get project ID (may be a number in webhooks)
-    project_id = error_event.get("project", "")
-    if isinstance(project_id, (int, float)):
-        project_id = str(project_id)
+    # Get project details - handle both dict format (issue webhooks) and direct ID format (error webhooks)
+    project = event_data.get("project")
+    project_id = ""
+    project_name = ""
+    project_platform = ""
+
+    if isinstance(project, dict):
+        # Issue webhook format: project is a dict with id, name, slug, etc.
+        project_id = str(project.get("id", ""))
+        project_name = project.get("name", "")
+        project_platform = project.get("platform", "")
+    elif isinstance(project, (int, float, str)):
+        # Error webhook format: project is directly an ID (int or string)
+        project_id = str(project)
+    else:
+        # Fallback for unknown format
+        project_id = ""
 
     # Build normalized payload
     normalized = {
-        "issue_id": error_event.get("issue_id", ""),
-        "title": error_event.get("title", ""),
-        "level": error_event.get("level", ""),
-        "environment": error_event.get("environment", ""),
-        "culprit": error_event.get("culprit", ""),
-        "message": stack_trace or error_event.get("message", ""),
+        "issue_id": event_data.get("id", ""),
+        "title": event_data.get("title", ""),
+        "level": event_data.get("level", ""),
+        "environment": event_data.get("environment", ""),  # May be in tags for issue events
+        "culprit": event_data.get("culprit", ""),
+        "message": stack_trace,
         "project": project_id,
-        "release": error_event.get("release", ""),
-        "platform": error_event.get("platform", ""),
-        "transaction": error_event.get("transaction", ""),
-        "event_id": error_event.get("event_id", ""),
-        "url": error_event.get("request", {}).get("url", ""),
-        "tags": tags_dict,
-        "stacktrace": exception_values[0].get("stacktrace", {}).get("frames", []) if exception_values else []
+        "project_name": project_name,  # Added for better context
+        "release": "",
+        "platform": event_data.get("platform", "") or project_platform,
+        "transaction": "",
+        "event_id": "",
+        "url": event_data.get("permalink", ""),
+        "tags": {},  # Tags are not in issue webhooks
+        "stacktrace": [],  # Stack frames not available in issue webhooks
+        "type": error_type,
+        "filename": metadata.get("filename", ""),
+        "function": metadata.get("function", ""),
+        "git_commit_sha": ""  # May be available in tags
     }
 
     return normalized
@@ -480,7 +498,7 @@ class ContextBuilder:
                 print(f"[WARN] Failed to fetch repository from MongoDB: {e}", flush=True)
 
         task_id = f"sentry-bug-{issue_id}-{uuid.uuid4().hex[:8]}"
-        objective = f"Analyze and fix Sentry issue {issue_id}. Fetch issue details, identify root cause, and create a draft MR with the fix."
+        objective = f"Analyze and fix Sentry issue {issue_id}. Issue details (title, level, environment, culprit, stack trace) are already in the webhook payload. Identify root cause and create a draft MR with the fix."
 
         repo_ctx = RepositoryContext(
             id=project_id,

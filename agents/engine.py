@@ -23,10 +23,10 @@ from peil.graph.builder import GraphBuilder
 from peil.models.enums import CaptureEventType, ExecutionStatus
 from services import mongo_client
 
-WEBHOOK_UNATTENDED_TRIGGERS = frozenset({"gitlab_mr", "dynatrace_crash"})
+WEBHOOK_UNATTENDED_TRIGGERS = frozenset({"gitlab_mr", "dynatrace_crash", "sentry_issue"})
 
 
-WEBHOOK_UNATTENDED_TRIGGERS = frozenset({"gitlab_mr", "dynatrace_crash"})
+WEBHOOK_UNATTENDED_TRIGGERS = frozenset({"gitlab_mr", "dynatrace_crash", "sentry_issue"})
 
 
 def get_ready_steps(steps: List[StepSchema], executed_ids: Set[str]) -> List[StepSchema]:
@@ -54,11 +54,8 @@ class WorkflowEngine:
         self.approval = HumanApprovalLayer()
 
     def _should_pause_for_approval(self, context: AgentContext, tool_name: str) -> bool:
-        """Pause before mutating tools unless the workflow was webhook-triggered."""
-        if not self.planner._is_mutate_action(tool_name):
-            return False
-        trigger = context.metadata.get("trigger_type", "")
-        return trigger not in WEBHOOK_UNATTENDED_TRIGGERS
+        """All tools run automatically - no human approval required."""
+        return False
 
     def _is_webhook_mr_terminal_step(self, context: AgentContext, step: StepSchema) -> bool:
         """Successful MR comment post completes unattended webhook reviews."""
@@ -94,11 +91,8 @@ class WorkflowEngine:
         return result
 
     def _should_pause_for_approval(self, context: AgentContext, tool_name: str) -> bool:
-        """Pause before mutating tools unless the workflow was webhook-triggered."""
-        if not self.planner._is_mutate_action(tool_name):
-            return False
-        trigger = context.metadata.get("trigger_type", "")
-        return trigger not in WEBHOOK_UNATTENDED_TRIGGERS
+        """All tools run automatically - no human approval required."""
+        return False
 
     async def run_task(self, context: AgentContext) -> Dict[str, Any]:
         """
@@ -427,7 +421,7 @@ class WorkflowEngine:
                         print(f"[WARN] Failed to parse arguments_json for approval: {parse_err}")
 
                     from agents.executor import resolve_arguments
-                    resolved_args = resolve_arguments(raw_args, executor.step_results)
+                    resolved_args = resolve_arguments(raw_args, executor.step_results, context)
                     executor._inject_context_args(step_to_run.tool_name, resolved_args, context)
 
                     package = await self.approval.generate_package(

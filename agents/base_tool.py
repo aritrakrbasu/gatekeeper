@@ -79,18 +79,48 @@ class LocalTool(BaseTool):
         for req in required:
             if req not in arguments:
                 raise ValueError(f"Missing required parameter: '{req}'")
-        
+
         properties = params.get("properties", {})
         for key, value in arguments.items():
             if key not in properties:
                 continue
-            prop_type = str(properties[key].get("type", "")).upper()
-            if prop_type == "STRING" and not isinstance(value, str):
-                raise TypeError(f"Parameter '{key}' must be a string")
-            elif prop_type == "INTEGER" and not isinstance(value, int) and not (isinstance(value, float) and value.is_integer()):
-                raise TypeError(f"Parameter '{key}' must be an integer")
-            elif prop_type == "BOOLEAN" and not isinstance(value, bool):
-                raise TypeError(f"Parameter '{key}' must be a boolean")
+
+            prop_def = properties[key]
+
+            # Handle oneOf (allows multiple types)
+            if "oneOf" in prop_def:
+                one_of_options = prop_def["oneOf"]
+                is_valid = False
+                for option in one_of_options:
+                    option_type = str(option.get("type", "")).upper()
+                    if self._check_type(value, option_type):
+                        is_valid = True
+                        break
+                if not is_valid:
+                    valid_types = [opt.get("type", "unknown") for opt in one_of_options]
+                    raise TypeError(f"Parameter '{key}' must be one of types: {valid_types}, got {type(value).__name__}")
+                continue
+
+            # Handle simple type checking
+            prop_type = str(prop_def.get("type", "")).upper()
+            if prop_type and not self._check_type(value, prop_type):
+                raise TypeError(f"Parameter '{key}' must be {prop_type.lower()}, got {type(value).__name__}")
+
+    def _check_type(self, value: Any, expected_type: str) -> bool:
+        """Check if value matches the expected type."""
+        if expected_type == "STRING":
+            return isinstance(value, str)
+        elif expected_type == "INTEGER":
+            return isinstance(value, int) or (isinstance(value, float) and value.is_integer())
+        elif expected_type == "NUMBER":
+            return isinstance(value, (int, float))
+        elif expected_type == "BOOLEAN":
+            return isinstance(value, bool)
+        elif expected_type == "ARRAY":
+            return isinstance(value, list)
+        elif expected_type == "OBJECT":
+            return isinstance(value, dict)
+        return True
 
     async def execute(self, arguments: Dict[str, Any], context: AgentContext) -> ToolResult:
         try:

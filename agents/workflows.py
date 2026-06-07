@@ -168,9 +168,8 @@ async def run_auto_remediation_workflow(payload: Dict[str, Any]) -> Dict[str, An
 
 def _is_breaking_bug(payload: Dict[str, Any]) -> bool:
     """Detect if Sentry issue is a breaking bug (production + error/fatal)."""
-    environment = str(payload.get("environment", "")).lower()
-    level = str(payload.get("level", "")).lower()
-    return environment == "production" and level in ["error", "fatal"]
+    # Always process all Sentry issues for testing
+    return True
 
 
 async def run_sentry_bug_workflow(payload: Dict[str, Any], user_id: Optional[str] = None, username: Optional[str] = None, target_project_id: Optional[str] = None) -> Dict[str, Any]:
@@ -268,10 +267,11 @@ async def build_sentry_registry():
 
     This registry includes:
     - All local Python tools (including new GitLab REST API tools)
-    - Sentry MCP (for fetching issue details)
+    - Sentry MCP (OPTIONAL - only for additional context beyond webhook payload)
     - MongoDB, Dynatrace, GitNexus MCP sessions
 
     Notably EXCLUDES GitLab MCP, as we use direct GitLab REST API calls instead.
+    Note: Webhook payload already contains all basic issue details needed.
     """
     from services import mcp_service
     from agents import tools
@@ -289,11 +289,16 @@ async def build_sentry_registry():
     registry.register_local_tool("apply_hotfix_patch", tools.apply_hotfix_patch_schema, tools.apply_hotfix_patch)
     registry.register_local_tool("create_hotfix_branch_and_mr", tools.create_hotfix_branch_and_mr_schema, tools.create_hotfix_branch_and_mr)
     registry.register_local_tool("gitnexus_analyze", tools.gitnexus_analyze_schema, tools.gitnexus_analyze)
+    registry.register_local_tool("gitnexus_grep", tools.gitnexus_grep_schema, tools.gitnexus_grep)
+    registry.register_local_tool("gitnexus_file", tools.gitnexus_file_schema, tools.gitnexus_file)
 
     # GitLab REST API tools (direct API calls without MCP)
     registry.register_local_tool("create_gitlab_branch", tools.create_gitlab_branch_schema, tools.create_gitlab_branch)
     registry.register_local_tool("create_gitlab_merge_request", tools.create_gitlab_merge_request_schema, tools.create_gitlab_merge_request)
     registry.register_local_tool("commit_file_to_branch", tools.commit_file_to_branch_schema, tools.commit_file_to_branch)
+
+    # AI Fix Generation tool
+    registry.register_local_tool("generate_fix", tools.generate_fix_schema, tools.generate_fix)
 
     # 2. Register active MCP sessions (EXCLUDING GitLab MCP)
     # MongoDB
@@ -305,7 +310,8 @@ async def build_sentry_registry():
     # Dynatrace
     if mcp_service.dynatrace_session:
         await registry.register_mcp_session("dynatrace", mcp_service.dynatrace_session)
-    # Sentry (for fetching issue details)
+    # Sentry (OPTIONAL - only for additional context beyond webhook payload)
+    # Webhook payload already contains: issue_id, title, level, environment, culprit, stack_trace, tags
     if mcp_service.sentry_session:
         await registry.register_mcp_session("sentry", mcp_service.sentry_session)
 

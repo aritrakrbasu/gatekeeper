@@ -15,49 +15,157 @@ from peil.models.enums import CaptureEventType
 if TYPE_CHECKING:
     from agents.aril_bridge import ArilSession
 
-def resolve_arguments(arguments: Any, step_results: Dict[str, Any]) -> Any:
+def resolve_arguments(arguments: Any, step_results: Dict[str, Any], context: Optional["AgentContext"] = None) -> Any:
     """
     Recursively substitute '{{step_id.result}}' or '{{step_id.result.field}}' references
-    with values from step_results.
+    with values from step_results. Supports array indexing like {{step_id.result[0].field}}.
+
+    Also handles special placeholders:
+    - {{SENTRY_ISSUE_ID}} - Sentry issue ID from context.metadata or context.sentry_issue.issue_id
+    - {{TIMESTAMP}} - Current Unix timestamp
+
+    Auto-extraction: For gitnexus_grep results with no path specified:
+    - Extracts all filePaths from the results array
+    - Returns a list of file paths for gitnexus_file to process
     """
+    import time as time_module
+
     if isinstance(arguments, str):
+        # First, handle special placeholders (not step references)
+        if arguments == "{{SENTRY_ISSUE_ID}}":
+            if context:
+                # Try to get from metadata first, then from sentry_issue
+                issue_id = context.metadata.get("issue_id", "")
+                if not issue_id and context.sentry_issue:
+                    issue_id = context.sentry_issue.issue_id or ""
+                return issue_id if issue_id else ""
+            return ""
+        elif arguments == "{{TIMESTAMP}}":
+            return str(int(time_module.time()))
+        elif arguments == "{{SENTRY_TITLE}}":
+            if context and context.sentry_issue:
+                return context.sentry_issue.title or ""
+            return ""
+
         # 1. Exact match for a whole object reference: return the raw object (e.g. dict or list)
-        exact_match = re.match(r"^\{\{\s*([a-zA-Z0-9_\-]+)\.result(?:\.([a-zA-Z0-9_\-]+))?\s*\}\}$", arguments)
+        # Matches: {{step_id.result}}, {{step_id.result.field}}, {{step_id.result[0]}}, {{step_id.result[0].field}}
+        exact_match = re.match(r"^\{\{\s*([a-zA-Z0-9_\-]+)\.result((?:\[\d+\])?(?:\.[a-zA-Z0-9_\-]+)*)?\s*\}\}$", arguments)
         if exact_match:
             step_id = exact_match.group(1)
-            field = exact_match.group(2)
+            path = exact_match.group(2) or ""  # e.g., "[0].file_path" or ""
             if step_id not in step_results:
                 raise ValueError(f"Step '{step_id}' result was referenced but is not available.")
             res = step_results[step_id]
-            if field:
-                if isinstance(res, dict) and field in res:
-                    return res[field]
-                elif hasattr(res, field):
-                    return getattr(res, field)
-                else:
-                    raise KeyError(f"Field '{field}' not found in step '{step_id}' result.")
-            return res
-            
+
+            # AUTO-EXTRACTION: For gitnexus_grep results with no path, extract all filePaths
+            if not path and isinstance(res, dict) and 'results' in res and isinstance(res['results'], list) and len(res['results']) > 0:
+                file_paths = []
+                for result_item in res['results']:
+                    if 'filePath' in result_item:
+                        file_paths.append(result_item['filePath'])
+                if file_paths:
+                    print(f"[DEBUG] Auto-extracted {len(file_paths)} filePaths from gitnexus_grep result")
+                    return file_paths  # Return list of all file paths
+
+            # Parse path like "[0].file_path" or ".field" or "[0]" or ""
+            # Navigate through the path step by step
+            current = res
+            if path:
+                # Split by dots, but keep array indices together
+                # e.g., "[0].file_path" -> ["[0]", "file_path"]
+                # e.g., ".field" -> ["field"]
+                parts = []
+                for segment in path.split('.'):
+                    if segment:
+                        parts.append(segment)
+
+                for part in parts:
+                    # Handle array indexing like [0], [1], etc.
+                    array_match = re.match(r"^\[(\d+)\]$", part)
+                    if array_match:
+                        idx = int(array_match.group(1))
+                        if isinstance(current, list) and 0 <= idx < len(current):
+                            current = current[idx]
+                        elif isinstance(current, dict) and str(idx) in current:
+                            current = current[str(idx)]
+                        else:
+                            raise IndexError(f"Array index {idx} out of bounds or invalid for path '{path}' in step '{step_id}'.")
+                    else:
+                        # Regular field access
+                        if isinstance(current, dict) and part in current:
+                            current = current[part]
+                        elif hasattr(current, part):
+                            current = getattr(current, part)
+                        else:
+                            raise KeyError(f"Field '{part}' not found in path '{path}' for step '{step_id}'.")
+
+            return current
+
         # 2. String substitution for substring matches: convert to string
-        pattern = r"\{\{\s*([a-zA-Z0-9_\-]+)\.result(?:\.([a-zA-Z0-9_\-]+))?\s*\}\}"
+        # First, handle special global placeholders
+        def replace_special_placeholders(s):
+            """Replace special placeholders like {{SENTRY_ISSUE_ID}} and {{TIMESTAMP}}"""
+            if "{{SENTRY_ISSUE_ID}}" in s:
+                issue_id = ""
+                if context:
+                    issue_id = context.metadata.get("issue_id", "")
+                    if not issue_id and context.sentry_issue:
+                        issue_id = context.sentry_issue.issue_id or ""
+                s = s.replace("{{SENTRY_ISSUE_ID}}", issue_id if issue_id else "")
+            if "{{TIMESTAMP}}" in s:
+                s = s.replace("{{TIMESTAMP}}", str(int(time_module.time())))
+            if "{{SENTRY_TITLE}}" in s:
+                title = ""
+                if context and context.sentry_issue:
+                    title = context.sentry_issue.title or ""
+                s = s.replace("{{SENTRY_TITLE}}", title)
+            return s
+
+        arguments = replace_special_placeholders(arguments)
+
+        # Matches: {{step_id.result}}, {{step_id.result.field}}, {{step_id.result[0]}}, {{step_id.result[0].field}}
+        pattern = r"\{\{\s*([a-zA-Z0-9_\-]+)\.result((?:\[\d+\])?(?:\.[a-zA-Z0-9_\-]+)*)?\s*\}\}"
         def replace_match(match):
             step_id = match.group(1)
-            field = match.group(2)
+            path = match.group(2) or ""  # e.g., "[0].file_path" or ""
             if step_id not in step_results:
                 return match.group(0)
             res = step_results[step_id]
-            if field:
-                if isinstance(res, dict):
-                    return str(res.get(field, ""))
-                return str(getattr(res, field, ""))
-            return str(res)
-            
+
+            # Parse path like "[0].file_path" or ".field" or "[0]" or ""
+            current = res
+            if path:
+                parts = []
+                for segment in path.split('.'):
+                    if segment:
+                        parts.append(segment)
+
+                for part in parts:
+                    array_match = re.match(r"^\[(\d+)\]$", part)
+                    if array_match:
+                        idx = int(array_match.group(1))
+                        if isinstance(current, list) and 0 <= idx < len(current):
+                            current = current[idx]
+                        elif isinstance(current, dict) and str(idx) in current:
+                            current = current[str(idx)]
+                        else:
+                            return match.group(0)  # Return original if can't resolve
+                    else:
+                        if isinstance(current, dict) and part in current:
+                            current = current[part]
+                        elif hasattr(current, part):
+                            current = getattr(current, part)
+                        else:
+                            return match.group(0)  # Return original if can't resolve
+
+            return str(current)
+
         return re.sub(pattern, replace_match, arguments)
-        
+
     elif isinstance(arguments, dict):
-        return {k: resolve_arguments(v, step_results) for k, v in arguments.items()}
+        return {k: resolve_arguments(v, step_results, context) for k, v in arguments.items()}
     elif isinstance(arguments, list):
-        return [resolve_arguments(x, step_results) for x in arguments]
+        return [resolve_arguments(x, step_results, context) for x in arguments]
     else:
         return arguments
 
@@ -265,14 +373,17 @@ class ExecutorAgent:
             print(f"[WARN] Failed to parse arguments_json: {step.arguments_json}. Error: {parse_err}")
             raw_args = {}
             
-        resolved_args = resolve_arguments(raw_args, self.step_results)
+        resolved_args = resolve_arguments(raw_args, self.step_results, context)
         
         # Auto-inject standard parameters
         self._inject_context_args(tool_name, resolved_args, context)
         
         # Register rollback hooks automatically
         self._auto_register_rollbacks(tool_name, resolved_args)
-        
+
+        # Debug log: Show tool being fired with resolved arguments
+        print(f"[DEBUG] [Executor] 🔥 FIRING TOOL: {tool_name}")
+        print(f"[DEBUG] [Executor]    Arguments: {json.dumps(resolved_args, indent=2, default=str)[:500]}")
         print(f"[INFO] [Executor] Executing step '{step.step_id}' using tool '{tool_name}'...")
 
         if self.aril is not None:

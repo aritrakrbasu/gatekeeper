@@ -49,6 +49,206 @@ class PlannerAgent:
     def __init__(self, model_name: str = "gemini-2.5-flash"):
         self.model_name = model_name
 
+    def _get_workflow_type(self, context: AgentContext) -> str:
+        """Determine the workflow type from context metadata or objective."""
+        # Check metadata first
+        trigger_type = context.metadata.get("trigger_type", "")
+        if trigger_type == "sentry_issue":
+            return "sentry"
+        elif trigger_type == "dynatrace_incident":
+            return "dynatrace"
+        elif "merge_request" in context.objective.lower() or "mr review" in context.objective.lower():
+            return "mr_review"
+        # Fallback to objective analysis
+        objective_lower = context.objective.lower()
+        if "sentry issue" in objective_lower or "fix bug" in objective_lower:
+            return "sentry"
+        elif "incident" in objective_lower and "dynatrace" in objective_lower:
+            return "dynatrace"
+        else:
+            return "mr_review"  # Default
+
+    def _build_sentry_system_instruction(self) -> str:
+        """System instruction for Sentry bug fixing workflows."""
+        return (
+            "You are the elite Gatekeeper AI Planner for Sentry bug fixing workflows.\n\n"
+            "Your job is to construct a DAG execution plan to automatically fix Sentry bugs.\n\n"
+            "CRITICAL CONSTRAINTS:\n"
+            "1. You MUST generate a maximum of 10 steps.\n"
+            "2. You MUST have at most 3 write/mutating actions (e.g. committing, pushing MRs).\n"
+            "3. You must justify each step inside the 'reason' field and describe the action in the 'action' field.\n\n"
+            "COMPLETE PLAN REQUIREMENT:\n"
+            "EVERY step in your plan must be included in the steps array. If a step depends on another step, "
+            "that dependent step MUST also be included in the steps array.\n\n"
+            "Rules for arguments:\n"
+            "1. Arguments must be a valid JSON string inside 'arguments_json'. E.g. '{\"repo_path\": \"/tmp/repo\"}'.\n"
+            "2. Use exact tool parameter names from function declarations.\n"
+            "3. TEMPLATE SYNTAX RULES (CRITICAL - VALIDATION FAILS IF VIOLATED):\n"
+            "   a. Use ONLY simple field references: '{{step_id.result.field}}'\n"
+            "   b. NEVER use arithmetic: NO '{{step_id.result.field+10}}' or '{{step_id.result.field-5}}'\n"
+            "   c. NEVER use array indexing: NO '{{step_id.result.results[0].field}}'\n"
+            "   d. NEVER use complex expressions: NO '{{step_id.result.field || \"default\"}}'\n"
+            "   e. If a step returns an array, pass the entire result: '{{step_id.result}}'\n"
+            "   f. The executor will handle array extraction automatically\n"
+            "4. CRITICAL: Any step that generates a fix MUST depend on and use results from analysis steps.\n\n"
+            "SENTRY BUG FIXING WORKFLOW - PROBLEM TYPE ANALYSIS:\n"
+            "FIRST, you MUST analyze the Sentry issue (stack trace, culprit, title) to determine the problem type:\n\n"
+            "   MONGODB/SCHEMA PROBLEM INDICATORS:\n"
+            "   - Stack trace shows MongoDB errors (duplicate key, validation failed, schema mismatch)\n"
+            "   - Error mentions 'MongoError', 'DuplicateKey', 'ValidationError', 'CastError'\n"
+            "   - Issue involves database queries, indexes, or data operations\n"
+            "   - Culprit points to database operations (insert, update, find with schema issues)\n"
+            "   - Error mentions field names, types, or schema constraints\n\n"
+            "   CODE PROBLEM INDICATORS:\n"
+            "   - Stack trace shows TypeError, ReferenceError, ValueError, IndexError\n"
+            "   - Error mentions undefined variables, null references, method calls\n"
+            "   - Issue involves application logic, API calls, or business rules\n"
+            "   - Culprit points to application code files (routes, controllers, services)\n"
+            "   - Error mentions line numbers and code logic issues\n\n"
+            "SENTRY BUG FIXING WORKFLOW - CRITICAL CORRECT ORDER:\n"
+            "   Step 1: Clone the repository via 'clone_repo' -> 'clone_repo_step' (MUST BE FIRST)\n"
+            "   Step 2: Based on problem type analysis, choose appropriate analysis path:\n\n"
+            "           IF MONGODB/SCHEMA PROBLEM:\n"
+            "           - Step 2a: Use 'run_schema_inspection' -> 'schema_inspection_step'\n"
+            "                      Purpose: Inspect MongoDB schema, collections, indexes to identify schema drift or validation issues\n"
+            "                      Arguments: '{\"repo_path\": \"{{clone_repo_step.result}}\"}'\n"
+            "           - Step 3a: Use 'gitnexus_grep' -> 'mongo_models_grep_step' (MUST follow schema_inspection_step)\n"
+            "                      Purpose: Search for MongoDB model definitions and query patterns in codebase\n"
+            "                      This step MUST depend on schema_inspection_step to use findings from schema inspection\n"
+            "                      CRITICAL: gitnexus_grep does SUBSTRING SEARCH, not regex!\n"
+            "                      - Use PLAIN TEXT patterns only: 'mongoose', 'Schema', 'model', 'db', 'collection'\n"
+            "                      - NEVER use regex escapes: NO '\\.', NO '\\s+', NO '\\d+', NO '(', NO '['\n"
+            "                      - NEVER use alternation: NO '|' (pipe character)\n"
+            "                      - For multiple patterns, run gitnexus_grep multiple times with simple patterns\n"
+            "                      Arguments: '{\"pattern\": \"<plain_text_pattern>\", \"limit\": 100}'\n"
+            "           - Step 4a: Use 'gitnexus_file' -> 'mongo_model_file_step' (MUST follow mongo_models_grep_step)\n"
+            "                      Purpose: Read the full content of MongoDB model files found by grep to understand schema definitions\n"
+            "                      This step MUST depend on mongo_models_grep_step to get file paths from search results\n"
+            "                      CRITICAL: Use ONLY simple template syntax for arguments:\n"
+            "                      Arguments: '{\"file_path\": \"{{mongo_models_grep_step.result}}\"}'\n"
+            "                      NOTE: The executor extracts ALL file paths from grep results.\n"
+            "                      The gitnexus_file tool will fetch every MongoDB model file and merge their contents.\n\n"
+            "           IF CODE PROBLEM:\n"
+            "           - Step 2b: Use 'gitnexus_analyze' -> 'gitnexus_analysis_step'\n"
+            "                      Purpose: INDEX the repository so GitNexus tools can search and read files\n"
+            "                      Arguments: '{\"repo_path\": \"{{clone_repo_step.result}}\"}'\n"
+            "                      CRITICAL: gitnexus_analyze ONLY accepts 'repo_path' - NO query/pattern/search/stack_trace params!\n"
+            "           - Step 3b: Use 'gitnexus_grep' -> 'gitnexus_grep_step' (MUST follow gitnexus_analysis_step)\n"
+            "                      Purpose: Search for specific error patterns or function names across indexed files\n"
+            "                      This step MUST depend on gitnexus_analysis_step to ensure indexing is complete\n"
+            "                      CRITICAL: gitnexus_grep does SUBSTRING SEARCH, not regex!\n"
+            "                      - Use PLAIN TEXT patterns only: 'toString', 'undefined', 'null', 'Cannot read'\n"
+            "                      - NEVER use regex escapes: NO '\\.', NO '\\s+', NO '\\d+', NO '(', NO '['\n"
+            "                      - Extract key identifiers from error message for searching\n"
+            "                      Examples: 'toString', 'undefined', 'Cannot read properties', 'map', 'forEach'\n"
+            "                      Arguments: '{\"pattern\": \"<plain_text_pattern>\", \"limit\": 50}'\n"
+            "           - Step 4b: Use 'gitnexus_file' -> 'gitnexus_file_step' (MUST follow gitnexus_grep_step)\n"
+            "                      Purpose: Read the full content of specific files found by grep to understand context\n"
+            "                      This step MUST depend on gitnexus_grep_step to get file paths from search results\n"
+            "                      CRITICAL TEMPLATE SYNTAX RULES:\n"
+            "                      - Use ONLY simple field references like '{{step_id.result.field}}'\n"
+            "                      - NEVER use arithmetic in templates: NO '{{step_id.result.field+10}}'\n"
+            "                      - NEVER use complex array indexing: AVOID '{{step_id.result.results[0].filePath}}'\n"
+            "                      - INSTEAD: Use a simpler approach or omit optional parameters\n"
+            "                      - For gitnexus_file, use the simple template - it will fetch ALL matching files:\n"
+            "                      Arguments: '{\"file_path\": \"{{gitnexus_grep_step.result}}\"}'\n"
+            "                      NOTE: The executor auto-extracts ALL file paths from grep results.\n"
+            "                      The gitnexus_file tool will fetch every file and merge their contents together.\n"
+            "                      This provides complete context from all relevant files for fix generation.\n\n"
+            "   Step 5: Create branch via 'create_gitlab_branch' -> 'create_branch_step'\n"
+            "           Arguments: '{\"repository_id\": \"<repo_id>\", \"branch_name\": \"fix/sentry-<issue_id>-<timestamp>\"}'\n"
+            "           This step MUST depend on clone_repo_step\n\n"
+            "   Step 6: Generate fix using analysis results -> 'generate_fix_step'\n"
+            "           DO NOT use gitnexus_analyze for fix generation - it is only for indexing\n"
+            "           This step MUST depend on gitnexus_file_step (or schema_inspection_step for MongoDB issues)\n"
+            "           Purpose: Convert analysis findings into executable fix code\n"
+            "           CRITICAL TEMPLATE SYNTAX: Use these EXACT argument patterns:\n"
+            "           - sentry_issue_id: Use from context (e.g., \"12345\")\n"
+            "           - sentry_title: Use from context (e.g., \"TypeError: Cannot read properties\")\n"
+            "           - stack_trace: Use from context Sentry issue data\n"
+            "           - culprit: Use from context Sentry issue data\n"
+            "           - problem_type: Use \"code\" OR \"mongodb\" (string, not a template)\n"
+            "           - analysis_findings: Use '{{gitnexus_file_step.result.merged_content}}' for merged file contents.\n"
+            "              The merged content includes ALL files found by grep for comprehensive analysis.\n"
+            "           - file_path: Use literal string path OR extract from previous results\n"
+            "           Output: Returns structured JSON with file_path, fixed_code, description\n\n"
+            "   Step 7: Commit fix to branch via 'commit_file_to_branch' -> 'commit_fix_step'\n"
+            "           This step MUST depend on BOTH create_branch_step AND generate_fix_step\n"
+            "           CRITICAL: Use the SAME branch name from create_branch_step\n"
+            "           Arguments: '{\"file_path\": \"{{generate_fix_step.result.file_path}}\", "
+            "           \"content\": \"{{generate_fix_step.result.fixed_code}}\", "
+            "           \"commit_message\": \"Fix Sentry issue <issue_id>: <brief_description>\", "
+            "           \"branch_name\": \"fix/sentry-<issue_id>-<timestamp>\"}'\n"
+            "           NOTE: Use the EXACT SAME branch name pattern as in create_branch_step\n"
+            "           DO NOT use placeholder comments - commit the ACTUAL fixed code\n\n"
+            "   Step 8: Create draft MR via 'create_gitlab_merge_request' -> 'create_mr_step'\n"
+            "           Arguments: '{\"repository_id\": \"<repo_id>\", \"source_branch\": \"<from create_branch_step>\", "
+            "           \"title\": \"Fix Sentry issue <issue_id>: <title>\", \"description\": \"{{generate_fix_step.result.description}}\"}'\n"
+            "           This step MUST depend on commit_fix_step\n\n"
+            "CRITICAL REMINDER:\n"
+            "- The commit_fix_step arguments_json MUST include 'file_path', 'content', and 'commit_message'\n"
+            "- The 'content' field MUST contain the ACTUAL fixed code, NOT placeholders\n"
+            "- Use '{{generate_fix_step.result.fixed_code}}' to get the fix from the fix generation step\n"
+            "- If analysis doesn't return structured fix data, the analysis step failed - add retry logic\n"
+            "- For MongoDB issues: ensure schema changes are reflected in Mongoose/model files\n"
+            "- For code issues: ensure imports, dependencies, and logic are corrected\n\n"
+            "NOTE: Sentry issue details (issue_id, title, level, stack_trace) are already in the prompt.\n"
+            "IMPORTANT: Call submit_execution_plan ONCE with your COMPLETE plan including ALL steps."
+        )
+
+    def _build_mr_review_system_instruction(self) -> str:
+        """System instruction for MR review workflows."""
+        return (
+            "You are the elite Gatekeeper AI Planner for Merge Request code review workflows.\n\n"
+            "Your job is to construct a DAG execution plan to review GitLab Merge Requests.\n\n"
+            "CRITICAL CONSTRAINTS:\n"
+            "1. You MUST generate a maximum of 10 steps.\n"
+            "2. You MUST have at most 3 write/mutating actions (e.g. posting comments).\n"
+            "3. You must justify each step inside the 'reason' field and describe the action in the 'action' field.\n\n"
+            "COMPLETE PLAN REQUIREMENT:\n"
+            "EVERY step in your plan must be included in the steps array. If a step depends on another step, "
+            "that dependent step MUST also be included in the steps array.\n\n"
+            "Rules for arguments:\n"
+            "1. Arguments must be a valid JSON string inside 'arguments_json'. E.g. '{\"repo_path\": \"/tmp/repo\"}'.\n"
+            "2. Use exact tool parameter names from function declarations.\n"
+            "3. For dependencies, use the template token '{{step_id.result}}' in values.\n\n"
+            "MR REVIEW WORKFLOW - STANDARD SEQUENCE:\n"
+            "   a. Clone the repository via 'clone_repo' -> 'clone_repo_step'\n"
+            "   b. Get MR diffs via 'get_gitlab_mr_diffs' -> 'get_mr_diffs_step'\n"
+            "   c. Run 'gitnexus_analyze' on cloned repository -> 'gitnexus_analysis_step' (depends on clone_repo_step)\n"
+            "   d. Run 'run_impact_analysis' on repo path -> 'impact_analysis_step' (depends on clone_repo_step)\n"
+            "   e. Run 'run_schema_inspection' on diff text -> 'schema_inspection_step' (depends on get_mr_diffs_step)\n"
+            "   f. Summarize findings and post comment via 'post_gitlab_mr_comment' -> 'post_review_comment_step'\n\n"
+            "ALL these steps must be included in your plan.\n"
+            "IMPORTANT: Call submit_execution_plan ONCE with your COMPLETE plan including ALL steps."
+        )
+
+    def _build_dynatrace_system_instruction(self) -> str:
+        """System instruction for Dynatrace incident self-healing workflows."""
+        return (
+            "You are the elite Gatekeeper AI Planner for Dynatrace incident self-healing workflows.\n\n"
+            "Your job is to construct a DAG execution plan to heal production incidents.\n\n"
+            "CRITICAL CONSTRAINTS:\n"
+            "1. You MUST generate a maximum of 10 steps.\n"
+            "2. You MUST have at most 3 write/mutating actions (e.g. committing, pushing MRs).\n"
+            "3. You must justify each step inside the 'reason' field and describe the action in the 'action' field.\n\n"
+            "COMPLETE PLAN REQUIREMENT:\n"
+            "EVERY step in your plan must be included in the steps array. If a step depends on another step, "
+            "that dependent step MUST also be included in the steps array.\n\n"
+            "Rules for arguments:\n"
+            "1. Arguments must be a valid JSON string inside 'arguments_json'.\n"
+            "2. Use exact tool parameter names from function declarations.\n"
+            "3. For dependencies, use the template token '{{step_id.result}}' in values.\n\n"
+            "DYNATRANCE SELF-HEALING WORKFLOW - STANDARD SEQUENCE:\n"
+            "   a. Fetch incident details via 'get_dynatrace_incident_details' -> 'fetch_incident_step'\n"
+            "   b. Clone repository via 'clone_repo' -> 'clone_repo_step'\n"
+            "   c. Diagnose and write diff patch -> 'diagnose_step'\n"
+            "   d. Apply patch via 'apply_hotfix_patch' -> 'apply_patch_step'\n"
+            "   e. Commit and open MR via 'create_hotfix_branch_and_mr' -> 'create_mr_step'\n\n"
+            "ALL these steps must be included in your plan.\n"
+            "IMPORTANT: Call submit_execution_plan ONCE with your COMPLETE plan including ALL steps."
+        )
+
     def _is_mutate_action(self, tool_name: str) -> bool:
         """Determines if a tool performs modifying/mutating actions."""
         mutate_keywords = {"create", "update", "delete", "post", "write", "apply", "hotfix", "push", "patch"}
@@ -296,6 +496,10 @@ class PlannerAgent:
             'clone_repo', 'get_gitlab_mr_diffs',
             # Analysis tools
             'run_impact_analysis', 'run_schema_inspection', 'gitnexus_analyze',
+            # Code search and debugging tools (GitNexus HTTP API tools)
+            'gitnexus_grep', 'gitnexus_file',
+            # AI Fix Generation
+            'generate_fix',
             # Output/MR operations
             'post_gitlab_mr_comment',
             # Incident/healing tools
@@ -384,39 +588,16 @@ class PlannerAgent:
 
         print(f"[INFO] [Planner] Using {len(tool_declarations)} essential tools (filtered from {len(registry._tools)} total)")
 
-        system_instruction = (
-            "You are the elite Gatekeeper AI Planner. Your job is to construct a DAG execution plan (list of steps with dependencies) to satisfy the given objective.\n\n"
-            "You have access to tools that can be executed in the plan. Use the submit_execution_plan function to submit your final plan.\n\n"
-            "CRITICAL CONSTRAINTS:\n"
-            "1. You MUST generate a maximum of 10 steps.\n"
-            "2. You MUST have at most 3 write/mutating actions (e.g. committing, applying hotfixes, pushing MRs, writing comments).\n"
-            "3. You must justify each step inside the 'reason' field and describe the action in the 'action' field.\n\n"
-            "CRITICAL - COMPLETE PLAN REQUIREMENT:\n"
-            "EVERY step in your plan must be included in the steps array. If a step depends on another step (e.g., 'clone_repo_step'), "
-            "that dependent step MUST also be included in the steps array. Do NOT reference dependencies that don't exist in your plan.\n"
-            "For example: If 'impact_analysis_step' depends on 'clone_repo_step', then BOTH 'impact_analysis_step' AND 'clone_repo_step' must be in your steps array.\n\n"
-            "Rules for arguments:\n"
-            "1. You must write arguments as a valid, escaped JSON string inside 'arguments_json'. E.g. '{\"repo_path\": \"/tmp/repo\"}'. Do not output structured dictionaries directly in arguments_json, only a flat JSON string.\n"
-            "2. Inside the JSON string, you must use exact tool parameter names as defined in the available function declarations.\n"
-            "3. If a step depends on the output of a previous step, include that step's ID in 'dependencies' and use the template token '{{step_id.result}}' or a nested dictionary path like '{{step_id.result.markdown_report}}' inside the values of the JSON string.\n"
-            "4. Be precise. Only generate plans using the available tools.\n"
-            "5. For Merge Request reviews, the standard COMPLETE sequence is:\n"
-            "   a. Clone the repository baseline (stay on target branch) via 'clone_repo' -> 'clone_repo_step'\n"
-            "   b. Get MR diffs using 'get_gitlab_mr_diffs' -> 'get_mr_diffs_step'\n"
-            "   c. Run 'gitnexus_analyze' on the cloned repository path -> 'gitnexus_analysis_step'\n"
-            "   d. Run 'run_impact_analysis' on the repo path (depends on clone_repo_step) -> 'impact_analysis_step'\n"
-            "   e. Run 'run_schema_inspection' on the diff text (depends on get_mr_diffs_step) -> 'schema_inspection_step'\n"
-            "   f. Use Gemini to summarize findings and post comments using 'post_gitlab_mr_comment' -> 'post_review_comment_step'\n"
-            "   ALL these steps must be included in your plan.\n"
-            "6. For Dynatrace incident self-healing, the standard COMPLETE sequence is:\n"
-            "   a. Fetch incident details from Dynatrace Grail via 'get_dynatrace_incident_details' -> 'fetch_incident_step'\n"
-            "   b. Clone repository baseline via 'clone_repo' -> 'clone_repo_step'\n"
-            "   c. Use Gemini to diagnose and write a surgical diff patch code -> 'diagnose_step'\n"
-            "   d. Apply diff patch to file using 'apply_hotfix_patch' -> 'apply_patch_step'\n"
-            "   e. Commit, push branch and open GitLab MR using 'create_hotfix_branch_and_mr' -> 'create_mr_step'\n"
-            "   ALL these steps must be included in your plan.\n"
-            "IMPORTANT: You must call the submit_execution_plan function ONCE with your COMPLETE plan including ALL steps."
-        )
+        # Determine workflow type and use appropriate system instruction
+        workflow_type = self._get_workflow_type(context)
+        print(f"[INFO] [Planner] Detected workflow type: {workflow_type}")
+
+        if workflow_type == "sentry":
+            system_instruction = self._build_sentry_system_instruction()
+        elif workflow_type == "dynatrace":
+            system_instruction = self._build_dynatrace_system_instruction()
+        else:  # mr_review (default)
+            system_instruction = self._build_mr_review_system_instruction()
 
         prompt = (
             f"OBJECTIVE: {context.objective}\n"
@@ -427,6 +608,22 @@ class PlannerAgent:
             f"TARGET BRANCH: {context.branch.target_branch}\n"
             f"USER ID: {context.user.user_id}\n\n"
         )
+
+        # Add Sentry issue details if available (from webhook payload)
+        if context.sentry_issue:
+            prompt += (
+                f"SENTRY ISSUE DETAILS (from webhook payload):\n"
+                f"ISSUE ID: {context.sentry_issue.issue_id}\n"
+                f"TITLE: {context.sentry_issue.title}\n"
+                f"LEVEL: {context.sentry_issue.level}\n"
+                f"ENVIRONMENT: {context.sentry_issue.environment}\n"
+                f"CULPRIT: {context.sentry_issue.culprit or 'N/A'}\n"
+            )
+            if context.sentry_issue.stack_trace:
+                prompt += f"STACK TRACE:\n{context.sentry_issue.stack_trace}\n"
+            if context.sentry_issue.git_commit_sha:
+                prompt += f"GIT COMMIT SHA: {context.sentry_issue.git_commit_sha}\n"
+            prompt += "\n"
 
         if memories:
             prompt += (

@@ -143,13 +143,40 @@ create_hotfix_branch_and_mr_schema = {
 
 gitnexus_analyze_schema = {
     "name": "gitnexus_analyze",
-    "description": "Runs npx gitnexus analyze on the local repository to build call graphs.",
+    "description": "INDEX the repository - runs npx gitnexus analyze to build call graphs and enable gitnexus_grep/gitnexus_file tools. This does NOT analyze Sentry issues or bugs - it only indexes the repo for searching. NO query/search/pattern parameters - ONLY repo_path.",
     "parameters": {
         "type": "OBJECT",
         "properties": {
             "repo_path": {"type": "STRING", "description": "Absolute path to the cloned repository workspace."}
         },
         "required": ["repo_path"]
+    }
+}
+
+gitnexus_grep_schema = {
+    "name": "gitnexus_grep",
+    "description": "Fallback grep search across all indexed files in the repository. Use this tool when you need to find occurrences of a pattern across files. Returns file paths, line numbers, and matching text. This is a literal substring search (not regex) and scans all files in the indexed repo.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "pattern": {"type": "STRING", "description": "Search pattern - literal substring to find in files (max 200 chars)."},
+            "limit": {"type": "INTEGER", "description": "Max number of results to return (default: 50, max: 200)."}
+        },
+        "required": ["pattern"]
+    }
+}
+
+gitnexus_file_schema = {
+    "name": "gitnexus_file",
+    "description": "Read the full content of files from the indexed repository. Accepts a single file path (string) or multiple file paths (array). When given multiple paths, fetches all files and merges their contents. Use this tool after gitnexus_grep finds matching files.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "file_path": {"oneOf": [{"type": "STRING"}, {"type": "ARRAY", "items": {"type": "STRING"}}], "description": "File path relative to repository root (e.g., 'src/main.js') or array of multiple file paths."},
+            "start_line": {"type": "INTEGER", "description": "Optional start line number (0-indexed) for partial read. Only used for single file reads."},
+            "end_line": {"type": "INTEGER", "description": "Optional end line number (0-indexed) for partial read. Only used for single file reads."}
+        },
+        "required": ["file_path"]
     }
 }
 
@@ -548,6 +575,287 @@ async def gitnexus_analyze(repo_path: str) -> Dict[str, Any]:
         return {"status": "error", "message": str(e)}
 
 
+async def gitnexus_grep(pattern: str, limit: int = 50) -> Dict[str, Any]:
+    """
+    Call GitNexus HTTP /api/grep endpoint to search for a pattern across indexed files.
+
+    This is a wrapper around the GitNexus grep functionality for Sentry bug fixing workflows.
+
+    Args:
+        pattern: Search pattern (literal substring search)
+        limit: Max number of results to return (default: 50, max: 200)
+
+    Returns:
+        Dict with search results including file paths, line numbers, and matching text
+    """
+    try:
+        from services.gemini_service import call_gitnexus_grep
+        return await call_gitnexus_grep(pattern=pattern, limit=limit)
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+async def gitnexus_file(file_path, start_line: Optional[int] = None, end_line: Optional[int] = None) -> Dict[str, Any]:
+    """
+    Call GitNexus HTTP /api/file endpoint to read the full content of file(s).
+
+    This wrapper accepts either a single file path (string) or multiple file paths (array).
+    When given multiple paths, it fetches all files and merges their contents.
+
+    Args:
+        file_path: File path (string) or array of file paths relative to repository root
+        start_line: Optional start line number (only used for single file reads)
+        end_line: Optional end line number (only used for single file reads)
+
+    Returns:
+        Dict with file content(s) and metadata. Always includes 'merged_content' field.
+    """
+    try:
+        from services.gemini_service import call_gitnexus_file
+
+        # Handle single file path (string)
+        if isinstance(file_path, str):
+            print(f"[INFO] gitnexus_file fetching single file: {file_path}")
+            result = await call_gitnexus_file(file_path=file_path, start_line=start_line, end_line=end_line)
+
+            if "error" in result:
+                return {"status": "error", "message": result.get("error")}
+
+            # Extract content and wrap in consistent format
+            content = result.get("content", "")
+
+            # Return consistent format with merged_content for single file too
+            return {
+                "status": "success",
+                "files_count": 1,
+                "merged_content": content,  # Single file content as merged_content
+                "individual_files": [{
+                    "file_path": file_path,
+                    "content": content,
+                    "total_lines": result.get("totalLines", 0)
+                }],
+                "message": f"Fetched 1 file successfully"
+            }
+
+        # Handle multiple file paths (list/array)
+        if isinstance(file_path, list) and len(file_path) > 0:
+            print(f"[INFO] gitnexus_file fetching {len(file_path)} files...")
+            all_contents = []
+            merged_content = ""
+
+            for i, path in enumerate(file_path):
+                print(f"[INFO] Fetching file {i+1}/{len(file_path)}: {path}")
+                result = await call_gitnexus_file(file_path=path, start_line=None, end_line=None)
+                print(f"[DEBUG] gitnexus_file: Got result from call_gitnexus_file, status: {result.get('status', 'unknown')}")
+
+                if "error" in result:
+                    print(f"[WARN] Failed to fetch {path}: {result['error']}")
+                    continue
+
+                # Extract content from result
+                content = result.get("content", "")
+                print(f"[DEBUG] gitnexus_file: Extracted {len(content)} chars from {path}")
+                all_contents.append({
+                    "file_path": path,
+                    "content": content,
+                    "total_lines": result.get("totalLines", 0)
+                })
+
+                # Build merged content with file headers
+                merged_content += f"\n{'='*60}\n"
+                merged_content += f"FILE: {path}\n"
+                merged_content += f"{'='*60}\n"
+                merged_content += content + "\n"
+
+            print(f"[DEBUG] gitnexus_file: Merged {len(all_contents)} files, total chars: {len(merged_content)}")
+            return {
+                "status": "success",
+                "files_count": len(all_contents),
+                "merged_content": merged_content,
+                "individual_files": all_contents,
+                "message": f"Fetched {len(all_contents)} files successfully"
+            }
+
+        # Invalid type
+        return {"status": "error", "message": f"Invalid file_path type: {type(file_path)}. Expected string or list."}
+
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+# ============================================================================
+# AI Fix Generation Tool
+# ============================================================================
+
+generate_fix_schema = {
+    "name": "generate_fix",
+    "description": "Uses Gemini AI to generate fix code based on Sentry issue analysis and code context. Returns structured JSON with file_path, fixed_code, and description.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "sentry_issue_id": {"type": "STRING", "description": "The Sentry issue ID being fixed."},
+            "sentry_title": {"type": "STRING", "description": "The Sentry issue title."},
+            "stack_trace": {"type": "STRING", "description": "The stack trace or error message from Sentry."},
+            "culprit": {"type": "STRING", "description": "The culprit file or function where the error occurred."},
+            "problem_type": {"type": "STRING", "description": "Type of problem: 'code' (logic error, null reference, type error) or 'mongodb' (schema/validation issue)."},
+            "analysis_findings": {"type": "STRING", "description": "Analysis results from gitnexus_file or schema inspection - includes the relevant code context."},
+            "file_path": {"type": "STRING", "description": "The specific file path that needs to be fixed (from analysis)."}
+        },
+        "required": ["sentry_issue_id", "sentry_title", "stack_trace", "problem_type", "analysis_findings", "file_path"]
+    }
+}
+
+
+async def generate_fix(
+    sentry_issue_id: str,
+    sentry_title: str,
+    stack_trace: str,
+    culprit: str,
+    problem_type: str,
+    analysis_findings: str,
+    file_path: str
+) -> Dict[str, Any]:
+    """
+    Generate fix code using Gemini AI based on Sentry issue analysis.
+
+    This tool takes the Sentry issue details and code analysis results,
+    then uses Gemini AI to generate a proper fix for the bug.
+
+    Args:
+        sentry_issue_id: Sentry issue ID
+        sentry_title: Issue title
+        stack_trace: Stack trace or error message
+        culprit: Culprit file/function
+        problem_type: 'code' or 'mongodb'
+        analysis_findings: Code context from analysis tools
+        file_path: File path to fix
+
+    Returns:
+        Dict with file_path, fixed_code, description
+    """
+    from google.genai import types
+    from services.gemini_service import ai_client
+
+    # Build the system instruction for fix generation
+    system_instruction = """You are an elite code fixer specializing in automated bug remediation.
+
+Your task is to analyze Sentry error reports and generate correct, minimal fixes.
+
+CRITICAL RULES:
+1. Generate ONLY the fix - no explanations, no markdown code blocks
+2. Preserve imports, dependencies, and existing code structure
+3. Make minimal changes to fix the specific issue
+4. Return valid JSON with: file_path (string), fixed_code (string), description (string)
+
+FOR CODE PROBLEMS (TypeError, ReferenceError, null checks):
+- Add proper null/undefined guards
+- Fix variable references and scoping issues
+- Add type validations where missing
+- Handle edge cases and error conditions
+
+FOR MONGODB PROBLEMS (schema validation, duplicate keys):
+- Fix schema definitions to match actual usage
+- Add proper indexes for queries
+- Handle validation failures gracefully
+- Fix field type mismatches
+
+OUTPUT FORMAT (must be valid JSON):
+{
+  "file_path": "path/to/file.ext",
+  "fixed_code": "complete fixed file content here",
+  "description": "Brief description of what was fixed"
+}
+"""
+
+    # Build the prompt with Sentry context and analysis
+    prompt = f"""SENTRY ISSUE DETAILS:
+Issue ID: {sentry_issue_id}
+Title: {sentry_title}
+Error Type: {problem_type}
+Stack Trace:
+{stack_trace}
+Culprit: {culprit}
+
+ANALYSIS FINDINGS (code context from repository):
+{analysis_findings}
+
+TARGET FILE: {file_path}
+
+Please generate a fix for this bug. Return valid JSON with file_path, fixed_code, and description."""
+
+    try:
+        print(f"[INFO] [generate_fix] Calling Gemini AI to generate fix for issue {sentry_issue_id}...")
+
+        # Call Gemini with structured output request
+        response = ai_client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=system_instruction,
+                temperature=0.2,
+            )
+        )
+
+        # Extract response text
+        response_text = ""
+        if response.candidates and len(response.candidates) > 0:
+            for part in response.candidates[0].content.parts:
+                if hasattr(part, 'text') and part.text:
+                    response_text += part.text
+
+        print(f"[DEBUG] [generate_fix] Gemini response length: {len(response_text)}")
+
+        # Try to parse as JSON
+        import json
+        try:
+            # Clean up response - remove markdown code blocks if present
+            cleaned = response_text.strip()
+            if cleaned.startswith("```json"):
+                cleaned = cleaned[7:]  # Remove ```json
+            if cleaned.startswith("```"):
+                cleaned = cleaned[3:]  # Remove ```
+            if cleaned.endswith("```"):
+                cleaned = cleaned[:-3]  # Remove trailing ```
+            cleaned = cleaned.strip()
+
+            fix_data = json.loads(cleaned)
+
+            # Validate required fields
+            if not all(k in fix_data for k in ["file_path", "fixed_code", "description"]):
+                raise ValueError("Missing required fields in fix response")
+
+            print(f"[OK] [generate_fix] Successfully generated fix for {fix_data['file_path']}")
+            return {
+                "status": "success",
+                "file_path": fix_data["file_path"],
+                "fixed_code": fix_data["fixed_code"],
+                "description": fix_data["description"]
+            }
+
+        except json.JSONDecodeError as je:
+            print(f"[WARN] [generate_fix] Failed to parse JSON from Gemini: {je}")
+            print(f"[WARN] [generate_fix] Response was: {response_text[:500]}...")
+            # Fallback: create a structured response from the text
+            return {
+                "status": "partial",
+                "file_path": file_path,
+                "fixed_code": response_text,
+                "description": f"Generated fix for Sentry issue {sentry_issue_id} (parse attempt failed)"
+            }
+
+    except Exception as e:
+        print(f"[ERROR] [generate_fix] Failed to generate fix: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "status": "error",
+            "message": str(e),
+            "file_path": file_path,
+            "fixed_code": "",
+            "description": "Failed to generate fix"
+        }
+
+
 # ============================================================================
 # GitLab REST API Helper Functions (for direct API calls without MCP)
 # ============================================================================
@@ -771,9 +1079,13 @@ async def commit_file_to_branch(
         Dictionary with commit info (sha, message, etc.)
     """
     import base64
+    import urllib.parse
 
     # Encode content as base64
     content_b64 = base64.b64encode(content.encode("utf-8")).decode("utf-8")
+
+    # URL-encode the file path for GitLab API (slashes need to be encoded)
+    encoded_file_path = urllib.parse.quote(file_path, safe='')
 
     payload = {
         "branch": branch_name,
@@ -782,12 +1094,15 @@ async def commit_file_to_branch(
         "encoding": "base64"
     }
 
+    print(f"[DEBUG] [commit_file_to_branch] Committing to branch: {branch_name}, file: {file_path}")
+    print(f"[DEBUG] [commit_file_to_branch] Encoded file path: {encoded_file_path}")
+
     try:
         result = await _gitlab_rest_api_call(
             user_id=user_id,
             project_id=project_id,
             method="POST",
-            endpoint=f"/projects/{project_id}/repository/files/{file_path}",
+            endpoint=f"/projects/{project_id}/repository/files/{encoded_file_path}",
             json_data=payload
         )
 
@@ -801,6 +1116,7 @@ async def commit_file_to_branch(
     except Exception as e:
         # If file already exists (400 error), try updating it instead
         if "400" in str(e) or "already exists" in str(e):
+            print(f"[DEBUG] [commit_file_to_branch] File exists, updating instead...")
             # Use PUT to update existing file
             payload["start_branch"] = branch_name
 
@@ -808,7 +1124,7 @@ async def commit_file_to_branch(
                 user_id=user_id,
                 project_id=project_id,
                 method="PUT",
-                endpoint=f"/projects/{project_id}/repository/files/{file_path}",
+                endpoint=f"/projects/{project_id}/repository/files/{encoded_file_path}",
                 json_data=payload
             )
 
