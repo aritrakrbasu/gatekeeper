@@ -22,7 +22,7 @@ from services import (
 
 clone_repo_schema = {
     "name": "clone_repo",
-    "description": "Clones a GitLab repository branch to a local temporary workspace.",
+    "description": "Clones a GitLab repository branch to a local temporary workspace. Returns the absolute path as a string (use '{{clone_repo_step.result}}' directly, not '{{clone_repo_step.result.repo_path}}').",
     "parameters": {
         "type": "OBJECT",
         "properties": {
@@ -39,14 +39,15 @@ clone_repo_schema = {
 
 run_impact_analysis_schema = {
     "name": "run_impact_analysis",
-    "description": "Performs static call-graph impact analysis on the codebase to identify blast radius and breaking change risks for changed symbols.",
+    "description": "Performs static call-graph impact analysis on the codebase to identify blast radius and breaking change risks for changed symbols. Returns an object with fields: status, analyzed_at, changed_symbols_count, impacted_dependencies_count, high_risk_count, medium_risk_count, markdown_report (string), and gemini_prompt_formatted (string). Use '{{impact_analysis_step.result.markdown_report}}' to get the formatted report.",
     "parameters": {
         "type": "OBJECT",
         "properties": {
             "repo_path": {"type": "STRING", "description": "Absolute path to the cloned repository workspace."},
             "repo_name": {"type": "STRING", "description": "Repository identifier / directory name."},
             "source_branch": {"type": "STRING", "description": "The branch containing code modifications (e.g. feature-branch)."},
-            "target_branch": {"type": "STRING", "description": "The base branch to compare against (default 'main')."}
+            "target_branch": {"type": "STRING", "description": "The base branch to compare against (default 'main')."},
+            "changed_symbols": {"type": "ARRAY", "description": "Optional list of changed symbol names to analyze. If not provided, analysis will run without specific symbol focus.", "items": {"type": "STRING"}}
         },
         "required": ["repo_path", "repo_name", "source_branch"]
     }
@@ -54,7 +55,7 @@ run_impact_analysis_schema = {
 
 run_schema_inspection_schema = {
     "name": "run_schema_inspection",
-    "description": "Scans modified files to detect schema definition drift in MongoDB schemas and computes schema delta.",
+    "description": "Scans modified files to detect schema definition drift in MongoDB schemas and computes schema delta. Returns an object with fields: status, schema_changes_detected, markdown_report (string), and gemini_prompt_formatted (string). Use '{{schema_inspection_step.result.markdown_report}}' to get the formatted report.",
     "parameters": {
         "type": "OBJECT",
         "properties": {
@@ -68,7 +69,7 @@ run_schema_inspection_schema = {
 
 get_gitlab_mr_diffs_schema = {
     "name": "get_gitlab_mr_diffs",
-    "description": "Get merge request diffs as a raw unified diff string.",
+    "description": "Get merge request diffs as a raw unified diff string. Returns the diff text as a string (use '{{get_mr_diffs_step.result}}' directly).",
     "parameters": {
         "type": "OBJECT",
         "properties": {
@@ -229,20 +230,33 @@ async def run_impact_analysis(
     repo_path: str,
     repo_name: str,
     source_branch: str,
-    target_branch: str = "main"
+    target_branch: str = "main",
+    changed_symbols: List[str] = None
 ) -> Dict[str, Any]:
-    """Runs static impact analysis and returns a dictionary payload representing the report."""
+    """Runs static impact analysis and returns a dictionary payload representing the report.
+
+    Args:
+        repo_path: Path to the cloned repository
+        repo_name: Name of the repository
+        source_branch: Source branch with changes
+        target_branch: Target baseline branch
+        changed_symbols: Optional list of changed symbol names. If not provided, will run analysis without specific symbols.
+    """
+    # If changed_symbols not provided, use empty list
+    if changed_symbols is None:
+        changed_symbols = []
+
     report = await impact_measurement_service.run_impact_analysis(
         repo_path=repo_path,
         repo_name=repo_name,
         source_branch=source_branch,
         target_branch=target_branch,
-        changed_symbols=[],
+        changed_symbols=changed_symbols,
         max_symbols_to_analyze=3
     )
     if not report:
         return {"status": "skipped", "message": "No impact report compiled"}
-    
+
     return {
         "status": "success",
         "analyzed_at": report.analyzed_at.isoformat() if report.analyzed_at else None,
@@ -453,23 +467,77 @@ async def create_hotfix_branch_and_mr(
 async def gitnexus_analyze(repo_path: str) -> Dict[str, Any]:
     """Runs gitnexus analyze via subprocess in the given repo_path."""
     npx_executable = "npx"
+    npx_found = False
+
     if sys.platform == "win32":
-        npm_result = subprocess.run(["where", "npm"], capture_output=True, text=True)
-        if npm_result.returncode == 0:
-            npm_path = npm_result.stdout.strip().split('\n')[0].strip()
-            nodejs_dir = Path(npm_path).parent
-            npx_cmd = nodejs_dir / "npx.cmd"
-            if npx_cmd.exists():
-                npx_executable = str(npx_cmd)
+        # Try multiple methods to find npx on Windows
+        # Method 1: Check common Node.js installation paths
+        possible_paths = [
+            Path("C:/Program Files/nodejs/npx.cmd"),
+            Path("C:/Program Files/nodejs/npx.ps1"),
+            Path("C:/Program Files (x86)/nodejs/npx.cmd"),
+            Path("C:/Program Files (x86)/nodejs/npx.ps1"),
+        ]
+
+        for npx_path in possible_paths:
+            if npx_path.exists():
+                npx_executable = str(npx_path)
+                npx_found = True
+                print(f"[DEBUG] Found npx at: {npx_path}")
+                break
+
+        # Method 2: Try 'where npx' command
+        if not npx_found:
+            try:
+                where_result = subprocess.run(["where", "npx"], capture_output=True, text=True, timeout=5)
+                if where_result.returncode == 0 and where_result.stdout.strip():
+                    npx_executable = where_result.stdout.strip().split('\n')[0].strip()
+                    npx_found = True
+                    print(f"[DEBUG] Found npx via 'where': {npx_executable}")
+            except Exception as e:
+                print(f"[DEBUG] 'where npx' failed: {e}")
+
+        # Method 3: Try 'npm config get prefix' to find Node.js location
+        if not npx_found:
+            try:
+                npm_prefix_result = subprocess.run(["npm", "config", "get", "prefix"], capture_output=True, text=True, timeout=5, shell=True)
+                if npm_prefix_result.returncode == 0 and npm_prefix_result.stdout.strip():
+                    npm_prefix = Path(npm_prefix_result.stdout.strip())
+                    npx_cmd = npm_prefix / "npx.cmd"
+                    npx_ps1 = npm_prefix / "npx.ps1"
+                    if npx_ps1.exists():
+                        npx_executable = str(npx_ps1)
+                        npx_found = True
+                        print(f"[DEBUG] Found npx.ps1 via npm prefix: {npx_ps1}")
+                    elif npx_cmd.exists():
+                        npx_executable = str(npx_cmd)
+                        npx_found = True
+                        print(f"[DEBUG] Found npx.cmd via npm prefix: {npx_cmd}")
+            except Exception as e:
+                print(f"[DEBUG] 'npm config get prefix' failed: {e}")
+
+        if not npx_found:
+            print(f"[WARN] Could not find npx executable, will try default 'npx'")
 
     try:
-        res = subprocess.run(
-            [npx_executable, "gitnexus", "analyze"],
-            cwd=repo_path,
-            capture_output=True,
-            text=True,
-            check=False
-        )
+        # On Windows, if the executable is a .ps1 file, we need to run it through PowerShell
+        if sys.platform == "win32" and npx_executable.endswith(".ps1"):
+            print(f"[DEBUG] Running npx via PowerShell: {npx_executable}")
+            res = subprocess.run(
+                ["powershell", "-ExecutionPolicy", "Bypass", "-File", npx_executable, "gitnexus", "analyze"],
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+                check=False
+            )
+        else:
+            res = subprocess.run(
+                [npx_executable, "gitnexus", "analyze"],
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+                check=False
+            )
         return {
             "status": "success" if res.returncode == 0 else "failed",
             "returncode": res.returncode,

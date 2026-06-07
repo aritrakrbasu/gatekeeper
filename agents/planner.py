@@ -56,6 +56,7 @@ class PlannerAgent:
         return any(keyword in name_lower for keyword in mutate_keywords)
 
     def _serialize_tools(self, registry: ToolRegistry) -> str:
+        """Serialize tools as text for fallback/reference."""
         serialized = []
         for name, tool in registry._tools.items():
             schema = tool.get_schema()
@@ -68,6 +69,118 @@ class PlannerAgent:
                 f"---"
             )
         return "\n".join(serialized)
+
+    def _build_tool_function_declarations(self, registry: ToolRegistry) -> List[types.FunctionDeclaration]:
+        """
+        Build Gemini function declarations from tool registry.
+        These represent the actual tools that can be executed in the plan.
+        """
+        declarations = []
+        for name, tool in registry._tools.items():
+            schema = tool.get_schema()
+            desc = tool.get_description() or schema.get("description", "No description available.")
+            params = schema.get("parameters", {})
+
+            # Build parameters using types.Schema
+            parameters = None
+            if params:
+                properties = {}
+                for prop_name, prop_def in params.get("properties", {}).items():
+                    prop_type = prop_def.get("type", "string").upper()
+                    # Map JSON schema types to Gemini types
+                    if prop_type in ["NUMBER", "FLOAT", "DOUBLE"]:
+                        gemini_type = "NUMBER"
+                    elif prop_type in ["INTEGER", "INT"]:
+                        gemini_type = "INTEGER"
+                    elif prop_type == "BOOLEAN":
+                        gemini_type = "BOOLEAN"
+                    elif prop_type == "ARRAY":
+                        gemini_type = "ARRAY"
+                    elif prop_type == "OBJECT":
+                        gemini_type = "OBJECT"
+                    else:
+                        gemini_type = "STRING"
+
+                    properties[prop_name] = types.Schema(
+                        type=gemini_type,
+                        description=prop_def.get("description")
+                    )
+
+                required = params.get("required", [])
+                parameters = types.Schema(
+                    type="OBJECT",
+                    properties=properties if properties else None,
+                    required=required if required else None
+                )
+
+            declarations.append(
+                types.FunctionDeclaration(
+                    name=name,
+                    description=desc,
+                    parameters=parameters
+                )
+            )
+
+        return declarations
+
+    def _build_plan_submission_declaration(self) -> types.FunctionDeclaration:
+        """
+        Create a function declaration for submitting the final execution plan.
+        The model will call this function with the generated plan.
+        """
+        return types.FunctionDeclaration(
+            name="submit_execution_plan",
+            description=(
+                "Submit the final execution plan for the given objective. "
+                "Call this function ONCE when you have constructed the complete plan with all steps."
+            ),
+            parameters=types.Schema(
+                type="OBJECT",
+                properties={
+                    "explanation": types.Schema(
+                        type="STRING",
+                        description="Brief explanation of the plan strategy"
+                    ),
+                    "steps": types.Schema(
+                        type="ARRAY",
+                        description="The steps of the DAG plan",
+                        items=types.Schema(
+                            type="OBJECT",
+                            properties={
+                                "step_id": types.Schema(
+                                    type="STRING",
+                                    description="Unique identifier for the step (e.g. clone_step, schema_step)"
+                                ),
+                                "tool_name": types.Schema(
+                                    type="STRING",
+                                    description="The exact name of the tool to execute"
+                                ),
+                                "arguments_json": types.Schema(
+                                    type="STRING",
+                                    description="JSON string representing the arguments key-value dictionary. E.g. '{\"repo_path\": \"/tmp/repo\"}'. Use '{{step_id.result}}' for dependencies."
+                                ),
+                                "dependencies": types.Schema(
+                                    type="ARRAY",
+                                    description="List of step_ids that must complete before this step",
+                                    items=types.Schema(type="STRING")
+                                ),
+                                "action": types.Schema(
+                                    type="STRING",
+                                    description="Human readable description of what action is taken"
+                                ),
+                                "reason": types.Schema(
+                                    type="STRING",
+                                    description="Explicit reasoning and tool justification for running this step"
+                                )
+                            },
+                            required=["step_id", "tool_name", "arguments_json", "action", "reason"]
+                        )
+                    )
+                },
+                required=["explanation", "steps"]
+            )
+        )
+
 
     def _emit_plan_events(
         self,
@@ -157,10 +270,10 @@ class PlannerAgent:
         plan_revision: int = 0,
     ) -> List[StepSchema]:
         """
-        Queries Gemini to construct a dependency-based PlanStep DAG.
+        Queries Gemini to construct a dependency-based PlanStep DAG using function calling.
         Enforces strict limits of <= 10 steps and <= 3 write actions.
         """
-        tools_description = self._serialize_tools(registry)
+        print(f"[INFO] [Planner] generate_plan called with objective: {context.objective[:50]}...")
 
         knowledge_context = None
         knowledge_manifest: Dict[str, Any] = {}
@@ -176,30 +289,133 @@ class PlannerAgent:
         except Exception as exc:
             print(f"[WARN] [Planner] KnowledgeResolver failed: {exc}")
 
+        # Filter to only essential planning tools to avoid overwhelming the model
+        # The planner doesn't need all 70+ GitLab tools - just the core workflow tools
+        essential_tool_names = {
+            # Core repository operations
+            'clone_repo', 'get_gitlab_mr_diffs',
+            # Analysis tools
+            'run_impact_analysis', 'run_schema_inspection', 'gitnexus_analyze',
+            # Output/MR operations
+            'post_gitlab_mr_comment',
+            # Incident/healing tools
+            'get_dynatrace_incident_details', 'apply_hotfix_patch',
+            'create_hotfix_branch_and_mr',
+            # GitLab operations
+            'create_gitlab_branch', 'create_gitlab_merge_request',
+            'commit_file_to_branch', 'merge_merge_request'
+        }
+
+        # Build function declarations for essential tools only
+        tool_declarations = []
+        for name in essential_tool_names:
+            if name in registry._tools:
+                tool = registry._tools[name]
+                schema = tool.get_schema()
+                desc = tool.get_description() or schema.get("description", "No description available.")
+                params = schema.get("parameters", {})
+
+                # Build parameters using types.Schema
+                parameters = None
+                if params:
+                    properties = {}
+                    for prop_name, prop_def in params.get("properties", {}).items():
+                        prop_type = prop_def.get("type", "string").upper()
+                        if prop_type in ["NUMBER", "FLOAT", "DOUBLE"]:
+                            gemini_type = "NUMBER"
+                        elif prop_type in ["INTEGER", "INT"]:
+                            gemini_type = "INTEGER"
+                        elif prop_type == "BOOLEAN":
+                            gemini_type = "BOOLEAN"
+                        elif prop_type == "ARRAY":
+                            gemini_type = "ARRAY"
+                        elif prop_type == "OBJECT":
+                            gemini_type = "OBJECT"
+                        else:
+                            gemini_type = "STRING"
+
+                        # Build the schema property
+                        schema_kwargs = {"type": gemini_type}
+                        if "description" in prop_def:
+                            schema_kwargs["description"] = prop_def["description"]
+
+                        # Handle array items - Gemini requires items field for arrays
+                        if gemini_type == "ARRAY" and "items" in prop_def:
+                            items_def = prop_def["items"]
+                            items_type = items_def.get("type", "string").upper()
+                            if items_type in ["NUMBER", "FLOAT", "DOUBLE"]:
+                                items_gemini_type = "NUMBER"
+                            elif items_type in ["INTEGER", "INT"]:
+                                items_gemini_type = "INTEGER"
+                            elif items_type == "BOOLEAN":
+                                items_gemini_type = "BOOLEAN"
+                            elif items_type == "ARRAY":
+                                items_gemini_type = "ARRAY"
+                            elif items_type == "OBJECT":
+                                items_gemini_type = "OBJECT"
+                            else:
+                                items_gemini_type = "STRING"
+
+                            schema_kwargs["items"] = types.Schema(type=items_gemini_type)
+
+                        properties[prop_name] = types.Schema(**schema_kwargs)
+
+                    required = params.get("required", [])
+                    parameters = types.Schema(
+                        type="OBJECT",
+                        properties=properties if properties else None,
+                        required=required if required else None
+                    )
+
+                tool_declarations.append(
+                    types.FunctionDeclaration(
+                        name=name,
+                        description=desc,
+                        parameters=parameters
+                    )
+                )
+            else:
+                print(f"[WARN] [Planner] Essential tool '{name}' not found in registry")
+
+        plan_submission_decl = self._build_plan_submission_declaration()
+
+        # Combine all declarations: essential tools + plan submission function
+        all_declarations = tool_declarations + [plan_submission_decl]
+
+        print(f"[INFO] [Planner] Using {len(tool_declarations)} essential tools (filtered from {len(registry._tools)} total)")
+
         system_instruction = (
             "You are the elite Gatekeeper AI Planner. Your job is to construct a DAG execution plan (list of steps with dependencies) to satisfy the given objective.\n\n"
+            "You have access to tools that can be executed in the plan. Use the submit_execution_plan function to submit your final plan.\n\n"
             "CRITICAL CONSTRAINTS:\n"
             "1. You MUST generate a maximum of 10 steps.\n"
             "2. You MUST have at most 3 write/mutating actions (e.g. committing, applying hotfixes, pushing MRs, writing comments).\n"
             "3. You must justify each step inside the 'reason' field and describe the action in the 'action' field.\n\n"
+            "CRITICAL - COMPLETE PLAN REQUIREMENT:\n"
+            "EVERY step in your plan must be included in the steps array. If a step depends on another step (e.g., 'clone_repo_step'), "
+            "that dependent step MUST also be included in the steps array. Do NOT reference dependencies that don't exist in your plan.\n"
+            "For example: If 'impact_analysis_step' depends on 'clone_repo_step', then BOTH 'impact_analysis_step' AND 'clone_repo_step' must be in your steps array.\n\n"
             "Rules for arguments:\n"
             "1. You must write arguments as a valid, escaped JSON string inside 'arguments_json'. E.g. '{\"repo_path\": \"/tmp/repo\"}'. Do not output structured dictionaries directly in arguments_json, only a flat JSON string.\n"
-            "2. Inside the JSON string, you must use exact tool parameter names as defined.\n"
+            "2. Inside the JSON string, you must use exact tool parameter names as defined in the available function declarations.\n"
             "3. If a step depends on the output of a previous step, include that step's ID in 'dependencies' and use the template token '{{step_id.result}}' or a nested dictionary path like '{{step_id.result.markdown_report}}' inside the values of the JSON string.\n"
-            "4. Be precise. Only generate plans using the registered tools below.\n"
-            "5. For Merge Request reviews, the standard sequence is:\n"
-            "   a. Clone the repository baseline (stay on target branch) via 'clone_repo'.\n"
-            "   b. Run 'gitnexus_analyze' on the cloned repository path.\n"
-            "   c. Get MR diffs using 'get_gitlab_mr_diffs'.\n"
-            "   d. Run 'run_impact_analysis' on the repo path.\n"
-            "   e. Run 'run_schema_inspection' on the diff text.\n"
-            "   f. Use Gemini to summarize findings and post comments using 'post_gitlab_mr_comment'.\n"
-            "6. For Dynatrace incident self-healing, the standard sequence is:\n"
-            "   a. Fetch incident details from Dynatrace Grail via 'get_dynatrace_incident_details'.\n"
-            "   b. Clone repository baseline via 'clone_repo'.\n"
-            "   c. Use Gemini to diagnose and write a surgical diff patch code.\n"
-            "   d. Apply diff patch to file using 'apply_hotfix_patch'.\n"
-            "   e. Commit, push branch and open GitLab MR using 'create_hotfix_branch_and_mr'.\n"
+            "4. Be precise. Only generate plans using the available tools.\n"
+            "5. For Merge Request reviews, the standard COMPLETE sequence is:\n"
+            "   a. Clone the repository baseline (stay on target branch) via 'clone_repo' -> 'clone_repo_step'\n"
+            "   b. Get MR diffs using 'get_gitlab_mr_diffs' -> 'get_mr_diffs_step'\n"
+            "   c. Run 'gitnexus_analyze' on the cloned repository path -> 'gitnexus_analysis_step'\n"
+            "   d. Run 'run_impact_analysis' on the repo path (depends on clone_repo_step) -> 'impact_analysis_step'\n"
+            "   e. Run 'run_schema_inspection' on the diff text (depends on get_mr_diffs_step) -> 'schema_inspection_step'\n"
+            "   f. Use Gemini to summarize findings and post comments using 'post_gitlab_mr_comment' -> 'post_review_comment_step'\n"
+            "   ALL these steps must be included in your plan.\n"
+            "6. For Dynatrace incident self-healing, the standard COMPLETE sequence is:\n"
+            "   a. Fetch incident details from Dynatrace Grail via 'get_dynatrace_incident_details' -> 'fetch_incident_step'\n"
+            "   b. Clone repository baseline via 'clone_repo' -> 'clone_repo_step'\n"
+            "   c. Use Gemini to diagnose and write a surgical diff patch code -> 'diagnose_step'\n"
+            "   d. Apply diff patch to file using 'apply_hotfix_patch' -> 'apply_patch_step'\n"
+            "   e. Commit, push branch and open GitLab MR using 'create_hotfix_branch_and_mr' -> 'create_mr_step'\n"
+            "   ALL these steps must be included in your plan.\n"
+            "IMPORTANT: You must call the submit_execution_plan function ONCE with your COMPLETE plan including ALL steps."
         )
 
         prompt = (
@@ -210,7 +426,6 @@ class PlannerAgent:
             f"SOURCE BRANCH: {context.branch.source_branch}\n"
             f"TARGET BRANCH: {context.branch.target_branch}\n"
             f"USER ID: {context.user.user_id}\n\n"
-            f"AVAILABLE TOOLS:\n{tools_description}\n\n"
         )
 
         if memories:
@@ -232,40 +447,84 @@ class PlannerAgent:
                 f"Please adjust the plan to recover from any failures. If a recovery is not possible, design a step to report/post the failure comment and exit cleanly.\n\n"
             )
 
-        print(f"[INFO] [Planner] Asking Gemini to build/adjust plan...")
+        print(f"[INFO] [Planner] Asking Gemini to build/adjust plan with function calling...")
 
         # Get current span to add context attributes for observability
         current_span = trace.get_current_span()
         if current_span and current_span.is_recording():
-            # Log planning context for debugging
             print(f"[INFO] [Planner] Planning within span context: {current_span.name}")
-
 
         from agents.aril_bridge import hash_text
 
         prompt_hash = hash_text(system_instruction + prompt)
         start = time.time()
-        response = ai_client.models.generate_content(
-            model=self.model_name,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                temperature=0.1,
-                response_mime_type="application/json",
-                response_schema=PlanSchema,
-            ),
-        )
-        response_text = (response.text or "").strip()
-        response_hash = hash_text(response_text)
-        token_count = None
-        usage = getattr(response, "usage_metadata", None)
-        if usage is not None:
-            token_count = getattr(usage, "total_token_count", None)
 
+        # Build tools config with function declarations
+        print(f"[DEBUG] [Planner] Building tools config with {len(all_declarations)} declarations...")
         try:
-            plan_data = PlanSchema.model_validate_json(response_text)
+            tools_config = [
+                types.Tool(function_declarations=all_declarations)
+            ]
+            print(f"[DEBUG] [Planner] Tools config built successfully")
+        except Exception as e:
+            print(f"[ERROR] [Planner] Failed to build tools config: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
 
-            steps = plan_data.steps
+        print(f"[DEBUG] [Planner] Calling Gemini API with function calling...")
+        try:
+            response = ai_client.models.generate_content(
+                model=self.model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_instruction,
+                    temperature=0.1,
+                    tools=tools_config,
+                ),
+            )
+            print(f"[DEBUG] [Planner] Got response from Gemini")
+        except Exception as e:
+            print(f"[ERROR] [Planner] Gemini API call failed: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
+
+        # Extract function call from response
+        func_call = None
+        try:
+            candidate = response.candidates[0]
+            for part in candidate.content.parts:
+                if hasattr(part, 'function_call') and part.function_call:
+                    func_call = part.function_call
+                    break
+        except (IndexError, AttributeError) as e:
+            print(f"[ERROR] [Planner] Failed to extract function call: {e}")
+            raise ValueError("Planner response did not contain a function call. Expected submit_execution_plan to be called.")
+
+        if not func_call or func_call.name != "submit_execution_plan":
+            print(f"[ERROR] [Planner] Expected submit_execution_plan function call, got: {func_call.name if func_call else 'None'}")
+            raise ValueError(f"Expected submit_execution_plan function call, got: {func_call.name if func_call else 'None'}")
+
+        # Parse plan from function call arguments
+        try:
+            plan_args = dict(func_call.args)
+            explanation = plan_args.get("explanation", "")
+            steps_data = plan_args.get("steps", [])
+
+            # Convert steps to StepSchema objects
+            steps = []
+            for step_data in steps_data:
+                steps.append(StepSchema(
+                    step_id=step_data.get("step_id"),
+                    tool_name=step_data.get("tool_name"),
+                    arguments_json=step_data.get("arguments_json"),
+                    dependencies=step_data.get("dependencies", []),
+                    action=step_data.get("action"),
+                    reason=step_data.get("reason")
+                ))
+
+            # Validate constraints
             if len(steps) > 10:
                 raise ValueError(f"Plan validation failed: plan has {len(steps)} steps, which exceeds the max limit of 10.")
 
@@ -273,29 +532,38 @@ class PlannerAgent:
             if write_count > 3:
                 raise ValueError(f"Plan validation failed: plan has {write_count} write/mutating actions, which exceeds the max limit of 3.")
 
-            effective_revision = plan_revision if not history_steps else plan_revision + 1
-            self._emit_plan_events(
-                aril,
-                explanation=plan_data.explanation,
-                steps=steps,
-                plan_revision=effective_revision,
-                history_steps=history_steps,
-                prompt_hash=prompt_hash,
-                response_hash=response_hash,
-                token_count=token_count,
-                knowledge_manifest=knowledge_manifest,
-            )
-            await self._persist_knowledge_manifest(aril, knowledge_manifest)
-            if aril is not None:
-                await aril.flush()
-
-            print(f"[OK] [Planner] Plan successfully generated. Explanation: '{plan_data.explanation}'")
-            for i, step in enumerate(plan_data.steps):
-                print(f"     Step {i+1}: {step.step_id} -> {step.tool_name} (depends on: {step.dependencies})")
-            return plan_data.steps
         except Exception as e:
-            print(f"[ERROR] [Planner] Failed to parse planning output: {e}\nResponse text:\n{response_text}")
+            print(f"[ERROR] [Planner] Failed to parse plan from function call: {e}")
             raise
+
+        # Calculate response hash and token count
+        response_text = json.dumps({"explanation": explanation, "steps": [s.model_dump() for s in steps]})
+        response_hash = hash_text(response_text)
+        token_count = None
+        usage = getattr(response, "usage_metadata", None)
+        if usage is not None:
+            token_count = getattr(usage, "total_token_count", None)
+
+        effective_revision = plan_revision if not history_steps else plan_revision + 1
+        self._emit_plan_events(
+            aril,
+            explanation=explanation,
+            steps=steps,
+            plan_revision=effective_revision,
+            history_steps=history_steps,
+            prompt_hash=prompt_hash,
+            response_hash=response_hash,
+            token_count=token_count,
+            knowledge_manifest=knowledge_manifest,
+        )
+        await self._persist_knowledge_manifest(aril, knowledge_manifest)
+        if aril is not None:
+            await aril.flush()
+
+        print(f"[OK] [Planner] Plan successfully generated via function calling. Explanation: '{explanation}'")
+        for i, step in enumerate(steps):
+            print(f"     Step {i+1}: {step.step_id} -> {step.tool_name} (depends on: {step.dependencies})")
+        return steps
 
 
 Planner = PlannerAgent
