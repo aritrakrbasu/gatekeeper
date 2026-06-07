@@ -181,10 +181,12 @@ async def build_default_registry(aril: Optional["ArilSession"] = None) -> ToolRe
     from services import mcp_service
     from agents import tools
 
+    print(f"[DEBUG] [build_default_registry] Starting to build registry...")
     registry = ToolRegistry()
     if aril is not None:
         registry.attach_aril(aril)
 
+    print(f"[DEBUG] [build_default_registry] Registering local tools...")
     registry.register_local_tool("clone_repo", tools.clone_repo_schema, tools.clone_repo)
     registry.register_local_tool("run_impact_analysis", tools.run_impact_analysis_schema, tools.run_impact_analysis)
     registry.register_local_tool("run_schema_inspection", tools.run_schema_inspection_schema, tools.run_schema_inspection)
@@ -199,6 +201,20 @@ async def build_default_registry(aril: Optional["ArilSession"] = None) -> ToolRe
     registry.register_local_tool("create_gitlab_branch", tools.create_gitlab_branch_schema, tools.create_gitlab_branch)
     registry.register_local_tool("create_gitlab_merge_request", tools.create_gitlab_merge_request_schema, tools.create_gitlab_merge_request)
     registry.register_local_tool("commit_file_to_branch", tools.commit_file_to_branch_schema, tools.commit_file_to_branch)
+
+    # GitNexus tools (for code search and file reading)
+    registry.register_local_tool("gitnexus_grep", tools.gitnexus_grep_schema, tools.gitnexus_grep)
+    registry.register_local_tool("gitnexus_file", tools.gitnexus_file_schema, tools.gitnexus_file)
+
+    # AI Fix Generation Tool
+    registry.register_local_tool("generate_fix", tools.generate_fix_schema, tools.generate_fix)
+
+    # MR Review Enhancement Tools (feature parity with standard mode)
+    registry.register_local_tool("validate_mr_webhook", tools.validate_mr_webhook_schema, tools.validate_mr_webhook)
+    registry.register_local_tool("post_loading_indicator", tools.post_loading_indicator_schema, tools.post_loading_indicator)
+    registry.register_local_tool("update_review_comment", tools.update_review_comment_schema, tools.update_review_comment)
+    registry.register_local_tool("update_commit_status", tools.update_commit_status_schema, tools.update_commit_status)
+    registry.register_local_tool("track_progress", tools.track_progress_schema, tools.track_progress)
 
     # 1. Register local python tools (including GitLab REST API wrappers)
     registry.register_local_tool("clone_repo", tools.clone_repo_schema, tools.clone_repo)
@@ -216,15 +232,42 @@ async def build_default_registry(aril: Optional["ArilSession"] = None) -> ToolRe
     registry.register_local_tool("create_gitlab_merge_request", tools.create_gitlab_merge_request_schema, tools.create_gitlab_merge_request)
     registry.register_local_tool("commit_file_to_branch", tools.commit_file_to_branch_schema, tools.commit_file_to_branch)
 
+    # GitNexus tools (for code search and file reading)
+    registry.register_local_tool("gitnexus_grep", tools.gitnexus_grep_schema, tools.gitnexus_grep)
+    registry.register_local_tool("gitnexus_file", tools.gitnexus_file_schema, tools.gitnexus_file)
+
+    # AI Fix Generation Tool
+    registry.register_local_tool("generate_fix", tools.generate_fix_schema, tools.generate_fix)
+
+    # MR Review Enhancement Tools (feature parity with standard mode)
+    registry.register_local_tool("validate_mr_webhook", tools.validate_mr_webhook_schema, tools.validate_mr_webhook)
+    registry.register_local_tool("post_loading_indicator", tools.post_loading_indicator_schema, tools.post_loading_indicator)
+    registry.register_local_tool("update_review_comment", tools.update_review_comment_schema, tools.update_review_comment)
+    registry.register_local_tool("update_commit_status", tools.update_commit_status_schema, tools.update_commit_status)
+    registry.register_local_tool("track_progress", tools.track_progress_schema, tools.track_progress)
+
+    print(f"[DEBUG] [build_default_registry] Starting MCP session registrations...")
+    print(f"[DEBUG] [build_default_registry] GitLab session: {mcp_service.gitlab_session is not None}")
+    print(f"[DEBUG] [build_default_registry] Mongo session: {mcp_service.mongo_session is not None}")
+    print(f"[DEBUG] [build_default_registry] Nexus session: {mcp_service.nexus_session is not None}")
+    print(f"[DEBUG] [build_default_registry] Dynatrace session: {mcp_service.dynatrace_session is not None}")
+    print(f"[DEBUG] [build_default_registry] Sentry session: {mcp_service.sentry_session is not None}")
+
     if mcp_service.gitlab_session:
+        print(f"[DEBUG] [build_default_registry] Registering GitLab MCP session...")
         await registry.register_mcp_session("gitlab", mcp_service.gitlab_session)
     if mcp_service.mongo_session:
+        print(f"[DEBUG] [build_default_registry] Registering MongoDB MCP session...")
         await registry.register_mcp_session("mongodb", mcp_service.mongo_session)
     if mcp_service.nexus_session:
+        print(f"[DEBUG] [build_default_registry] Registering GitNexus MCP session...")
         await registry.register_mcp_session("gitnexus", mcp_service.nexus_session)
     if mcp_service.dynatrace_session:
+        print(f"[DEBUG] [build_default_registry] Registering Dynatrace MCP session...")
         await registry.register_mcp_session("dynatrace", mcp_service.dynatrace_session)
     if mcp_service.sentry_session:
+        print(f"[DEBUG] [build_default_registry] Registering Sentry MCP session...")
         await registry.register_mcp_session("sentry", mcp_service.sentry_session)
 
+    print(f"[DEBUG] [build_default_registry] Registry build complete. Total tools: {len(registry._tools)}")
     return registry

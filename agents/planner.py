@@ -43,7 +43,7 @@ class PlanSchema(BaseModel):
 class PlannerAgent:
     """
     Constructs and refines step-by-step DAG execution plans using Gemini.
-    Enforces maximum 10 steps and maximum 3 mutating (write) actions.
+    Enforces maximum 15 steps and maximum 5 mutating (write) actions.
     """
 
     def __init__(self, model_name: str = "gemini-2.5-flash"):
@@ -202,8 +202,8 @@ class PlannerAgent:
             "You are the elite Gatekeeper AI Planner for Merge Request code review workflows.\n\n"
             "Your job is to construct a DAG execution plan to review GitLab Merge Requests.\n\n"
             "CRITICAL CONSTRAINTS:\n"
-            "1. You MUST generate a maximum of 10 steps.\n"
-            "2. You MUST have at most 3 write/mutating actions (e.g. posting comments).\n"
+            "1. You MUST generate a maximum of 15 steps.\n"
+            "2. You MUST have at most 5 write/mutating actions (e.g. posting comments).\n"
             "3. You must justify each step inside the 'reason' field and describe the action in the 'action' field.\n\n"
             "COMPLETE PLAN REQUIREMENT:\n"
             "EVERY step in your plan must be included in the steps array. If a step depends on another step, "
@@ -213,12 +213,57 @@ class PlannerAgent:
             "2. Use exact tool parameter names from function declarations.\n"
             "3. For dependencies, use the template token '{{step_id.result}}' in values.\n\n"
             "MR REVIEW WORKFLOW - STANDARD SEQUENCE:\n"
-            "   a. Clone the repository via 'clone_repo' -> 'clone_repo_step'\n"
-            "   b. Get MR diffs via 'get_gitlab_mr_diffs' -> 'get_mr_diffs_step'\n"
-            "   c. Run 'gitnexus_analyze' on cloned repository -> 'gitnexus_analysis_step' (depends on clone_repo_step)\n"
-            "   d. Run 'run_impact_analysis' on repo path -> 'impact_analysis_step' (depends on clone_repo_step)\n"
-            "   e. Run 'run_schema_inspection' on diff text -> 'schema_inspection_step' (depends on get_mr_diffs_step)\n"
-            "   f. Summarize findings and post comment via 'post_gitlab_mr_comment' -> 'post_review_comment_step'\n\n"
+            "   Step 1: Validate webhook via 'validate_mr_webhook' -> 'validate_step'\n"
+            "           Purpose: Checks MR state, branch monitoring, auto-fix detection\n"
+            "           Returns: should_process flag and skip_reason\n"
+            "           If should_process is false, workflow should terminate early\n\n"
+            "   Step 2: Track progress (received) via 'track_progress' -> 'progress_received_step'\n"
+            "           Arguments: '{\"project_id\": \"<project_id>\", \"mr_iid\": <mr_iid>, \"step\": \"received\", \"message\": \"Webhook received\"}'\n\n"
+            "   Step 3: Post loading indicator via 'post_loading_indicator' -> 'loading_step'\n"
+            "           Purpose: Post loading comment to show analysis is in progress\n"
+            "           Returns: comment_id for later update\n\n"
+            "   Step 4: Clone repository via 'clone_repo' -> 'clone_repo_step'\n"
+            "           Purpose: Clone GitLab repository to temp workspace\n\n"
+            "   Step 5: Track progress (clone) via 'track_progress' -> 'progress_clone_step'\n"
+            "           Arguments: '{\"project_id\": \"<project_id>\", \"mr_iid\": <mr_iid>, \"step\": \"clone\", \"message\": \"Repository cloned\", \"status\": \"completed\"}'\n"
+            "           Depends on: clone_repo_step\n\n"
+            "   Step 6: Get MR diffs via 'get_gitlab_mr_diffs' -> 'get_mr_diffs_step'\n"
+            "           Purpose: Fetch MR diffs from GitLab\n\n"
+            "   Step 7: Track progress (analysis) via 'track_progress' -> 'progress_analysis_step'\n"
+            "           Arguments: '{\"project_id\": \"<project_id>\", \"mr_iid\": <mr_iid>, \"step\": \"analysis\", \"message\": \"Starting analysis\"}'\n\n"
+            "   Step 8: Run 'gitnexus_analyze' on cloned repository -> 'gitnexus_analysis_step'\n"
+            "           Purpose: Index repository for code search and call-graph analysis\n"
+            "           Arguments: '{\"repo_path\": \"{{clone_repo_step.result}}\"}'\n"
+            "           Depends on: clone_repo_step\n\n"
+            "   Step 9: Run 'run_impact_analysis' on repo path -> 'impact_analysis_step'\n"
+            "           Purpose: Perform blast radius impact analysis\n"
+            "           Arguments: '{\"repo_path\": \"{{clone_repo_step.result}}\", \"repo_name\": \"<repo_name>\", \"source_branch\": \"<source_branch>\", \"target_branch\": \"<target_branch>\"}'\n"
+            "           Depends on: clone_repo_step\n\n"
+            "   Step 10: Run 'run_schema_inspection' on diff text -> 'schema_inspection_step'\n"
+            "           Purpose: Check for MongoDB schema drift\n"
+            "           Arguments: '{\"diff_text\": \"{{get_mr_diffs_step.result}}\", \"project_id\": \"<project_id>\", \"target_branch\": \"<target_branch>\"}'\n"
+            "           Depends on: get_mr_diffs_step\n\n"
+            "   Step 11: Update review comment via 'update_review_comment' -> 'update_comment_step'\n"
+            "           Purpose: Update the loading comment with complete findings\n"
+            "           Arguments: '{\"project_id\": \"<project_id>\", \"mr_iid\": <mr_iid>, \"comment_id\": {{loading_step.result.comment_id}}, \"audit_report\": \"<COMBINED_REPORT_FROM_STEPS_8_9_10>\"}'\n"
+            "           Depends on: loading_step, gitnexus_analysis_step, impact_analysis_step, schema_inspection_step\n"
+            "           NOTE: Combine markdown reports from gitnexus, impact, and schema steps into the audit_report\n\n"
+            "   Step 12: Update commit status via 'update_commit_status' -> 'commit_status_step'\n"
+            "           Purpose: Update commit badge to show successful review\n"
+            "           Arguments: '{\"project_id\": \"<project_id>\", \"commit_sha\": \"BASE_COMMIT_SHA_FROM_PROMPT\", \"status\": \"success\", \"description\": \"Security audit completed\"}'\n"
+            "           NOTE: Use the BASE COMMIT SHA value from the MERGE REQUEST DETAILS section in the prompt\n\n"
+            "   Step 13: Track progress (completed) via 'track_progress' -> 'progress_complete_step'\n"
+            "           Arguments: '{\"project_id\": \"<project_id>\", \"mr_iid\": <mr_iid>, \"step\": \"completed\", \"message\": \"Review completed\", \"status\": \"completed\"}'\n\n"
+            "SUCCESS CRITERIA:\n"
+            "1. Loading indicator posted and updated\n"
+            "2. All analysis steps completed successfully\n"
+            "3. Comment posted with full audit report\n"
+            "4. Commit status updated to 'success'\n"
+            "5. Progress tracking updated throughout\n\n"
+            "ERROR HANDLING:\n"
+            "1. If validation fails, track_progress with status='failed'\n"
+            "2. If any step fails, track_progress with status='failed'\n"
+            "3. Always update progress logs regardless of outcome\n\n"
             "ALL these steps must be included in your plan.\n"
             "IMPORTANT: Call submit_execution_plan ONCE with your COMPLETE plan including ALL steps."
         )
@@ -507,7 +552,10 @@ class PlannerAgent:
             'create_hotfix_branch_and_mr',
             # GitLab operations
             'create_gitlab_branch', 'create_gitlab_merge_request',
-            'commit_file_to_branch', 'merge_merge_request'
+            'commit_file_to_branch', 'merge_merge_request',
+            # MR Review Enhancement Tools
+            'validate_mr_webhook', 'post_loading_indicator', 'update_review_comment',
+            'update_commit_status', 'track_progress'
         }
 
         # Build function declarations for essential tools only
@@ -608,6 +656,15 @@ class PlannerAgent:
             f"TARGET BRANCH: {context.branch.target_branch}\n"
             f"USER ID: {context.user.user_id}\n\n"
         )
+
+        # Add MR details if available (from webhook payload)
+        if context.branch.base_commit_sha or context.branch.head_commit_sha:
+            prompt += "MERGE REQUEST DETAILS (from webhook payload):\n"
+            if context.branch.base_commit_sha:
+                prompt += f"BASE COMMIT SHA: {context.branch.base_commit_sha}\n"
+            if context.branch.head_commit_sha:
+                prompt += f"HEAD COMMIT SHA: {context.branch.head_commit_sha}\n"
+            prompt += "\n"
 
         # Add Sentry issue details if available (from webhook payload)
         if context.sentry_issue:
@@ -722,12 +779,12 @@ class PlannerAgent:
                 ))
 
             # Validate constraints
-            if len(steps) > 10:
-                raise ValueError(f"Plan validation failed: plan has {len(steps)} steps, which exceeds the max limit of 10.")
+            if len(steps) > 15:
+                raise ValueError(f"Plan validation failed: plan has {len(steps)} steps, which exceeds the max limit of 15.")
 
             write_count = sum(1 for s in steps if self._is_mutate_action(s.tool_name))
-            if write_count > 3:
-                raise ValueError(f"Plan validation failed: plan has {write_count} write/mutating actions, which exceeds the max limit of 3.")
+            if write_count > 5:
+                raise ValueError(f"Plan validation failed: plan has {write_count} write/mutating actions, which exceeds the max limit of 5.")
 
         except Exception as e:
             print(f"[ERROR] [Planner] Failed to parse plan from function call: {e}")

@@ -360,45 +360,88 @@ class ContextBuilder:
         return context
 
     @classmethod
-    def build_from_gitlab_mr(cls, payload: dict, repository_path: Optional[str] = None) -> AgentContext:
+    async def build_from_gitlab_mr(cls, payload: dict, repository_path: Optional[str] = None) -> Optional[AgentContext]:
+        """
+        Build AgentContext from GitLab MR webhook payload.
+
+        Returns None if webhook should not be processed (validation fails).
+
+        Validation checks:
+        1. MR action must be 'open' (not update, merge, close)
+        2. MR state must be 'opened'
+        3. Target branch must be monitored (configured in repository)
+        4. Source branch must not be auto-fix branch (gatekeeper/*)
+        """
+        from services import review_service
+
         object_attrs = payload.get("object_attributes", {})
         project_id = str(payload.get("project", {}).get("id") or payload.get("project_id", "82576405"))
         user_id = str(payload.get("user", {}).get("id") or object_attrs.get("author_id", "unknown"))
-        mr_iid = str(object_attrs.get("iid", "unknown"))
-        
+        mr_iid = object_attrs.get("iid")
+        target_branch = object_attrs.get("target_branch", "main")
+        source_branch = object_attrs.get("source_branch", "main")
+        mr_state = object_attrs.get("state", "")
+        action = object_attrs.get("action", "")
+
+        # Validation check 1: Action must be 'open'
+        if action != "open" and action != "reopen":
+            print(f"[INFO] [ContextBuilder] Skipping MR {mr_iid}: action is '{action}', only 'open' actions are processed")
+            return None
+
+        # Validation check 2: State must be 'opened'
+        if mr_state != "opened" and mr_state != "reopened":
+            print(f"[INFO] [ContextBuilder] Skipping MR {mr_iid}: state is '{mr_state}', only 'opened' MRs are processed")
+            return None
+
+        # Validation check 3: Target branch must be monitored
+        try:
+            should_process = await review_service.should_process_webhook(project_id, target_branch)
+            if not should_process:
+                print(f"[INFO] [ContextBuilder] Skipping MR {mr_iid}: target branch '{target_branch}' is not monitored")
+                return None
+        except Exception as e:
+            print(f"[WARN] [ContextBuilder] Failed to check branch monitoring: {e}")
+            return None
+
+        # Validation check 4: Source branch must not be auto-fix branch
+        if source_branch.startswith("gatekeeper/"):
+            print(f"[INFO] [ContextBuilder] Skipping MR {mr_iid}: source branch '{source_branch}' is an auto-fix branch")
+            return None
+
+        # All validations passed, continue building context
         task_id = f"mr-review-{uuid.uuid4().hex[:8]}"
         objective = f"Perform GitLab Merge Request Review for MR {mr_iid}"
-        
+
         repo_ctx = RepositoryContext(
             id=project_id,
             name=payload.get("project", {}).get("path_with_namespace", "unknown").split("/")[-1],
             git_url=payload.get("project", {}).get("http_url", ""),
             repo_path=repository_path
         )
-        
+
         branch_ctx = BranchContext(
-            source_branch=object_attrs.get("source_branch", "main"),
-            target_branch=object_attrs.get("target_branch", "main"),
+            source_branch=source_branch,
+            target_branch=target_branch,
             base_commit_sha=object_attrs.get("last_commit", {}).get("id", ""),
             head_commit_sha=object_attrs.get("sha", "")
         )
-        
+
         user_ctx = UserContext(
             user_id=user_id,
             username=payload.get("user", {}).get("username", "unknown"),
             permissions=["read", "write"]
         )
-        
+
         schema_ctx = SchemaContext(
             db_name="gatekeeper_dev"
         )
-        
+
         metadata = {
             "trigger_type": "gitlab_mr",
-            "mr_iid": mr_iid,
+            "mr_iid": str(mr_iid),
             "project_id": project_id
         }
-        
+
         return AgentContext(
             task_id=task_id,
             objective=objective,

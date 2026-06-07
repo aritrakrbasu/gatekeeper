@@ -320,24 +320,62 @@ async def gitlab_webhook(request: Request, x_gitlab_event: str = Header(None)):
 
     # Dynamic delegation based on agentic mode environment flag
     agentic_mode = os.getenv("AGENTIC_MODE_ENABLED", "false").lower() == "true"
-    
+    print(f"[DEBUG] Agentic mode: {agentic_mode}", flush=True)
+
     if agentic_mode:
         from agents import ContextBuilder, build_default_registry, WorkflowEngine
 
         # 1. Handle GitLab Merge Request Event
         if x_gitlab_event == "Merge Request Hook":
-            context = ContextBuilder.build_from_gitlab_mr(payload)
-            engine = WorkflowEngine(await build_default_registry())
-            print(f"[INFO] [Agentic Mode] Executing agentic workflow for Merge Request: {context.task_id}")
+            print(f"[DEBUG] Processing MR webhook in agentic mode...", flush=True)
+
+            print(f"[DEBUG] Step 1: Building context from webhook payload...", flush=True)
+            context = await ContextBuilder.build_from_gitlab_mr(payload)
+            print(f"[DEBUG] Context built: {context is not None}", flush=True)
+
+            # Handle validation failure (context is None)
+            if context is None:
+                print(f"[DEBUG] Context validation failed, returning skipped response", flush=True)
+                # Extract details for skip response
+                obj_attrs = payload.get("object_attributes", {})
+                return {
+                    "status": "skipped",
+                    "reason": "Webhook validation failed",
+                    "project_id": str(obj_attrs.get("target_project_id", payload.get("project", {}).get("id", ""))),
+                    "mr_iid": obj_attrs.get("iid")
+                }
+
+            print(f"[DEBUG] Step 1.5: Ingesting MR into MongoDB...", flush=True)
+            # Ingest MR into MongoDB so progress logs can be tracked
+            ingest_result = await review_service.ingest_mr_from_webhook(payload)
+            if ingest_result.get("skipped"):
+                print(f"[WARN] MR ingestion skipped: {ingest_result.get('reason')}", flush=True)
+            else:
+                print(f"[OK] MR ingested into MongoDB", flush=True)
+
+            print(f"[DEBUG] Step 2: Building tool registry...", flush=True)
+            registry = await build_default_registry()
+            print(f"[DEBUG] Registry built with {len(registry._tools)} tools", flush=True)
+
+            engine = WorkflowEngine(registry)
+            print(f"[INFO] [Agentic Mode] Executing agentic workflow for Merge Request: {context.task_id}", flush=True)
+            print(f"[DEBUG] Starting workflow execution...", flush=True)
+
             result = await engine.run_task(context)
-            return result
+            print(f"[DEBUG] Workflow execution completed: {result.get('status')}", flush=True)
+
+            # Normalize response to match standard format
+            return {
+                "status": result.get("status", "event_processed"),
+                "message": f"MR review completed with task_id={result.get('task_id', context.task_id)}"
+            }
 
         # 2. Handle Dynatrace Incident/Production Crash Event
         if not x_gitlab_event:
             if isinstance(payload, dict) and "problem_id" in payload:
                 context = ContextBuilder.build_from_dynatrace_crash(payload)
                 engine = WorkflowEngine(await build_default_registry())
-                print(f"[INFO] [Agentic Mode] Executing agentic workflow for Production Incident: {context.task_id}")
+                print(f"[INFO] [Agentic Mode] Executing agentic workflow for Production Incident: {context.task_id}", flush=True)
                 result = await engine.run_task(context)
                 return result
     else:

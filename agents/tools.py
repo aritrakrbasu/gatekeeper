@@ -857,6 +857,332 @@ Please generate a fix for this bug. Return valid JSON with file_path, fixed_code
 
 
 # ============================================================================
+# MR Review Enhancement Tools (Feature Parity with Standard Mode)
+# ============================================================================
+
+validate_mr_webhook_schema = {
+    "name": "validate_mr_webhook",
+    "description": "Validate if a GitLab MR webhook should be processed. Checks MR state, branch monitoring configuration, and auto-fix branch detection. Returns validation result with skip reason if applicable.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "project_id": {"type": "STRING", "description": "GitLab project ID"},
+            "mr_iid": {"type": "INTEGER", "description": "Merge request IID"},
+            "target_branch": {"type": "STRING", "description": "Target branch name"},
+            "source_branch": {"type": "STRING", "description": "Source branch name"},
+            "mr_state": {"type": "STRING", "description": "MR state (opened, closed, merged)"},
+            "action": {"type": "STRING", "description": "Webhook action (open, update, merge, close)"}
+        },
+        "required": ["project_id", "mr_iid", "target_branch", "source_branch", "mr_state", "action"]
+    }
+}
+
+
+async def validate_mr_webhook(
+    project_id: str,
+    mr_iid: int,
+    target_branch: str,
+    source_branch: str,
+    mr_state: str,
+    action: str
+) -> Dict[str, Any]:
+    """
+    Validate if a GitLab MR webhook should be processed.
+
+    Checks:
+    1. MR action must be 'open' (not update, merge, close)
+    2. MR state must be 'opened'
+    3. Target branch must be monitored (configured in repository)
+    4. Source branch must not be auto-fix branch (gatekeeper/*)
+
+    Returns:
+        Dict with should_process, skip_reason, project_id, mr_iid
+    """
+    # Check 1: Action must be 'open'
+    if action != "open":
+        return {
+            "should_process": False,
+            "skip_reason": f"MR action is '{action}', only 'open' actions are processed",
+            "project_id": project_id,
+            "mr_iid": mr_iid
+        }
+
+    # Check 2: State must be 'opened'
+    if mr_state != "opened":
+        return {
+            "should_process": False,
+            "skip_reason": f"MR state is '{mr_state}', only 'opened' MRs are processed",
+            "project_id": project_id,
+            "mr_iid": mr_iid
+        }
+
+    # Check 3: Target branch must be monitored
+    try:
+        should_process = await review_service.should_process_webhook(str(project_id), target_branch)
+        if not should_process:
+            repo = await repository_service.get_repository(str(project_id))
+            monitored_branches = repo.get("target_branches", []) if repo else []
+            return {
+                "should_process": False,
+                "skip_reason": f"Target branch '{target_branch}' is not monitored. Monitored branches: {monitored_branches}",
+                "project_id": project_id,
+                "mr_iid": mr_iid
+            }
+    except Exception as e:
+        print(f"[WARN] [validate_mr_webhook] Failed to check branch monitoring: {e}")
+        return {
+            "should_process": False,
+            "skip_reason": f"Failed to validate branch monitoring: {str(e)}",
+            "project_id": project_id,
+            "mr_iid": mr_iid
+        }
+
+    # Check 4: Source branch must not be auto-fix branch
+    if source_branch.startswith("gatekeeper/"):
+        return {
+            "should_process": False,
+            "skip_reason": f"Source branch '{source_branch}' is an auto-fix branch, skipping review",
+            "project_id": project_id,
+            "mr_iid": mr_iid
+        }
+
+    return {
+        "should_process": True,
+        "skip_reason": None,
+        "project_id": project_id,
+        "mr_iid": mr_iid
+    }
+
+
+post_loading_indicator_schema = {
+    "name": "post_loading_indicator",
+    "description": "Post a loading indicator comment to a GitLab MR. This should be the first step in MR review to show users that analysis is in progress.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "project_id": {"type": "STRING", "description": "GitLab project ID"},
+            "mr_iid": {"type": "INTEGER", "description": "Merge request IID"}
+        },
+        "required": ["project_id", "mr_iid"]
+    }
+}
+
+
+async def post_loading_indicator(project_id: str, mr_iid: int) -> Dict[str, Any]:
+    """
+    Post a loading indicator comment to a GitLab MR.
+
+    Returns:
+        Dict with status, comment_id, message
+    """
+    from datetime import datetime
+
+    loading_message = (
+        "### 🛡️ The Gatekeeper Security Audit\n\n"
+        "🔄 **Analysis in progress...**\n\n"
+        "This may take a minute or two depending on the size of the changes.\n\n"
+        "---\n\n"
+        f"*Started: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}*"
+    )
+
+    try:
+        # Use the post_gitlab_mr_comment function
+        result = await post_gitlab_mr_comment(
+            user_id="",  # Empty user_id to use fallback token
+            project_id=str(project_id),
+            mr_iid=mr_iid,
+            comment=loading_message
+        )
+
+        return {
+            "status": "success",
+            "comment_id": result.get("id"),
+            "message": f"Loading indicator posted (comment ID: {result.get('id')})"
+        }
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Failed to post loading indicator: {str(e)}"
+        }
+
+
+update_review_comment_schema = {
+    "name": "update_review_comment",
+    "description": "Update an existing MR comment with the full audit report. This replaces the loading indicator with the complete analysis results.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "project_id": {"type": "STRING", "description": "GitLab project ID"},
+            "mr_iid": {"type": "INTEGER", "description": "Merge request IID"},
+            "comment_id": {"type": "INTEGER", "description": "ID of comment to update"},
+            "audit_report": {"type": "STRING", "description": "Full audit report in markdown format"}
+        },
+        "required": ["project_id", "mr_iid", "comment_id", "audit_report"]
+    }
+}
+
+
+async def update_review_comment(
+    project_id: str,
+    mr_iid: int,
+    comment_id: int,
+    audit_report: str
+) -> Dict[str, Any]:
+    """
+    Update an existing MR comment with the full audit report.
+
+    Returns:
+        Dict with status, comment_id, message
+    """
+    from datetime import datetime
+
+    # Add timestamp to report
+    timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    report_with_timestamp = f"{audit_report}\n\n---\n\n*Last updated: {timestamp}*"
+
+    try:
+        result = await post_gitlab_mr_comment(
+            user_id="",  # Empty user_id to use fallback token
+            project_id=str(project_id),
+            mr_iid=mr_iid,
+            comment=report_with_timestamp,
+            note_id=comment_id
+        )
+
+        return {
+            "status": "success",
+            "comment_id": comment_id,
+            "message": f"Review comment updated (comment ID: {comment_id})"
+        }
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Failed to update review comment: {str(e)}"
+        }
+
+
+update_commit_status_schema = {
+    "name": "update_commit_status",
+    "description": "Update the commit status badge for a GitLab MR. This shows a visual indicator (success/failed/running) on the commit in GitLab.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "project_id": {"type": "STRING", "description": "GitLab project ID"},
+            "commit_sha": {"type": "STRING", "description": "Commit SHA to update status for"},
+            "status": {"type": "STRING", "description": "Status value", "enum": ["success", "failed", "running"]},
+            "description": {"type": "STRING", "description": "Description text for the status"}
+        },
+        "required": ["project_id", "commit_sha", "status"]
+    }
+}
+
+
+async def update_commit_status(
+    project_id: str,
+    commit_sha: str,
+    status: str,
+    description: str = "Security audit completed"
+) -> Dict[str, Any]:
+    """
+    Update the commit status badge for a GitLab MR.
+
+    Returns:
+        Dict with status, message
+    """
+    # Map our status to GitLab status values
+    status_map = {
+        "success": "success",
+        "failed": "failed",
+        "running": "pending"
+    }
+
+    gitlab_status = status_map.get(status, "failed")
+
+    try:
+        # Use GitLab REST API to update commit status
+        result = await _gitlab_rest_api_call(
+            user_id="",  # Empty user_id to use fallback token
+            project_id=str(project_id),
+            method="POST",
+            endpoint=f"/projects/{project_id}/statuses/{commit_sha}",
+            json_data={
+                "state": gitlab_status,
+                "context": "gatekeeper/security-review",
+                "description": description
+            }
+        )
+
+        return {
+            "status": "success",
+            "message": f"Commit status updated to '{gitlab_status}'"
+        }
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Failed to update commit status: {str(e)}"
+        }
+
+
+track_progress_schema = {
+    "name": "track_progress",
+    "description": "Update progress logs in MongoDB for a merge request. This enables real-time progress tracking in the UI.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "project_id": {"type": "STRING", "description": "GitLab project ID"},
+            "mr_iid": {"type": "INTEGER", "description": "Merge request IID"},
+            "step": {"type": "STRING", "description": "Step name (e.g., 'clone', 'analysis', 'completed')"},
+            "message": {"type": "STRING", "description": "Progress message"},
+            "status": {"type": "STRING", "description": "Step status", "enum": ["running", "completed", "failed"]}
+        },
+        "required": ["project_id", "mr_iid", "step", "message"]
+    }
+}
+
+
+async def track_progress(
+    project_id: str,
+    mr_iid: int,
+    step: str,
+    message: str,
+    status: str = "running"
+) -> Dict[str, Any]:
+    """
+    Update progress logs in MongoDB for a merge request.
+
+    Returns:
+        Dict with status, message
+    """
+    try:
+        success = await repository_service.add_mr_progress_log(
+            repo_id=str(project_id),
+            mr_iid=mr_iid,
+            step=step,
+            message=message,
+            status=status
+        )
+
+        if success:
+            return {
+                "status": "success",
+                "message": f"Progress updated: {step} - {message}"
+            }
+        else:
+            return {
+                "status": "error",
+                "message": "Failed to track progress - MR not found in database"
+            }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Failed to track progress: {str(e)}"
+        }
+
+
+# ============================================================================
 # GitLab REST API Helper Functions (for direct API calls without MCP)
 # ============================================================================
 

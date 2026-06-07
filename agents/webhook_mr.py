@@ -37,7 +37,12 @@ async def run_agentic_mr_webhook(payload: dict) -> dict:
     except Exception as exc:
         print(f"[WARN] [Agentic MR] Failed to update MR progress: {exc}")
 
-    context = ContextBuilder.build_from_gitlab_mr(payload)
+    context = await ContextBuilder.build_from_gitlab_mr(payload)
+
+    # Handle validation failure (context is None)
+    if context is None:
+        return {"status": "skipped", "reason": "Webhook validation failed"}
+
     engine = WorkflowEngine(await build_default_registry())
     print(f"[INFO] [Agentic Mode] Executing agentic workflow for Merge Request: {context.task_id}")
     result = await engine.run_task(context)

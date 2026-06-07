@@ -15,6 +15,20 @@ from agents.approval import HumanApprovalLayer
 from agents.recovery import FailureRecoveryManager
 from agents.workflows import run_mr_review_workflow, run_incident_workflow, run_auto_remediation_workflow
 
+# Import new MR review enhancement tools
+from agents.tools import (
+    validate_mr_webhook,
+    validate_mr_webhook_schema,
+    post_loading_indicator,
+    post_loading_indicator_schema,
+    update_review_comment,
+    update_review_comment_schema,
+    update_commit_status,
+    update_commit_status_schema,
+    track_progress,
+    track_progress_schema
+)
+
 __all__ = [
     "AgentContext",
     "ContextBuilder",
@@ -41,6 +55,16 @@ __all__ = [
     "FailureRecoveryManager",
     "run_mr_review_workflow",
     "run_incident_workflow",
-    "run_auto_remediation_workflow"
+    "run_auto_remediation_workflow",
+    "validate_mr_webhook",
+    "validate_mr_webhook_schema",
+    "post_loading_indicator",
+    "post_loading_indicator_schema",
+    "update_review_comment",
+    "update_review_comment_schema",
+    "update_commit_status",
+    "update_commit_status_schema",
+    "track_progress",
+    "track_progress_schema"
 ]
 
