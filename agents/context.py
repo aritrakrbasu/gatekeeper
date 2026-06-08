@@ -376,7 +376,9 @@ class ContextBuilder:
 
         object_attrs = payload.get("object_attributes", {})
         project_id = str(payload.get("project", {}).get("id") or payload.get("project_id", "82576405"))
-        user_id = str(payload.get("user", {}).get("id") or object_attrs.get("author_id", "unknown"))
+        webhook_gitlab_user_id = payload.get("user", {}).get("id") or object_attrs.get("author_id")
+        owner_user_id = await review_service.resolve_repository_user_id(project_id)
+        user_id = str(owner_user_id or webhook_gitlab_user_id or "unknown")
         mr_iid = object_attrs.get("iid")
         target_branch = object_attrs.get("target_branch", "main")
         source_branch = object_attrs.get("source_branch", "main")
@@ -439,7 +441,10 @@ class ContextBuilder:
         metadata = {
             "trigger_type": "gitlab_mr",
             "mr_iid": str(mr_iid),
-            "project_id": project_id
+            "project_id": project_id,
+            "gitlab_user_id": str(webhook_gitlab_user_id or ""),
+            "commit_sha": object_attrs.get("last_commit", {}).get("id")
+            or object_attrs.get("sha", ""),
         }
 
         return AgentContext(

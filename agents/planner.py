@@ -347,12 +347,16 @@ class PlannerAgent:
             "           Option C: run_schema_inspection (ONLY for schema files)\n"
             "                      Arguments: '{\"diff_text\": \"DIFF_CONTENT\", \"project_id\": \"PROJECT_ID\", \"target_branch\": \"TARGET_BRANCH\"}'\n"
             "           Include ONLY the analysis steps that are RELEVANT to the diff\n\n"
-            "   Step 3: Update review comment via 'update_review_comment' -> 'update_comment_step'\n"
-            "           Purpose: Update the loading comment with your findings\n"
-            "           IMPORTANT: The audit_report MUST follow the format template above with expandable sections\n"
-            "           Arguments: '{\"project_id\": \"<project_id>\", \"mr_iid\": <mr_iid>, \"comment_id\": \"{{loading_step.result.comment_id}}\", \"audit_report\": \"<YOUR_ANALYSIS_USING_FORMAT_ABOVE>\", \"user_id\": \"USER_ID_FROM_PROMPT\"}'\n"
-            "           Depends on: loading_step (and any analysis steps you included)\n\n"
-            "   Step 4: Update commit status via 'update_commit_status' -> 'commit_status_step'\n"
+            "   Step 3: Run Gemini AI review via 'run_gemini_mr_review' -> 'gemini_review_step'\n"
+            "           Purpose: Produce the full Gatekeeper security/quality audit (same as standard mode)\n"
+            "           Arguments: '{\"project_id\": \"<project_id>\", \"mr_iid\": <mr_iid>, \"diff_text\": \"<MR_DIFF_FROM_PROMPT>\", \"repo_path\": \"PRESTEP_REPO_PATH\", \"repo_name\": \"REPO_NAME\", \"source_branch\": \"SOURCE_BRANCH\", \"target_branch\": \"TARGET_BRANCH\", \"impact_context\": \"{{impact_analysis_step.result.gemini_prompt_formatted}}\", \"schema_context\": \"{{schema_inspection_step.result.markdown_report}}\"}'\n"
+            "           Depends on: loading_step and any analysis steps you included\n"
+            "           CRITICAL: Use gemini_review_step.result.audit_report as the final comment body — do NOT concatenate raw tool markdown instead of running this step\n\n"
+            "   Step 4: Update review comment via 'update_review_comment' -> 'update_comment_step'\n"
+            "           Purpose: Update the loading comment with the Gemini audit report\n"
+            "           Arguments: '{\"project_id\": \"<project_id>\", \"mr_iid\": <mr_iid>, \"comment_id\": \"{{loading_step.result.comment_id}}\", \"audit_report\": \"{{gemini_review_step.result.audit_report}}\", \"user_id\": \"USER_ID_FROM_PROMPT\"}'\n"
+            "           Depends on: loading_step, gemini_review_step\n\n"
+            "   Step 5: Update commit status via 'update_commit_status' -> 'commit_status_step'\n"
             "           Purpose: Update commit badge to show successful review\n"
             "           Arguments: '{\"project_id\": \"<project_id>\", \"commit_sha\": \"BASE_COMMIT_SHA_FROM_PROMPT\", \"status\": \"success\", \"description\": \"Security audit completed\", \"user_id\": \"USER_ID_FROM_PROMPT\"}'\n"
             "           NOTE: Use the BASE COMMIT SHA value from the MERGE REQUEST DETAILS section in the prompt\n\n"
@@ -651,7 +655,7 @@ class PlannerAgent:
             # Core repository operations (exclude for MR review - already executed)
             # 'clone_repo', 'get_gitlab_mr_diffs',  # Prerequisites - excluded for MR review
             # Analysis tools
-            'run_impact_analysis', 'run_schema_inspection',  # 'gitnexus_analyze' is a prerequisite
+            'run_impact_analysis', 'run_schema_inspection', 'run_gemini_mr_review',  # 'gitnexus_analyze' is a prerequisite
             # Code search and debugging tools (GitNexus HTTP API tools)
             'gitnexus_grep', 'gitnexus_file',
             # AI Fix Generation

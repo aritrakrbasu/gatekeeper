@@ -19,7 +19,7 @@ from copilot.graph.v2.state import (
     copilot_from_graph_state,
     merge_copilot_update,
 )
-from copilot.models.enums import CopilotNodeName
+from copilot.models.enums import CopilotNodeName, StreamEventType
 from copilot.models.state import CopilotState
 from copilot.nodes.base import run_node
 from copilot.nodes.evidence_retrieval import evidence_retrieval_node
@@ -60,6 +60,15 @@ def _make_node(
                 "sse_events": sse_events,
                 "halted": True,
             }
+        if node_name == CopilotNodeName.RESPONSE_GENERATOR and copilot.response_chunks:
+            for chunk in copilot.response_chunks:
+                sse_events.append(
+                    {
+                        "event": StreamEventType.RESPONSE_CHUNK.value,
+                        "data": {"text": chunk},
+                    }
+                )
+
         if persist_checkpoints and checkpoints is not None:
             await checkpoints.save(copilot)
         return merge_copilot_update(graph_state, copilot) | {"sse_events": sse_events}

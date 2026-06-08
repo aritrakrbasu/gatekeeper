@@ -34,6 +34,8 @@ export function CopilotWorkspace({
     isAwaitingApproval,
     error,
     isLoading,
+    isBootstrapping,
+    isInputReady,
     ask,
     resume,
     clearError,
@@ -64,12 +66,16 @@ export function CopilotWorkspace({
         </div>
       )}
 
-      {isLoading && (
+      {isLoading ? (
         <div className="px-4 py-6 text-center text-sm text-slate-500">
           <div className="inline-block animate-spin rounded-full h-5 w-5 border-b-2 border-[#FC6D26] mb-2" />
           <p>Loading investigation session...</p>
         </div>
-      )}
+      ) : isBootstrapping ? (
+        <div className="px-4 py-2 text-center text-xs text-slate-400">
+          Restoring conversation...
+        </div>
+      ) : null}
 
       <InvestigationPlanPanel
         currentPlan={currentPlan}
@@ -87,6 +93,7 @@ export function CopilotWorkspace({
         isStreaming={isStreaming}
         isAwaitingApproval={isAwaitingApproval}
         isLoading={isLoading}
+        isInputReady={isInputReady}
         onAsk={ask}
         approvalSlot={
           isAwaitingApproval && pendingApproval ? (

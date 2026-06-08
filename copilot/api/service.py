@@ -6,6 +6,8 @@ import asyncio
 import json
 from typing import Any, AsyncIterator, Dict, Optional
 
+_registry_lock = asyncio.Lock()
+
 from fastapi import HTTPException
 
 from copilot.api.state_service import build_conversation_state
@@ -28,7 +30,7 @@ from copilot.models.api_models import (
     ResumeConversationResponse,
 )
 from copilot.models.approval import ApprovalDecision
-from copilot.models.enums import QuestionType
+from copilot.models.enums import QuestionType, StreamEventType
 from copilot.models.frontend_models import (
     BootstrapCheckpointInfo,
     BootstrapExecutionInfo,
@@ -56,11 +58,37 @@ class CopilotService:
         self._sse_events = SseEventStore(db)
         self._v1_runner = CopilotGraphRunner(db, checkpoints=self._checkpoints)
         self._v2_runner = CopilotLangGraphRunner(db, checkpoints=self._checkpoints)
+        self._shared_registry: Any = None
 
     def _select_runner(self):
         if is_langgraph_enabled() or not is_v1_fallback_enabled():
             return self._v2_runner
         return self._v1_runner
+
+    async def warm_registry(self) -> None:
+        """Pre-build the tool registry so /ask does not block on first SSE chunk."""
+        await self._ensure_shared_registry()
+
+    async def _ensure_shared_registry(self):
+        if self._shared_registry is not None:
+            return self._shared_registry
+
+        async with _registry_lock:
+            if self._shared_registry is not None:
+                return self._shared_registry
+
+            from agents.registry import build_default_registry
+
+            self._shared_registry = await build_default_registry()
+            if self._v2_runner._registry is None:
+                self._v2_runner.attach_registry(self._shared_registry)
+            return self._shared_registry
+
+    async def _prepare_runner(self):
+        runner = self._select_runner()
+        if runner is self._v2_runner and self._v2_runner._registry is None:
+            await self._ensure_shared_registry()
+        return runner
 
     async def _check_repo(self, user_id: str, repository_id: str) -> None:
         if self._db is not None:
@@ -325,8 +353,47 @@ class CopilotService:
             conversation_id, active=True, status="running"
         )
         try:
-            async for event in self._select_runner().run(state):
+            runner = await self._prepare_runner()
+            yield await self._persist_sse_event(
+                conversation_id,
+                {
+                    "event": StreamEventType.NODE_STARTED.value,
+                    "data": {
+                        "node": "ask_orchestrator",
+                        "conversation_id": conversation_id,
+                    },
+                },
+                state,
+            )
+
+            event_count = 0
+            async for event in runner.run(state):
+                event_count += 1
                 yield await self._persist_sse_event(conversation_id, event, state)
+
+            if event_count == 0:
+                yield await self._persist_sse_event(
+                    conversation_id,
+                    {
+                        "event": StreamEventType.ERROR.value,
+                        "data": {
+                            "message": (
+                                "Copilot finished without producing a response. "
+                                "The investigation graph may be unavailable for this review."
+                            ),
+                        },
+                    },
+                    state,
+                )
+        except Exception as exc:
+            yield await self._persist_sse_event(
+                conversation_id,
+                {
+                    "event": StreamEventType.ERROR.value,
+                    "data": {"message": str(exc)},
+                },
+                state,
+            )
         finally:
             await self._checkpoints.set_stream_active(conversation_id, active=False)
 
@@ -360,7 +427,7 @@ class CopilotService:
         if not state.pending_approval and not state.interrupted:
             raise HTTPException(status_code=409, detail="Conversation is not awaiting approval")
 
-        runner = self._select_runner()
+        runner = await self._prepare_runner()
         if not hasattr(runner, "resume"):
             raise HTTPException(status_code=501, detail="Resume requires LangGraph Copilot v2")
 
@@ -377,6 +444,15 @@ class CopilotService:
         try:
             async for event in runner.resume(state, resume_payload):
                 yield await self._persist_sse_event(conversation_id, event, state)
+        except Exception as exc:
+            yield await self._persist_sse_event(
+                conversation_id,
+                {
+                    "event": StreamEventType.ERROR.value,
+                    "data": {"message": str(exc)},
+                },
+                state,
+            )
         finally:
             await self._checkpoints.set_stream_active(conversation_id, active=False)
 

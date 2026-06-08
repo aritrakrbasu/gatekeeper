@@ -48,6 +48,25 @@ export function pickResumableConversation(items = []) {
   )[0];
 }
 
+/**
+ * Pick the best existing conversation for a session.
+ * Prefers active streams, otherwise reuses the newest conversation.
+ */
+export function pickConversationForSession(items = []) {
+  if (!items.length) {
+    return null;
+  }
+
+  const resumable = pickResumableConversation(items);
+  if (resumable) {
+    return resumable;
+  }
+
+  return [...items].sort(
+    (a, b) => new Date(b.last_updated) - new Date(a.last_updated),
+  )[0];
+}
+
 function appendResponseChunk(messages, text, streamingMessageId) {
   if (!text) {
     return messages;
@@ -151,7 +170,7 @@ export function applyStreamEvent(state, event) {
       break;
 
     case STREAM_EVENTS.PLAN_STEP_COMPLETED:
-      updates.shouldRefetchBootstrap = true;
+      updates.activityEvents = appendActivityEvent(state.activityEvents, event);
       break;
 
     case STREAM_EVENTS.KNOWLEDGE_PROPOSED:
@@ -173,11 +192,25 @@ export function applyStreamEvent(state, event) {
       updates.shouldRefetchBootstrap = true;
       break;
 
-    case STREAM_EVENTS.ERROR:
-      updates.error = data.message || "Copilot stream failed";
+    case STREAM_EVENTS.ERROR: {
+      const message = data.message || "Copilot stream failed";
+      updates.error = message;
       updates.isStreaming = false;
       updates.activityEvents = appendActivityEvent(state.activityEvents, event);
+      const next = [...state.messages];
+      const streamingIndex = state.streamingMessageId
+        ? next.findIndex((item) => item.id === state.streamingMessageId)
+        : -1;
+      if (streamingIndex >= 0) {
+        next[streamingIndex] = {
+          ...next[streamingIndex],
+          content: message,
+          streaming: false,
+        };
+        updates.messages = next;
+      }
       break;
+    }
 
     default:
       break;

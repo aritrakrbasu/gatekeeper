@@ -27,9 +27,19 @@ from peil.api.auth import require_jwt_user
 
 copilot_router = APIRouter(prefix="/api/copilot", tags=["copilot"])
 
+_copilot_service_instance: CopilotService | None = None
+
 
 def _copilot_service() -> CopilotService:
-    return CopilotService()
+    global _copilot_service_instance
+    if _copilot_service_instance is None:
+        _copilot_service_instance = CopilotService()
+    return _copilot_service_instance
+
+
+async def warm_copilot_tool_registry() -> None:
+    """Build the shared Copilot tool registry once after MCP is ready."""
+    await _copilot_service().warm_registry()
 
 
 @copilot_router.post(

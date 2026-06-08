@@ -206,6 +206,7 @@ async def build_default_registry(aril: Optional["ArilSession"] = None, exclude_p
     local_tools_to_register = [
         ("run_impact_analysis", tools.run_impact_analysis_schema, tools.run_impact_analysis),
         ("run_schema_inspection", tools.run_schema_inspection_schema, tools.run_schema_inspection),
+        ("run_gemini_mr_review", tools.run_gemini_mr_review_schema, tools.run_gemini_mr_review),
         ("post_gitlab_mr_comment", tools.post_gitlab_mr_comment_schema, tools.post_gitlab_mr_comment),
         ("get_dynatrace_incident_details", tools.get_dynatrace_incident_details_schema, tools.get_dynatrace_incident_details),
         ("apply_hotfix_patch", tools.apply_hotfix_patch_schema, tools.apply_hotfix_patch),

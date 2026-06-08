@@ -5,6 +5,7 @@ import json
 import asyncio
 import subprocess
 from pathlib import Path
+from typing import Optional
 import httpx
 
 # Gatekeeper Modules
@@ -283,6 +284,61 @@ async def _clone_repository_to_temp_workspace(
 # GitLab API Helper with User Token
 # ============================================================================
 
+async def resolve_repository_user_id(project_id: str) -> Optional[str]:
+    """
+    Resolve the Gatekeeper user who connected the repository.
+
+    Webhook payloads carry GitLab numeric user IDs, which do not match
+    Gatekeeper OAuth user IDs stored in MongoDB. For unattended webhook
+    processing we must use the connected repository owner.
+    """
+    try:
+        repo = await repository_service.get_repository(str(project_id))
+        owner_id = (repo or {}).get("user_id")
+        if owner_id:
+            return str(owner_id)
+    except Exception as exc:
+        print(f"[WARN] Failed to resolve repository owner for {project_id}: {exc}")
+    return None
+
+
+async def resolve_gitlab_token(
+    project_id: str,
+    user_id: Optional[str] = None,
+) -> tuple[Optional[str], Optional[str]]:
+    """
+    Resolve a GitLab token for API calls during webhook/agentic execution.
+
+    Resolution order:
+    1. Provided Gatekeeper user_id project token
+    2. Connected repository owner project token
+    3. Global GITLAB_PERSONAL_ACCESS_TOKEN
+    """
+    candidates: list[str] = []
+    if user_id and str(user_id).strip() not in {"", "unknown"}:
+        candidates.append(str(user_id))
+
+    owner_id = await resolve_repository_user_id(project_id)
+    if owner_id and owner_id not in candidates:
+        candidates.append(owner_id)
+
+    for candidate in candidates:
+        token = await user_service.get_user_gitlab_token(candidate, str(project_id))
+        if token:
+            return candidate, token
+
+    global_token = os.getenv("GITLAB_PERSONAL_ACCESS_TOKEN", "")
+    if global_token:
+        resolved_user = owner_id or (candidates[0] if candidates else None)
+        print(
+            f"[INFO] Using global GitLab token for project {project_id} "
+            f"(resolved user: {resolved_user or 'env-fallback'})"
+        )
+        return resolved_user, global_token
+
+    return None, None
+
+
 async def _gitlab_api_call(
     user_id: str,
     project_id: str,
@@ -315,10 +371,17 @@ async def _gitlab_api_call(
     Raises:
         Exception: If API call fails or user has no token
     """
-    # Get user's project-specific GitLab token
-    user_token = await user_service.get_user_gitlab_token(str(user_id), str(project_id))
+    resolved_user_id, user_token = await resolve_gitlab_token(
+        str(project_id),
+        str(user_id) if user_id is not None else None,
+    )
     if not user_token:
-        raise Exception(f"No GitLab token found for user {user_id}, project {project_id}")
+        raise Exception(
+            f"No GitLab token found for project {project_id} "
+            f"(candidates: user_id={user_id!r}, owner lookup attempted)"
+        )
+    if resolved_user_id and str(user_id).strip() in {"", "unknown"}:
+        user_id = resolved_user_id
 
     url = f"{gitlab_base_url}/api/v4{endpoint}"
 

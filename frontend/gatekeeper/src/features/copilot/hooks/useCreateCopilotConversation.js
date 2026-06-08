@@ -11,7 +11,6 @@ export function useCreateCopilotConversation() {
   return useMutation({
     mutationFn: (data) => copilotApi.createConversation(data),
     onSuccess: (_data, variables) => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.copilot.all });
       if (variables?.repository_id) {
         queryClient.invalidateQueries({
           queryKey: queryKeys.copilot.conversations({

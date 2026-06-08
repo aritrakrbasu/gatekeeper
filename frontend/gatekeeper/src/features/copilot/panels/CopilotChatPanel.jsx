@@ -10,10 +10,11 @@ export function CopilotChatPanel({
   isStreaming,
   isAwaitingApproval,
   isLoading,
+  isInputReady = false,
   onAsk,
   approvalSlot,
 }) {
-  const inputDisabled = isLoading || isStreaming || isAwaitingApproval;
+  const inputDisabled = !isInputReady;
 
   return (
     <div className="flex flex-col flex-1 min-h-0">

@@ -230,6 +230,26 @@ describe("useCopilotSession", () => {
     expect(result.current.messages.at(-1).streaming).toBe(false);
   });
 
+  it("enables input after conversation resolution even while bootstrap is loading", async () => {
+    useCopilotBootstrap.mockReturnValue({
+      data: null,
+      isLoading: true,
+    });
+
+    const { result } = renderHook(
+      () =>
+        useCopilotSession({
+          repositoryId: "repo-1",
+          conversationId: "conv-1",
+        }),
+      { wrapper: createWrapper(queryClient) },
+    );
+
+    await waitFor(() => expect(result.current.isInputReady).toBe(true));
+    expect(result.current.isLoading).toBe(false);
+    expect(result.current.isBootstrapping).toBe(true);
+  });
+
   it("refetches bootstrap on done", async () => {
     const fetchSpy = vi.spyOn(copilotApi, "getBootstrap").mockResolvedValue({
       conversation: { response_text: "Final answer" },

@@ -35,6 +35,8 @@ describe("CopilotWorkspace", () => {
       isAwaitingApproval: false,
       error: null,
       isLoading: false,
+      isBootstrapping: false,
+      isInputReady: true,
       ask: vi.fn(),
       resume: vi.fn(),
       clearError: vi.fn(),

@@ -246,6 +246,51 @@ async def bootstrap_resumed_execution(
         return None
 
 
+async def _resume_copilot_execution(
+    *,
+    conversation_id: str,
+    repository_id: str,
+    execution_id: str,
+    objective: str,
+    linked_execution_id: Optional[str],
+    subject_id: str,
+    execution_repo: ExecutionRepository,
+    event_repo: CaptureEventRepository,
+    subject_repo: SubjectRepository,
+    evidence_repo: EvidenceRepository,
+) -> ArilSession:
+    """Reopen ARIL capture for an existing Copilot conversation execution."""
+    bus = await ExecutionCaptureBus.open(
+        task_id=conversation_id,
+        repository_id=repository_id,
+        execution_id=execution_id,
+        event_repository=event_repo,
+    )
+
+    session = ArilSession(
+        execution_id=execution_id,
+        task_id=conversation_id,
+        subject_id=subject_id,
+        bus=bus,
+        execution_repo=execution_repo,
+        event_repo=event_repo,
+        subject_repo=subject_repo,
+        evidence_repo=evidence_repo,
+    )
+
+    update_fields: Dict[str, Any] = {}
+    if objective:
+        update_fields["objective"] = objective
+    if linked_execution_id is not None:
+        update_fields["context_snapshot.linked_execution_id"] = linked_execution_id
+    if update_fields:
+        await execution_repo.update_fields(execution_id, update_fields)
+
+    await subject_repo.register_execution(subject_id, execution_id)
+    await session.update_status(ExecutionStatus.CAPTURING)
+    return session
+
+
 async def bootstrap_copilot_execution(
     *,
     conversation_id: str,
@@ -256,11 +301,10 @@ async def bootstrap_copilot_execution(
     linked_execution_id: Optional[str] = None,
     db: Any = None,
 ) -> Optional[ArilSession]:
-    """Create ARIL capture session for a LangGraph Copilot conversation."""
+    """Create or resume ARIL capture session for a LangGraph Copilot conversation."""
     if not is_capture_enabled():
         return None
     try:
-        resolved_execution_id = execution_id or str(uuid.uuid4())
         subject_ref = SubjectRef(
             type=SubjectType.CONVERSATION,
             id=conversation_id,
@@ -280,6 +324,28 @@ async def bootstrap_copilot_execution(
                 display_name=objective[:120] or f"Copilot {conversation_id}",
             )
         )
+
+        existing = None
+        if execution_id:
+            existing = await execution_repo.get_by_execution_id(execution_id)
+        if existing is None:
+            existing = await execution_repo.get_by_task_id(conversation_id)
+
+        if existing is not None:
+            return await _resume_copilot_execution(
+                conversation_id=conversation_id,
+                repository_id=repository_id,
+                execution_id=existing.execution_id,
+                objective=objective,
+                linked_execution_id=linked_execution_id,
+                subject_id=subject_id,
+                execution_repo=execution_repo,
+                event_repo=event_repo,
+                subject_repo=subject_repo,
+                evidence_repo=evidence_repo,
+            )
+
+        resolved_execution_id = str(uuid.uuid4())
         snapshot: Dict[str, Any] = {
             "conversation_id": conversation_id,
             "user_id": user_id,

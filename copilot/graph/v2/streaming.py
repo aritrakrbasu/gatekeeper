@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, AsyncIterator, Dict, Optional
 
 from langgraph.errors import GraphInterrupt
@@ -44,6 +45,13 @@ class CopilotLangGraphRunner:
                 aril=aril,
             )
 
+    def attach_registry(self, registry: ToolRegistry) -> None:
+        if registry is self._registry:
+            return
+        self._registry = registry
+        self._compiled = None
+        self._checkpointer = None
+
     async def _ensure_aril(self, state: CopilotState) -> Optional[ArilSession]:
         if state.copilot_execution_id and self._aril is not None:
             return self._aril
@@ -51,6 +59,7 @@ class CopilotLangGraphRunner:
             conversation_id=state.conversation_id,
             user_id=state.user_id,
             repository_id=state.repository_id,
+            execution_id=state.copilot_execution_id,
             linked_execution_id=state.execution_id,
             objective=state.question,
             db=self._db,
@@ -69,6 +78,14 @@ class CopilotLangGraphRunner:
         persist_checkpoints: bool = True,
         fresh_thread: bool = True,
     ) -> AsyncIterator[Dict[str, Any]]:
+        import sys
+
+        sys.stderr.write(
+            f"[Copilot] run start conversation={state.conversation_id} "
+            f"execution={state.execution_id}\n"
+        )
+        sys.stderr.flush()
+
         aril = await self._ensure_aril(state)
         self._ensure_compiled(aril)
 
@@ -151,15 +168,59 @@ class CopilotLangGraphRunner:
                 if not isinstance(chunk, dict):
                     continue
                 for _node_name, update in chunk.items():
+                    import sys
+
+                    if isinstance(update, dict):
+                        sys.stderr.write(
+                            "[Copilot] node="
+                            f"{_node_name} "
+                            f"sse_events={len(update.get('sse_events', []))} "
+                            f"halted={bool(update.get('halted'))}\n"
+                        )
+                        sys.stderr.flush()
                     if not isinstance(update, dict):
                         continue
+                    saw_error = False
                     for event in update.get("sse_events", []):
                         yield event
+                        if (
+                            event.get("event")
+                            == StreamEventType.RESPONSE_CHUNK.value
+                        ):
+                            await asyncio.sleep(0)
                         if event.get("event") == StreamEventType.ERROR.value:
+                            saw_error = True
+                            message = event.get("data", {}).get(
+                                "message",
+                                "Copilot investigation failed",
+                            )
+                            yield {
+                                "event": StreamEventType.RESPONSE_CHUNK.value,
+                                "data": {"text": message},
+                            }
+                            yield {
+                                "event": StreamEventType.DONE.value,
+                                "data": {
+                                    "conversation_id": state.conversation_id,
+                                    "interrupted": False,
+                                    "error": True,
+                                },
+                            }
                             return
                     if "copilot" in update:
                         final_copilot = CopilotState.model_validate(update["copilot"])
                     if update.get("halted"):
+                        if not saw_error:
+                            yield {
+                                "event": StreamEventType.ERROR.value,
+                                "data": {
+                                    "message": (
+                                        final_copilot.errors[-1]
+                                        if final_copilot and final_copilot.errors
+                                        else "Copilot investigation halted unexpectedly"
+                                    ),
+                                },
+                            }
                         return
         except GraphInterrupt:
             interrupted = True
@@ -199,12 +260,6 @@ class CopilotLangGraphRunner:
 
         if final_copilot is None:
             final_copilot = await self._load_copilot_from_checkpoint(config, state)
-
-        for chunk in final_copilot.response_chunks:
-            yield {
-                "event": StreamEventType.RESPONSE_CHUNK.value,
-                "data": {"text": chunk},
-            }
 
         if final_copilot.proposed_assertion_ids:
             yield {

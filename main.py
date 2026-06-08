@@ -236,6 +236,22 @@ async def startup_event():
         )
     sys.stderr.flush()
 
+    try:
+        from copilot.api.router import warm_copilot_tool_registry
+
+        if mcp_service.gitlab_session is not None and mcp_service.mongo_session is not None:
+            await warm_copilot_tool_registry()
+            sys.stderr.write("[OK] Copilot tool registry pre-warmed\n")
+        else:
+            sys.stderr.write(
+                "[WARN] Copilot tool registry pre-warm skipped "
+                f"(gitlab_session={mcp_service.gitlab_session is not None}, "
+                f"mongo_session={mcp_service.mongo_session is not None})\n"
+            )
+    except Exception as exc:
+        sys.stderr.write(f"[WARN] Copilot tool registry pre-warm failed: {exc}\n")
+    sys.stderr.flush()
+
     # Launch background task to cleanup idle GitLab sessions
     asyncio.create_task(run_session_cleanup())
 

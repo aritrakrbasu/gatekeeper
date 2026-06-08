@@ -323,6 +323,148 @@ async def run_schema_inspection(
     }
 
 
+run_gemini_mr_review_schema = {
+    "name": "run_gemini_mr_review",
+    "description": (
+        "Run the full Gatekeeper Gemini security and quality review on an MR diff. "
+        "Uses GitNexus MCP tools for deep code intelligence — same pipeline as standard mode. "
+        "Returns audit_report (markdown), health_score, and issue summaries."
+    ),
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "project_id": {"type": "STRING", "description": "GitLab project ID"},
+            "mr_iid": {"type": "INTEGER", "description": "Merge request IID"},
+            "user_id": {"type": "STRING", "description": "Gatekeeper user ID for billing and Gemini config"},
+            "diff_text": {"type": "STRING", "description": "Raw MR diff text"},
+            "repo_path": {"type": "STRING", "description": "Local path to cloned repository"},
+            "repo_name": {"type": "STRING", "description": "Repository name for GitNexus"},
+            "source_branch": {"type": "STRING", "description": "Source branch name"},
+            "target_branch": {"type": "STRING", "description": "Target branch name"},
+            "impact_context": {"type": "STRING", "description": "Impact analysis markdown for Gemini prompt"},
+            "schema_context": {"type": "STRING", "description": "Schema inspection markdown for Gemini prompt"},
+        },
+        "required": ["project_id", "mr_iid", "diff_text", "repo_path"],
+    },
+}
+
+
+async def run_gemini_mr_review(
+    project_id: str,
+    mr_iid: int,
+    diff_text: str,
+    repo_path: str,
+    user_id: str = "",
+    repo_name: str = "",
+    source_branch: str = "main",
+    target_branch: str = "main",
+    impact_context: str = "",
+    schema_context: str = "",
+) -> Dict[str, Any]:
+    """
+    Execute the same Gemini + GitNexus review pipeline used by review_service.orchestrate_review.
+    """
+    from pathlib import Path
+    from services.gemini_service import run_gemini_review_with_gitnexus
+
+    resolved_user_id, _ = await review_service.resolve_gitlab_token(
+        str(project_id),
+        user_id or None,
+    )
+    gatekeeper_user_id = resolved_user_id or user_id or ""
+    user_config = await review_service.get_user_config_from_repo(str(project_id))
+
+    combined_diff = diff_text or ""
+    if impact_context:
+        combined_diff += f"\n\n{impact_context}"
+    if schema_context:
+        combined_diff += f"\n\n{schema_context}"
+
+    local_repo = Path(repo_path) if repo_path else None
+    if local_repo is None or not local_repo.exists():
+        return {
+            "status": "error",
+            "message": f"Repository path not found for Gemini review: {repo_path}",
+        }
+
+    try:
+        gemini_result = await run_gemini_review_with_gitnexus(
+            raw_diff_content=combined_diff,
+            impact_context=impact_context or "",
+            repo_path=local_repo,
+            repo_name=repo_name or None,
+            target_branch_name=target_branch,
+            source_branch_name=source_branch,
+            user_config=user_config,
+            user_id=gatekeeper_user_id or None,
+            mr_id=str(mr_iid),
+            repository_id=str(project_id),
+        )
+    except Exception as exc:
+        return {
+            "status": "error",
+            "message": f"Gemini MR review failed: {exc}",
+        }
+
+    audit_report = gemini_result.get("review_text", "") or ""
+    if not audit_report.strip():
+        return {
+            "status": "error",
+            "message": "Gemini MR review returned an empty report",
+        }
+
+    issues: list[str] = []
+    for line in audit_report.splitlines():
+        stripped = line.strip()
+        if any(
+            marker in stripped
+            for marker in ("❌", "⚠️", "🔴", "🟠", "**ERROR**", "**WARNING**", "**Issue**")
+        ):
+            clean = stripped
+            for marker in ("❌", "⚠️", "🔴", "🟠", "**", "*", "`"):
+                clean = clean.replace(marker, "").strip()
+            if clean and len(clean) > 5:
+                issues.append(clean[:200])
+
+    error_count = sum(1 for issue in issues if any(k in issue.lower() for k in ("error", "critical", "high")))
+    warning_count = max(0, len(issues) - error_count)
+    health_score = max(0, min(100, 100 - error_count * 20 - warning_count * 5))
+
+    try:
+        await repository_service.update_mr_analysis(
+            repo_id=str(project_id),
+            mr_iid=int(mr_iid),
+            analysis_data={
+                "analysis_status": "completed",
+                "status": "reviewed",
+                "ai_review": audit_report,
+                "ai_issues": issues[:20],
+                "health_score": health_score,
+                "span_id": gemini_result.get("span_id"),
+                "trace_id": gemini_result.get("trace_id"),
+            },
+        )
+        await repository_service.add_mr_progress_log(
+            repo_id=str(project_id),
+            mr_iid=int(mr_iid),
+            step="ai_analysis",
+            message=f"AI analysis complete - {len(audit_report)} characters of findings generated",
+            status="completed",
+        )
+    except Exception as persist_exc:
+        print(f"[WARN] [run_gemini_mr_review] Failed to persist MR analysis: {persist_exc}")
+
+    return {
+        "status": "success",
+        "audit_report": audit_report,
+        "health_score": health_score,
+        "issue_count": len(issues),
+        "issues": issues[:20],
+        "tools_called": gemini_result.get("tools_called", []),
+        "usage": gemini_result.get("usage", {}),
+    }
+
+
 async def get_gitlab_mr_diffs(user_id: str, project_id: str, mr_iid: int) -> str:
     """Gets the raw diff content of the specified GitLab MR."""
     diff_str = await review_service._gitlab_get_mr_diffs(
@@ -963,14 +1105,18 @@ post_loading_indicator_schema = {
         "properties": {
             "project_id": {"type": "STRING", "description": "GitLab project ID"},
             "mr_iid": {"type": "INTEGER", "description": "Merge request IID"},
-            "user_id": {"type": "STRING", "description": "User ID for GitLab authentication"}
+            "user_id": {"type": "STRING", "description": "Gatekeeper user ID for GitLab authentication"},
         },
         "required": ["project_id", "mr_iid", "user_id"]
     }
 }
 
 
-async def post_loading_indicator(project_id: str, mr_iid: int, user_id: str) -> Dict[str, Any]:
+async def post_loading_indicator(
+    project_id: str,
+    mr_iid: int,
+    user_id: str = "",
+) -> Dict[str, Any]:
     """
     Post a loading indicator comment to a GitLab MR.
 
@@ -988,9 +1134,12 @@ async def post_loading_indicator(project_id: str, mr_iid: int, user_id: str) -> 
     )
 
     try:
-        # Use the post_gitlab_mr_comment function
+        resolved_user_id, _ = await review_service.resolve_gitlab_token(
+            str(project_id),
+            user_id or None,
+        )
         result = await post_gitlab_mr_comment(
-            user_id=user_id,
+            user_id=resolved_user_id or user_id or "",
             project_id=str(project_id),
             mr_iid=mr_iid,
             comment=loading_message
@@ -1019,7 +1168,7 @@ update_review_comment_schema = {
             "mr_iid": {"type": "INTEGER", "description": "Merge request IID"},
             "comment_id": {"type": "INTEGER", "description": "ID of comment to update"},
             "audit_report": {"type": "STRING", "description": "Full audit report in markdown format"},
-            "user_id": {"type": "STRING", "description": "User ID for GitLab authentication"}
+            "user_id": {"type": "STRING", "description": "Gatekeeper user ID for GitLab authentication"},
         },
         "required": ["project_id", "mr_iid", "comment_id", "audit_report", "user_id"]
     }
@@ -1031,7 +1180,7 @@ async def update_review_comment(
     mr_iid: int,
     comment_id: int,
     audit_report: str,
-    user_id: str
+    user_id: str = "",
 ) -> Dict[str, Any]:
     """
     Update an existing MR comment with the full audit report.
@@ -1046,8 +1195,12 @@ async def update_review_comment(
     report_with_timestamp = f"{audit_report}\n\n---\n\n*Last updated: {timestamp}*"
 
     try:
+        resolved_user_id, _ = await review_service.resolve_gitlab_token(
+            str(project_id),
+            user_id or None,
+        )
         result = await post_gitlab_mr_comment(
-            user_id=user_id,
+            user_id=resolved_user_id or user_id or "",
             project_id=str(project_id),
             mr_iid=mr_iid,
             comment=report_with_timestamp,
@@ -1077,7 +1230,7 @@ update_commit_status_schema = {
             "commit_sha": {"type": "STRING", "description": "Commit SHA to update status for"},
             "status": {"type": "STRING", "description": "Status value", "enum": ["success", "failed", "running"]},
             "description": {"type": "STRING", "description": "Description text for the status"},
-            "user_id": {"type": "STRING", "description": "User ID for GitLab authentication"}
+            "user_id": {"type": "STRING", "description": "Gatekeeper user ID for GitLab authentication"},
         },
         "required": ["project_id", "commit_sha", "status", "user_id"]
     }
@@ -1089,7 +1242,7 @@ async def update_commit_status(
     commit_sha: str,
     status: str,
     description: str = "Security audit completed",
-    user_id: str = ""
+    user_id: str = "",
 ) -> Dict[str, Any]:
     """
     Update the commit status badge for a GitLab MR.
@@ -1107,9 +1260,12 @@ async def update_commit_status(
     gitlab_status = status_map.get(status, "failed")
 
     try:
-        # Use GitLab REST API to update commit status
+        resolved_user_id, _ = await review_service.resolve_gitlab_token(
+            str(project_id),
+            user_id or None,
+        )
         result = await _gitlab_rest_api_call(
-            user_id=user_id,
+            user_id=resolved_user_id or user_id or "",
             project_id=str(project_id),
             method="POST",
             endpoint=f"/projects/{project_id}/statuses/{commit_sha}",
@@ -1193,32 +1349,14 @@ async def track_progress(
 # ============================================================================
 
 async def _get_gitlab_token_for_user(user_id: str, project_id: str) -> str:
-    """
-    Get GitLab token for a user and project.
-    Priority:
-    1. User's project-specific token (from user_service)
-    2. Global GITLAB_PERSONAL_ACCESS_TOKEN
-
-    Args:
-        user_id: User ID
-        project_id: Project ID
-
-    Returns:
-        GitLab access token or empty string if not found
-    """
-    # Try project-specific token first
-    project_token = await user_service.get_user_gitlab_token(str(user_id), str(project_id))
-    if project_token:
-        return project_token
-
-    # Fallback to global token
-    global_token = os.getenv("GITLAB_PERSONAL_ACCESS_TOKEN", "")
-    if global_token:
-        print(f"[INFO] Using global GitLab token for user {user_id}, project {project_id}")
-        return global_token
-
-    print(f"[WARN] No GitLab token found for user {user_id}, project {project_id}")
-    return ""
+    """Resolve GitLab token via shared review_service resolver."""
+    _, token = await review_service.resolve_gitlab_token(
+        str(project_id),
+        str(user_id) if user_id else None,
+    )
+    if not token:
+        print(f"[WARN] No GitLab token found for user {user_id}, project {project_id}")
+    return token or ""
 
 
 async def _gitlab_rest_api_call(

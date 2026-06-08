@@ -8,7 +8,14 @@ from copilot.models.state import CopilotState, CounterEvidenceItem
 async def evidence_retrieval_node(state: CopilotState) -> dict:
     bundle = state.replay_bundle
     if bundle is None:
-        raise ValueError("Replay bundle required before evidence retrieval")
+        state.evidence_excerpts = []
+        state.counter_evidence = []
+        return {
+            "skipped": True,
+            "reason": "no_replay_bundle",
+            "evidence_count": 0,
+            "counter_evidence_count": 0,
+        }
 
     excerpts: list[dict] = []
     for item in bundle.evidence_references:

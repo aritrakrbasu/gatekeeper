@@ -5,8 +5,12 @@ import { queryKeys } from "../../../services/queryClient";
 import {
   applyStreamEvent,
   hydrateMessagesFromBootstrap,
-  pickResumableConversation,
+  pickConversationForSession,
 } from "../utils/applyStreamEvent";
+import {
+  clearConversationResolution,
+  resolveConversationOnce,
+} from "../utils/conversationResolution";
 import { useCopilotBootstrap } from "./useCopilotBootstrap";
 import { useCopilotConversations } from "./useCopilotConversations";
 import { useCreateCopilotConversation } from "./useCreateCopilotConversation";
@@ -42,11 +46,14 @@ export function useCopilotSession({
   );
 
   const streamingMessageIdRef = useRef(null);
+  const streamErrorRef = useRef(false);
   const messagesHydratedRef = useRef(false);
   const isStreamingRef = useRef(false);
-  const resolvingRef = useRef(false);
-  const autoReconnectAttemptedRef = useRef(false);
+  const createConversationRef = useRef(createMutation.mutateAsync);
   const previousConversationIdRef = useRef(resolvedConversationId);
+  const sessionContextRef = useRef(
+    `${repositoryId ?? ""}:${mrIid ?? ""}:${conversationIdInput ?? ""}`,
+  );
   const sessionStateRef = useRef({
     messages: [],
     activityEvents: [],
@@ -80,8 +87,36 @@ export function useCopilotSession({
 
   const bootstrapQuery = useCopilotBootstrap(resolvedConversationId, {
     enabled: enabled && !!resolvedConversationId,
-    staleTime: 0,
+    staleTime: 30 * 1000,
   });
+
+  useEffect(() => {
+    createConversationRef.current = createMutation.mutateAsync;
+  }, [createMutation.mutateAsync]);
+
+  useEffect(() => {
+    const nextContext = `${repositoryId ?? ""}:${mrIid ?? ""}:${conversationIdInput ?? ""}`;
+    if (sessionContextRef.current === nextContext) {
+      return;
+    }
+
+    sessionContextRef.current = nextContext;
+    previousConversationIdRef.current = null;
+    messagesHydratedRef.current = false;
+    streamingMessageIdRef.current = null;
+
+    setResolvedConversationId(conversationIdInput ?? null);
+    setMessages([]);
+    setActivityEvents([]);
+    setCurrentPlan(null);
+    setPendingApproval(null);
+    setKnowledgeManifest({});
+    setStatus(null);
+    setIsStreaming(false);
+    setIsAwaitingApproval(false);
+    setError(null);
+    setResolutionStatus(conversationIdInput ? "ready" : "idle");
+  }, [repositoryId, mrIid, conversationIdInput]);
 
   const refetchBootstrap = useCallback(async () => {
     if (!resolvedConversationId) {
@@ -119,58 +154,55 @@ export function useCopilotSession({
     }
 
     let cancelled = false;
+    setResolutionStatus("resolving");
+    setError(null);
 
-    async function resolveConversation() {
-      if (resolvingRef.current) {
-        return;
+    resolveConversationOnce(repositoryId, mrIid, async () => {
+      let executionId;
+      try {
+        const execution = await copilotApi.getMrExecution(repositoryId, mrIid);
+        executionId = execution?.execution_id;
+      } catch {
+        executionId = undefined;
       }
 
-      resolvingRef.current = true;
-      setResolutionStatus("resolving");
-      setError(null);
+      const listFilters = {
+        repository_id: repositoryId,
+        ...(executionId ? { execution_id: executionId } : {}),
+      };
 
-      try {
-        const listData = await queryClient.fetchQuery({
-          queryKey: queryKeys.copilot.conversations({
-            repository_id: repositoryId,
-          }),
-          queryFn: () =>
-            copilotApi.getConversations({ repository_id: repositoryId }),
-        });
+      const listData = await queryClient.fetchQuery({
+        queryKey: queryKeys.copilot.conversations(listFilters),
+        queryFn: () => copilotApi.getConversations(listFilters),
+      });
 
-        const existing = pickResumableConversation(listData?.items);
-        if (existing) {
-          if (!cancelled) {
-            setResolvedConversationId(existing.conversation_id);
-            setResolutionStatus("ready");
-          }
-          return;
-        }
+      const existing = pickConversationForSession(listData?.items);
+      if (existing?.conversation_id) {
+        return existing.conversation_id;
+      }
 
-        const created = await createMutation.mutateAsync({
-          repository_id: repositoryId,
-          mr_iid: mrIid,
-        });
+      const created = await createConversationRef.current({
+        repository_id: repositoryId,
+        mr_iid: mrIid,
+      });
 
+      return created.conversation_id;
+    })
+      .then((conversationId) => {
         if (!cancelled) {
-          setResolvedConversationId(created.conversation_id);
+          setResolvedConversationId(conversationId);
           setResolutionStatus("ready");
         }
-      } catch (resolveError) {
+      })
+      .catch((resolveError) => {
         if (!cancelled) {
           setError(resolveError.message || "Failed to resolve conversation");
           setResolutionStatus("error");
         }
-      } finally {
-        resolvingRef.current = false;
-      }
-    }
-
-    resolveConversation();
+      });
 
     return () => {
       cancelled = true;
-      resolvingRef.current = false;
     };
   }, [
     enabled,
@@ -179,8 +211,13 @@ export function useCopilotSession({
     conversationIdInput,
     resolvedConversationId,
     queryClient,
-    createMutation,
   ]);
+
+  useEffect(() => {
+    if (!enabled && repositoryId && mrIid) {
+      clearConversationResolution(repositoryId, mrIid);
+    }
+  }, [enabled, repositoryId, mrIid]);
 
   useEffect(() => {
     const bootstrap = bootstrapQuery.data;
@@ -215,7 +252,6 @@ export function useCopilotSession({
 
     previousConversationIdRef.current = resolvedConversationId;
     messagesHydratedRef.current = false;
-    autoReconnectAttemptedRef.current = false;
     setMessages([]);
     setActivityEvents([]);
     setCurrentPlan(null);
@@ -250,6 +286,7 @@ export function useCopilotSession({
         setIsStreaming(updates.isStreaming);
       }
       if (updates.error !== undefined) {
+        streamErrorRef.current = true;
         setError(updates.error);
       }
       if (updates.knowledgeManifest) {
@@ -284,13 +321,27 @@ export function useCopilotSession({
   const handleStreamDone = useCallback(() => {
     setIsStreaming(false);
     const streamingId = streamingMessageIdRef.current;
+    const hadError = streamErrorRef.current;
+    streamErrorRef.current = false;
+
     if (streamingId) {
       setMessages((prev) =>
-        prev.map((message) =>
-          message.id === streamingId
-            ? { ...message, streaming: false }
-            : message,
-        ),
+        prev.map((message) => {
+          if (message.id !== streamingId) {
+            return message;
+          }
+
+          const content = message.content?.trim();
+          return {
+            ...message,
+            streaming: false,
+            content: content
+              ? message.content
+              : hadError
+                ? message.content
+                : "The response stream ended before an answer arrived. Try sending your question again.",
+          };
+        }),
       );
       streamingMessageIdRef.current = null;
     }
@@ -318,6 +369,7 @@ export function useCopilotSession({
       }
 
       setError(null);
+      streamErrorRef.current = false;
 
       const userMessage = {
         id: `user-${Date.now()}`,
@@ -332,11 +384,17 @@ export function useCopilotSession({
       };
 
       streamingMessageIdRef.current = assistantMessage.id;
-      setMessages((prev) => [...prev, userMessage, assistantMessage]);
+      const nextMessages = [...messages, userMessage, assistantMessage];
+      sessionStateRef.current = {
+        ...sessionStateRef.current,
+        messages: nextMessages,
+        streamingMessageId: assistantMessage.id,
+      };
+      setMessages(nextMessages);
       setIsStreaming(true);
       connectAsk({ question: trimmed });
     },
-    [resolvedConversationId, isStreaming, connectAsk],
+    [resolvedConversationId, isStreaming, connectAsk, messages],
   );
 
   const resume = useCallback(
@@ -357,51 +415,6 @@ export function useCopilotSession({
     [resolvedConversationId, isStreaming, connectResume],
   );
 
-  useEffect(() => {
-    const bootstrap = bootstrapQuery.data;
-    if (
-      !enabled ||
-      !resolvedConversationId ||
-      !bootstrap ||
-      autoReconnectAttemptedRef.current ||
-      isStreamingRef.current
-    ) {
-      return;
-    }
-
-    const shouldReconnect = bootstrap.state?.status === "running";
-
-    if (!shouldReconnect) {
-      return;
-    }
-
-    autoReconnectAttemptedRef.current = true;
-    setIsStreaming(true);
-
-    if (!streamingMessageIdRef.current) {
-      const assistantMessage = {
-        id: `assistant-reconnect-${Date.now()}`,
-        role: "assistant",
-        content: bootstrap.conversation?.response_text ?? "",
-        streaming: true,
-      };
-      streamingMessageIdRef.current = assistantMessage.id;
-      setMessages((prev) => {
-        if (prev.some((message) => message.id === assistantMessage.id)) {
-          return prev;
-        }
-        return [...prev, assistantMessage];
-      });
-    }
-
-    reconnect();
-  }, [
-    enabled,
-    resolvedConversationId,
-    bootstrapQuery.data,
-    reconnect,
-  ]);
-
   const clearError = useCallback(() => setError(null), []);
 
   return {
@@ -416,9 +429,16 @@ export function useCopilotSession({
     isAwaitingApproval,
     error,
     resolutionStatus,
-    isLoading:
-      resolutionStatus === "resolving" ||
-      (Boolean(resolvedConversationId) && bootstrapQuery.isLoading),
+    isLoading: resolutionStatus === "resolving",
+    isBootstrapping:
+      Boolean(resolvedConversationId) &&
+      bootstrapQuery.isLoading &&
+      !bootstrapQuery.data,
+    isInputReady:
+      resolutionStatus === "ready" &&
+      Boolean(resolvedConversationId) &&
+      !isStreaming &&
+      !isAwaitingApproval,
     connectionStatus: sse.connectionStatus,
     lastEventId: sse.lastEventId,
     ask,

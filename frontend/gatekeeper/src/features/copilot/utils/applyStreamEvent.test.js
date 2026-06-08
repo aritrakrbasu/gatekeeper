@@ -3,6 +3,7 @@ import { STREAM_EVENTS } from "../constants/streamEvents";
 import {
   applyStreamEvent,
   hydrateMessagesFromBootstrap,
+  pickConversationForSession,
   pickResumableConversation,
 } from "./applyStreamEvent";
 
@@ -28,6 +29,42 @@ describe("hydrateMessagesFromBootstrap", () => {
       { id: "bootstrap-user", role: "user", content: "Why?" },
       { id: "bootstrap-assistant", role: "assistant", content: "Because." },
     ]);
+  });
+});
+
+describe("pickConversationForSession", () => {
+  it("prefers active conversations over completed ones", () => {
+    const picked = pickConversationForSession([
+      {
+        conversation_id: "done",
+        status: "completed",
+        last_updated: "2026-06-06T13:00:00Z",
+      },
+      {
+        conversation_id: "running",
+        status: "running",
+        last_updated: "2026-06-06T10:00:00Z",
+      },
+    ]);
+
+    expect(picked.conversation_id).toBe("running");
+  });
+
+  it("falls back to the newest conversation when none are active", () => {
+    const picked = pickConversationForSession([
+      {
+        conversation_id: "older",
+        status: "completed",
+        last_updated: "2026-06-06T10:00:00Z",
+      },
+      {
+        conversation_id: "newer",
+        status: "completed",
+        last_updated: "2026-06-06T12:00:00Z",
+      },
+    ]);
+
+    expect(picked.conversation_id).toBe("newer");
   });
 });
 
@@ -91,13 +128,14 @@ describe("applyStreamEvent", () => {
     expect(updates.isStreaming).toBe(false);
   });
 
-  it("flags bootstrap refresh on plan_step_completed", () => {
+  it("records plan step completion in activityEvents", () => {
     const updates = applyStreamEvent(baseState, {
       event: STREAM_EVENTS.PLAN_STEP_COMPLETED,
       data: { step_id: "s1" },
     });
 
-    expect(updates.shouldRefetchBootstrap).toBe(true);
+    expect(updates.activityEvents).toHaveLength(1);
+    expect(updates.shouldRefetchBootstrap).toBeUndefined();
   });
 
   it("tracks knowledge proposals", () => {
@@ -129,5 +167,7 @@ describe("applyStreamEvent", () => {
 
     expect(updates.error).toBe("node failed");
     expect(updates.isStreaming).toBe(false);
+    expect(updates.messages[0].content).toBe("node failed");
+    expect(updates.messages[0].streaming).toBe(false);
   });
 });
