@@ -14,8 +14,9 @@ const sseMocks = {
 };
 
 vi.mock("./useCopilotSSE", () => ({
-  useCopilotSSE: vi.fn(({ onEvent }) => {
+  useCopilotSSE: vi.fn(({ onEvent, onStreamDone }) => {
     sseMocks.onEvent = onEvent;
+    sseMocks.onStreamDone = onStreamDone;
     return sseMocks;
   }),
 }));
@@ -110,6 +111,7 @@ describe("useCopilotSession", () => {
       .fn()
       .mockResolvedValue({ conversation_id: "conv-created" });
     useCreateCopilotConversation.mockReturnValue({ mutateAsync });
+    vi.spyOn(copilotApi, "getConversations").mockResolvedValue({ items: [] });
 
     const { result } = renderHook(
       () =>
@@ -134,7 +136,7 @@ describe("useCopilotSession", () => {
     useCopilotBootstrap.mockReturnValue({
       data: {
         conversation: {},
-        state: { status: "running" },
+        state: { status: "completed" },
         knowledge_manifest: {},
       },
       isLoading: false,
@@ -193,6 +195,39 @@ describe("useCopilotSession", () => {
     expect(result.current.pendingApproval).toEqual(approval);
     expect(result.current.isAwaitingApproval).toBe(true);
     expect(result.current.isStreaming).toBe(false);
+  });
+
+  it("clears streaming state when the SSE connection closes without done", async () => {
+    useCopilotBootstrap.mockReturnValue({
+      data: {
+        conversation: {},
+        state: { status: "completed" },
+        knowledge_manifest: {},
+      },
+      isLoading: false,
+    });
+
+    const { result } = renderHook(
+      () =>
+        useCopilotSession({
+          repositoryId: "repo-1",
+          conversationId: "conv-1",
+        }),
+      { wrapper: createWrapper(queryClient) },
+    );
+
+    act(() => {
+      result.current.ask("Question");
+    });
+
+    expect(result.current.isStreaming).toBe(true);
+
+    await act(async () => {
+      sseMocks.onStreamDone?.();
+    });
+
+    expect(result.current.isStreaming).toBe(false);
+    expect(result.current.messages.at(-1).streaming).toBe(false);
   });
 
   it("refetches bootstrap on done", async () => {

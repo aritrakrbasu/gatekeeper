@@ -70,7 +70,7 @@ export function useCopilotSSE({
   }, []);
 
   const startStream = useCallback(
-    (starter) => {
+    (starter, { resumeFromLastEvent = false } = {}) => {
       if (!conversationId || !enabled) {
         return null;
       }
@@ -80,7 +80,7 @@ export function useCopilotSSE({
 
       const handle = starter({
         conversationId,
-        lastEventId: lastEventIdRef.current,
+        lastEventId: resumeFromLastEvent ? lastEventIdRef.current : null,
         onEvent: trackEvent,
         onError: (error) => {
           streamHandleRef.current = null;
@@ -101,23 +101,30 @@ export function useCopilotSSE({
   );
 
   const connectAsk = useCallback(
-    (body) => startStream((options) => streamAsk({ ...options, body })),
+    (body, options) =>
+      startStream((streamOptions) => streamAsk({ ...streamOptions, body }), options),
     [startStream],
   );
 
   const connectResume = useCallback(
-    (body) => startStream((options) => streamResume({ ...options, body })),
+    (body, options) =>
+      startStream(
+        (streamOptions) => streamResume({ ...streamOptions, body }),
+        options,
+      ),
     [startStream],
   );
 
   const reconnect = useCallback(
     () =>
-      startStream((options) =>
-        reconnectStream({
-          ...options,
-          threadId: conversationId,
-          lastEventId: lastEventIdRef.current,
-        }),
+      startStream(
+        (options) =>
+          reconnectStream({
+            ...options,
+            threadId: conversationId,
+            lastEventId: lastEventIdRef.current,
+          }),
+        { resumeFromLastEvent: true },
       ),
     [startStream, conversationId],
   );

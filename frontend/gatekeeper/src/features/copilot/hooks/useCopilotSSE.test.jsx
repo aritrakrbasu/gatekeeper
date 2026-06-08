@@ -99,6 +99,56 @@ describe("useCopilotSSE", () => {
     expect(result.current.connectionStatus).toBe(CONNECTION_STATUS.IDLE);
   });
 
+  it("does not send Last-Event-ID for fresh ask requests", () => {
+    streamAsk.mockImplementation(mockStream());
+
+    const { result } = renderHook(() =>
+      useCopilotSSE({
+        conversationId: "conv-1",
+        enabled: true,
+      }),
+    );
+
+    act(() => {
+      result.current.connectAsk({ question: "New question" });
+    });
+
+    expect(streamAsk).toHaveBeenCalledWith(
+      expect.objectContaining({
+        lastEventId: null,
+        body: { question: "New question" },
+      }),
+    );
+  });
+
+  it("sends Last-Event-ID when reconnecting", () => {
+    streamAsk.mockImplementation(
+      mockStream({ id: "5", event: "done", data: {} }),
+    );
+    reconnectStream.mockImplementation(mockStream());
+
+    const { result } = renderHook(() =>
+      useCopilotSSE({
+        conversationId: "conv-1",
+        enabled: true,
+      }),
+    );
+
+    act(() => {
+      result.current.connectAsk({ question: "First" });
+    });
+
+    act(() => {
+      result.current.reconnect();
+    });
+
+    expect(reconnectStream).toHaveBeenCalledWith(
+      expect.objectContaining({
+        lastEventId: 5,
+      }),
+    );
+  });
+
   it("exposes connectResume and reconnect helpers", () => {
     streamResume.mockImplementation(mockStream());
     reconnectStream.mockImplementation(mockStream());

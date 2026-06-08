@@ -44,6 +44,8 @@ export function useCopilotSession({
   const streamingMessageIdRef = useRef(null);
   const messagesHydratedRef = useRef(false);
   const isStreamingRef = useRef(false);
+  const resolvingRef = useRef(false);
+  const autoReconnectAttemptedRef = useRef(false);
   const previousConversationIdRef = useRef(resolvedConversationId);
   const sessionStateRef = useRef({
     messages: [],
@@ -119,19 +121,22 @@ export function useCopilotSession({
     let cancelled = false;
 
     async function resolveConversation() {
+      if (resolvingRef.current) {
+        return;
+      }
+
+      resolvingRef.current = true;
       setResolutionStatus("resolving");
       setError(null);
 
       try {
-        const listData =
-          conversationsQuery.data ??
-          (await queryClient.fetchQuery({
-            queryKey: queryKeys.copilot.conversations({
-              repository_id: repositoryId,
-            }),
-            queryFn: () =>
-              copilotApi.getConversations({ repository_id: repositoryId }),
-          }));
+        const listData = await queryClient.fetchQuery({
+          queryKey: queryKeys.copilot.conversations({
+            repository_id: repositoryId,
+          }),
+          queryFn: () =>
+            copilotApi.getConversations({ repository_id: repositoryId }),
+        });
 
         const existing = pickResumableConversation(listData?.items);
         if (existing) {
@@ -156,6 +161,8 @@ export function useCopilotSession({
           setError(resolveError.message || "Failed to resolve conversation");
           setResolutionStatus("error");
         }
+      } finally {
+        resolvingRef.current = false;
       }
     }
 
@@ -163,6 +170,7 @@ export function useCopilotSession({
 
     return () => {
       cancelled = true;
+      resolvingRef.current = false;
     };
   }, [
     enabled,
@@ -170,7 +178,6 @@ export function useCopilotSession({
     mrIid,
     conversationIdInput,
     resolvedConversationId,
-    conversationsQuery.data,
     queryClient,
     createMutation,
   ]);
@@ -208,6 +215,7 @@ export function useCopilotSession({
 
     previousConversationIdRef.current = resolvedConversationId;
     messagesHydratedRef.current = false;
+    autoReconnectAttemptedRef.current = false;
     setMessages([]);
     setActivityEvents([]);
     setCurrentPlan(null);
@@ -273,6 +281,21 @@ export function useCopilotSession({
     [refetchBootstrap],
   );
 
+  const handleStreamDone = useCallback(() => {
+    setIsStreaming(false);
+    const streamingId = streamingMessageIdRef.current;
+    if (streamingId) {
+      setMessages((prev) =>
+        prev.map((message) =>
+          message.id === streamingId
+            ? { ...message, streaming: false }
+            : message,
+        ),
+      );
+      streamingMessageIdRef.current = null;
+    }
+  }, []);
+
   const sse = useCopilotSSE({
     conversationId: resolvedConversationId,
     enabled: enabled && !!resolvedConversationId,
@@ -280,8 +303,12 @@ export function useCopilotSession({
     onError: (streamError) => {
       setError(streamError.message || "Copilot stream failed");
       setIsStreaming(false);
+      streamingMessageIdRef.current = null;
     },
+    onStreamDone: handleStreamDone,
   });
+
+  const { connectAsk, connectResume, reconnect } = sse;
 
   const ask = useCallback(
     (question) => {
@@ -307,9 +334,9 @@ export function useCopilotSession({
       streamingMessageIdRef.current = assistantMessage.id;
       setMessages((prev) => [...prev, userMessage, assistantMessage]);
       setIsStreaming(true);
-      sse.connectAsk({ question: trimmed });
+      connectAsk({ question: trimmed });
     },
-    [resolvedConversationId, isStreaming, sse],
+    [resolvedConversationId, isStreaming, connectAsk],
   );
 
   const resume = useCallback(
@@ -321,14 +348,59 @@ export function useCopilotSession({
       setError(null);
       setIsAwaitingApproval(false);
       setIsStreaming(true);
-      sse.connectResume({
+      connectResume({
         decision,
         modified_tool_args: modifiedArgs,
         admin_confirmed: false,
       });
     },
-    [resolvedConversationId, isStreaming, sse],
+    [resolvedConversationId, isStreaming, connectResume],
   );
+
+  useEffect(() => {
+    const bootstrap = bootstrapQuery.data;
+    if (
+      !enabled ||
+      !resolvedConversationId ||
+      !bootstrap ||
+      autoReconnectAttemptedRef.current ||
+      isStreamingRef.current
+    ) {
+      return;
+    }
+
+    const shouldReconnect = bootstrap.state?.status === "running";
+
+    if (!shouldReconnect) {
+      return;
+    }
+
+    autoReconnectAttemptedRef.current = true;
+    setIsStreaming(true);
+
+    if (!streamingMessageIdRef.current) {
+      const assistantMessage = {
+        id: `assistant-reconnect-${Date.now()}`,
+        role: "assistant",
+        content: bootstrap.conversation?.response_text ?? "",
+        streaming: true,
+      };
+      streamingMessageIdRef.current = assistantMessage.id;
+      setMessages((prev) => {
+        if (prev.some((message) => message.id === assistantMessage.id)) {
+          return prev;
+        }
+        return [...prev, assistantMessage];
+      });
+    }
+
+    reconnect();
+  }, [
+    enabled,
+    resolvedConversationId,
+    bootstrapQuery.data,
+    reconnect,
+  ]);
 
   const clearError = useCallback(() => setError(null), []);
 
@@ -353,7 +425,7 @@ export function useCopilotSession({
     resume,
     clearError,
     refetchBootstrap,
-    reconnect: sse.reconnect,
+    reconnect,
     disconnect: sse.disconnect,
   };
 }

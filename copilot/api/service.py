@@ -10,7 +10,13 @@ from fastapi import HTTPException
 
 from copilot.api.state_service import build_conversation_state
 from copilot.approval.store import CopilotApprovalStore
-from copilot.config import is_langgraph_enabled, is_v1_fallback_enabled
+from copilot.config import (
+    is_langgraph_enabled,
+    is_v1_fallback_enabled,
+    reconnect_max_poll_seconds,
+    reconnect_poll_interval_seconds,
+    stale_stream_timeout_seconds,
+)
 from copilot.graph.runner import CopilotGraphRunner
 from copilot.graph.v2.streaming import CopilotLangGraphRunner
 from copilot.models.api_models import (
@@ -295,7 +301,12 @@ class CopilotService:
                 conversation_id, last_event_id=last_event_id
             ):
                 yield replay
-            if not doc.get("stream_active"):
+            doc = await self._get_checkpoint_doc(conversation_id) or doc
+            if doc.get("stream_active"):
+                async for live in self._poll_live_sse_events(
+                    conversation_id, last_event_id=last_event_id
+                ):
+                    yield live
                 return
 
         state = CopilotState.model_validate(doc["state"])
@@ -333,7 +344,12 @@ class CopilotService:
                 conversation_id, last_event_id=last_event_id
             ):
                 yield replay
-            if not doc.get("stream_active"):
+            doc = await self._get_checkpoint_doc(conversation_id) or doc
+            if doc.get("stream_active"):
+                async for live in self._poll_live_sse_events(
+                    conversation_id, last_event_id=last_event_id
+                ):
+                    yield live
                 return
 
         decision = request.decision.lower()
@@ -382,15 +398,50 @@ class CopilotService:
             if replay.get("id"):
                 seen = int(replay["id"])
 
+        doc = await self._get_checkpoint_doc(conversation_id) or doc
         if not doc.get("stream_active"):
             return
 
-        while True:
-            await asyncio.sleep(0.25)
-            doc = await self._get_checkpoint_doc(conversation_id) or doc
+        async for live in self._poll_live_sse_events(
+            conversation_id, last_event_id=seen
+        ):
+            yield live
+
+    async def _poll_live_sse_events(
+        self,
+        conversation_id: str,
+        *,
+        last_event_id: int,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """Poll persisted SSE events while a conversation stream is active."""
+        seen = last_event_id
+        elapsed = 0.0
+        idle = 0.0
+        poll_interval = reconnect_poll_interval_seconds()
+        max_poll = reconnect_max_poll_seconds()
+        stale_timeout = stale_stream_timeout_seconds()
+
+        while elapsed < max_poll:
+            await asyncio.sleep(poll_interval)
+            elapsed += poll_interval
+
+            doc = await self._get_checkpoint_doc(conversation_id)
+            if doc is None or not doc.get("stream_active"):
+                break
+
             new_events = await self._sse_events.list_after(
                 conversation_id, last_event_id=seen
             )
+            if not new_events:
+                idle += poll_interval
+                if idle >= stale_timeout:
+                    await self._checkpoints.set_stream_active(
+                        conversation_id, active=False
+                    )
+                    break
+                continue
+
+            idle = 0.0
             for stored in new_events:
                 seen = int(stored["event_id"])
                 yield {
@@ -398,8 +449,6 @@ class CopilotService:
                     "data": stored["data"],
                     "id": seen,
                 }
-            if not doc.get("stream_active"):
-                break
 
     async def resume_conversation(
         self,
