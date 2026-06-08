@@ -211,61 +211,95 @@ class PlannerAgent:
             "Rules for arguments:\n"
             "1. Arguments must be a valid JSON string inside 'arguments_json'. E.g. '{\"repo_path\": \"/tmp/repo\"}'.\n"
             "2. Use exact tool parameter names from function declarations.\n"
-            "3. For dependencies, use the template token '{{step_id.result}}' in values.\n\n"
-            "MR REVIEW WORKFLOW - STANDARD SEQUENCE:\n"
-            "   Step 1: Validate webhook via 'validate_mr_webhook' -> 'validate_step'\n"
-            "           Purpose: Checks MR state, branch monitoring, auto-fix detection\n"
-            "           Returns: should_process flag and skip_reason\n"
-            "           If should_process is false, workflow should terminate early\n\n"
-            "   Step 2: Track progress (received) via 'track_progress' -> 'progress_received_step'\n"
-            "           Arguments: '{\"project_id\": \"<project_id>\", \"mr_iid\": <mr_iid>, \"step\": \"received\", \"message\": \"Webhook received\"}'\n\n"
-            "   Step 3: Post loading indicator via 'post_loading_indicator' -> 'loading_step'\n"
+            "3. For dependencies, use the template token '{{step_id.result}}' in values.\n"
+            "4. CRITICAL: For placeholder values like USER_ID_FROM_PROMPT, project_id, mr_iid, etc., "
+            "use the EXACT values provided in the prompt's OBJECTIVE and MERGE REQUEST DETAILS sections.\n\n"
+            "PRE-EXECUTED STEPS (Already completed before planning):\n"
+            "The following prerequisite steps have ALREADY been executed and are NOT available as tools:\n"
+            "  0) validate_mr_webhook - MR validation passed (workflow would have terminated otherwise)\n"
+            "     Valid actions: 'open', 'reopen', 'update' (not merge, close)\n"
+            "  1) clone_repo - Repository is already cloned (path available in context)\n"
+            "  2) gitnexus_analyze - Repository is already indexed for code search\n"
+            "  3) get_gitlab_mr_diffs - MR diff content is already available in prompt\n\n"
+            "IMPORTANT: Do NOT include validate_mr_webhook, clone_repo, gitnexus_analyze, or get_gitlab_mr_diffs in your plan.\n\n"
+            "PRE-STEP RESULTS AVAILABLE IN CONTEXT:\n"
+            "  - prestep_repo_path: Path to the cloned repository (use this for analysis tools)\n"
+            "  - prestep_gitnexus_completed: GitNexus indexing is complete (gitnexus_grep/gitnexus_file are ready)\n"
+            "  - mr_diff_content: Full MR diff is included in the prompt below\n\n"
+            "MR DIFF CONTENT AVAILABILITY:\n"
+            "The user message includes the full MR diff content in the 'MERGE REQUEST DIFF CONTENT' section. "
+            "USE THIS DIFF to make intelligent decisions about what analysis is actually needed:\n\n"
+            "ANALYSIS STRATEGY - BE SELECTIVE:\n"
+            "1. First, analyze the diff content to understand what changed\n"
+            "2. Then, decide which analysis tools are actually NEEDED (don't run everything blindly):\n"
+            "   - gitnexus_grep + gitnexus_file: Use these for DEEP understanding of specific issues\n"
+            "   - run_impact_analysis: ONLY if the diff shows significant structural changes affecting dependencies\n"
+            "   - run_schema_inspection: ONLY if the diff contains MongoDB schema/model files\n\n"
+            "3. For deep understanding, PREFER gitnexus_grep and gitnexus_file:\n"
+            "   - Use grep to find all references to changed functions/variables\n"
+            "   - Use file to read complete context of affected files\n"
+            "   - This gives you actual code context for better analysis\n\n"
+            "4. SKIP analysis steps that are not relevant:\n"
+            "   - No schema files changed? Skip run_schema_inspection\n"
+            "   - Small/simple change? Skip run_impact_analysis\n\n"
+            "MINIMAL WORKFLOW EXAMPLE (for simple changes):\n"
+            "   Step 1: post_loading_indicator\n"
+            "   Step 2: gitnexus_grep (to find usages of changed symbols)\n"
+            "   Step 3: gitnexus_file (to read full context)\n"
+            "   Step 4: update_review_comment (with your analysis)\n"
+            "   Step 5: update_commit_status\n\n"
+            "COMPREHENSIVE WORKFLOW EXAMPLE (for complex changes):\n"
+            "   Step 1: post_loading_indicator\n"
+            "   Step 2: gitnexus_grep (find affected symbols)\n"
+            "   Step 3: gitnexus_file (read full context)\n"
+            "   Step 4: run_schema_inspection (ONLY if schema files changed)\n"
+            "   Step 5: run_impact_analysis (ONLY if structural changes)\n"
+            "   Step 6: update_review_comment (with comprehensive analysis)\n"
+            "   Step 7: update_commit_status\n\n"
+            "CRITICAL REMINDERS:\n"
+            "- The planner should GENERATE THE PLAN based on what the diff shows\n"
+            "- NOT every MR needs impact analysis or schema inspection\n"
+            "- USE gitnexus_grep and gitnexus_file for depth understanding\n"
+            "- Focus on WHAT ACTUALLY CHANGED rather than running every tool\n"
+            "- Repo is already cloned and indexed - use prestep_repo_path for analysis\n\n"
+            "MR REVIEW WORKFLOW - CORE STRUCTURE:\n"
+            "   Step 1: Post loading indicator via 'post_loading_indicator' -> 'loading_step'\n"
             "           Purpose: Post loading comment to show analysis is in progress\n"
-            "           Returns: comment_id for later update\n\n"
-            "   Step 4: Clone repository via 'clone_repo' -> 'clone_repo_step'\n"
-            "           Purpose: Clone GitLab repository to temp workspace\n\n"
-            "   Step 5: Track progress (clone) via 'track_progress' -> 'progress_clone_step'\n"
-            "           Arguments: '{\"project_id\": \"<project_id>\", \"mr_iid\": <mr_iid>, \"step\": \"clone\", \"message\": \"Repository cloned\", \"status\": \"completed\"}'\n"
-            "           Depends on: clone_repo_step\n\n"
-            "   Step 6: Get MR diffs via 'get_gitlab_mr_diffs' -> 'get_mr_diffs_step'\n"
-            "           Purpose: Fetch MR diffs from GitLab\n\n"
-            "   Step 7: Track progress (analysis) via 'track_progress' -> 'progress_analysis_step'\n"
-            "           Arguments: '{\"project_id\": \"<project_id>\", \"mr_iid\": <mr_iid>, \"step\": \"analysis\", \"message\": \"Starting analysis\"}'\n\n"
-            "   Step 8: Run 'gitnexus_analyze' on cloned repository -> 'gitnexus_analysis_step'\n"
-            "           Purpose: Index repository for code search and call-graph analysis\n"
-            "           Arguments: '{\"repo_path\": \"{{clone_repo_step.result}}\"}'\n"
-            "           Depends on: clone_repo_step\n\n"
-            "   Step 9: Run 'run_impact_analysis' on repo path -> 'impact_analysis_step'\n"
-            "           Purpose: Perform blast radius impact analysis\n"
-            "           Arguments: '{\"repo_path\": \"{{clone_repo_step.result}}\", \"repo_name\": \"<repo_name>\", \"source_branch\": \"<source_branch>\", \"target_branch\": \"<target_branch>\"}'\n"
-            "           Depends on: clone_repo_step\n\n"
-            "   Step 10: Run 'run_schema_inspection' on diff text -> 'schema_inspection_step'\n"
-            "           Purpose: Check for MongoDB schema drift\n"
-            "           Arguments: '{\"diff_text\": \"{{get_mr_diffs_step.result}}\", \"project_id\": \"<project_id>\", \"target_branch\": \"<target_branch>\"}'\n"
-            "           Depends on: get_mr_diffs_step\n\n"
-            "   Step 11: Update review comment via 'update_review_comment' -> 'update_comment_step'\n"
-            "           Purpose: Update the loading comment with complete findings\n"
-            "           Arguments: '{\"project_id\": \"<project_id>\", \"mr_iid\": <mr_iid>, \"comment_id\": {{loading_step.result.comment_id}}, \"audit_report\": \"<COMBINED_REPORT_FROM_STEPS_8_9_10>\"}'\n"
-            "           Depends on: loading_step, gitnexus_analysis_step, impact_analysis_step, schema_inspection_step\n"
-            "           NOTE: Combine markdown reports from gitnexus, impact, and schema steps into the audit_report\n\n"
-            "   Step 12: Update commit status via 'update_commit_status' -> 'commit_status_step'\n"
+            "           Returns: comment_id for later update\n"
+            "           Arguments: '{\"project_id\": \"<project_id>\", \"mr_iid\": <mr_iid>, \"user_id\": \"USER_ID_FROM_PROMPT\"}'\n\n"
+            "   Step 2: SELECTIVE ANALYSIS (CHOOSE based on diff):\n"
+            "           Option A: gitnexus_grep + gitnexus_file (for deep code understanding)\n"
+            "                      Use gitnexus_grep to find all references to changed functions/variables\n"
+            "                      Use gitnexus_file to read complete context of affected files\n"
+            "           Option B: run_impact_analysis (ONLY for structural changes)\n"
+            "                      Arguments: '{\"repo_path\": \"PRESTEP_REPO_PATH\", \"repo_name\": \"REPO_NAME\", \"source_branch\": \"SOURCE_BRANCH\"}'\n"
+            "                      Note: Use the prestep_repo_path from context for repo_path\n"
+            "           Option C: run_schema_inspection (ONLY for schema files)\n"
+            "                      Arguments: '{\"diff_text\": \"DIFF_CONTENT\", \"project_id\": \"PROJECT_ID\", \"target_branch\": \"TARGET_BRANCH\"}'\n"
+            "           Include ONLY the analysis steps that are RELEVANT to the diff\n\n"
+            "   Step 3: Update review comment via 'update_review_comment' -> 'update_comment_step'\n"
+            "           Purpose: Update the loading comment with your findings\n"
+            "           Arguments: '{\"project_id\": \"<project_id>\", \"mr_iid\": <mr_iid>, \"comment_id\": \"{{loading_step.result.comment_id}}\", \"audit_report\": \"<YOUR_ANALYSIS_BASED_ON_DIFF>\", \"user_id\": \"USER_ID_FROM_PROMPT\"}'\n"
+            "           Depends on: loading_step (and any analysis steps you included)\n\n"
+            "   Step 4: Update commit status via 'update_commit_status' -> 'commit_status_step'\n"
             "           Purpose: Update commit badge to show successful review\n"
-            "           Arguments: '{\"project_id\": \"<project_id>\", \"commit_sha\": \"BASE_COMMIT_SHA_FROM_PROMPT\", \"status\": \"success\", \"description\": \"Security audit completed\"}'\n"
+            "           Arguments: '{\"project_id\": \"<project_id>\", \"commit_sha\": \"BASE_COMMIT_SHA_FROM_PROMPT\", \"status\": \"success\", \"description\": \"Security audit completed\", \"user_id\": \"USER_ID_FROM_PROMPT\"}'\n"
             "           NOTE: Use the BASE COMMIT SHA value from the MERGE REQUEST DETAILS section in the prompt\n\n"
-            "   Step 13: Track progress (completed) via 'track_progress' -> 'progress_complete_step'\n"
-            "           Arguments: '{\"project_id\": \"<project_id>\", \"mr_iid\": <mr_iid>, \"step\": \"completed\", \"message\": \"Review completed\", \"status\": \"completed\"}'\n\n"
             "SUCCESS CRITERIA:\n"
-            "1. Loading indicator posted and updated\n"
-            "2. All analysis steps completed successfully\n"
-            "3. Comment posted with full audit report\n"
-            "4. Commit status updated to 'success'\n"
-            "5. Progress tracking updated throughout\n\n"
+            "1. Loading indicator posted and updated with findings\n"
+            "2. Analysis performed (only relevant steps based on diff)\n"
+            "3. Comment posted with audit report\n"
+            "4. Commit status updated to 'success' or 'failed'\n\n"
             "ERROR HANDLING:\n"
-            "1. If validation fails, track_progress with status='failed'\n"
-            "2. If any step fails, track_progress with status='failed'\n"
-            "3. Always update progress logs regardless of outcome\n\n"
-            "ALL these steps must be included in your plan.\n"
-            "IMPORTANT: Call submit_execution_plan ONCE with your COMPLETE plan including ALL steps."
+            "1. If any step fails, update commit status to 'failed' and post error comment\n"
+            "2. Always update the loading comment with findings or error status\n\n"
+            "IMPORTANT NOTES:\n"
+            "- You are generating a CUSTOM plan based on the diff content\n"
+            "- NOT every MR needs the same analysis steps\n"
+            "- USE gitnexus_grep and gitnexus_file for depth understanding\n"
+            "- Include ONLY the analysis steps that are RELEVANT to what actually changed\n"
+            "- Pre-steps (validation, clone, indexing, diff fetch) are already complete\n"
+            "- Call submit_execution_plan ONCE with your COMPLETE plan.\n"
         )
 
     def _build_dynatrace_system_instruction(self) -> str:
@@ -520,6 +554,10 @@ class PlannerAgent:
         """
         print(f"[INFO] [Planner] generate_plan called with objective: {context.objective[:50]}...")
 
+        # Determine workflow type early (needed for tool filtering)
+        workflow_type = self._get_workflow_type(context)
+        print(f"[INFO] [Planner] Detected workflow type: {workflow_type}")
+
         knowledge_context = None
         knowledge_manifest: Dict[str, Any] = {}
         try:
@@ -536,11 +574,12 @@ class PlannerAgent:
 
         # Filter to only essential planning tools to avoid overwhelming the model
         # The planner doesn't need all 70+ GitLab tools - just the core workflow tools
+        # For MR review, exclude prerequisite tools (already executed before planning)
         essential_tool_names = {
-            # Core repository operations
-            'clone_repo', 'get_gitlab_mr_diffs',
+            # Core repository operations (exclude for MR review - already executed)
+            # 'clone_repo', 'get_gitlab_mr_diffs',  # Prerequisites - excluded for MR review
             # Analysis tools
-            'run_impact_analysis', 'run_schema_inspection', 'gitnexus_analyze',
+            'run_impact_analysis', 'run_schema_inspection',  # 'gitnexus_analyze' is a prerequisite
             # Code search and debugging tools (GitNexus HTTP API tools)
             'gitnexus_grep', 'gitnexus_file',
             # AI Fix Generation
@@ -553,10 +592,14 @@ class PlannerAgent:
             # GitLab operations
             'create_gitlab_branch', 'create_gitlab_merge_request',
             'commit_file_to_branch', 'merge_merge_request',
-            # MR Review Enhancement Tools
-            'validate_mr_webhook', 'post_loading_indicator', 'update_review_comment',
+            # MR Review Enhancement Tools (exclude validate_mr_webhook - already executed)
+            'post_loading_indicator', 'update_review_comment',
             'update_commit_status', 'track_progress'
         }
+
+        # Add prerequisite tools for non-MR workflows only
+        if workflow_type != "mr_review":
+            essential_tool_names.update(['clone_repo', 'get_gitlab_mr_diffs', 'gitnexus_analyze', 'validate_mr_webhook'])
 
         # Build function declarations for essential tools only
         tool_declarations = []
@@ -657,6 +700,17 @@ class PlannerAgent:
             f"USER ID: {context.user.user_id}\n\n"
         )
 
+        # Add pre-step results if available (from MR review workflow pre-steps)
+        if context.metadata.get("prestep_validation_passed"):
+            prompt += "PRE-STEP RESULTS (already executed):\n"
+            prompt += f"VALIDATION: Passed\n"
+            if context.metadata.get("prestep_repo_path"):
+                prompt += f"REPO_PATH: {context.metadata['prestep_repo_path']}\n"
+            if context.metadata.get("prestep_gitnexus_completed"):
+                prompt += f"GITNEXUS_INDEXING: Completed (gitnexus_grep/gitnexus_file are ready)\n"
+            prompt += f"DIFF_FETCHED: Yes ({len(context.metadata.get('mr_diff_content', ''))} chars)\n"
+            prompt += "\n"
+
         # Add MR details if available (from webhook payload)
         if context.branch.base_commit_sha or context.branch.head_commit_sha:
             prompt += "MERGE REQUEST DETAILS (from webhook payload):\n"
@@ -665,6 +719,23 @@ class PlannerAgent:
             if context.branch.head_commit_sha:
                 prompt += f"HEAD COMMIT SHA: {context.branch.head_commit_sha}\n"
             prompt += "\n"
+
+        # Add MR diff content if available (fetched before planning)
+        mr_diff_content = context.metadata.get("mr_diff_content", "")
+        if mr_diff_content:
+            # Truncate diff if too large to fit in context window
+            max_diff_length = 50000  # Keep under 50k chars for the planner
+            diff_to_show = mr_diff_content[:max_diff_length]
+            if len(mr_diff_content) > max_diff_length:
+                diff_to_show += f"\n... (diff truncated, showing {max_diff_length} of {len(mr_diff_content)} characters)"
+
+            prompt += "MERGE REQUEST DIFF CONTENT:\n"
+            prompt += "The following is the raw unified diff of the code changes:\n"
+            prompt += "```\n"
+            prompt += diff_to_show + "\n"
+            prompt += "```\n"
+            prompt += "Use this diff to inform your planning - analyze what files are changed, what types of modifications are made, and plan your review steps accordingly.\n\n"
+            print(f"[INFO] [Planner] Added MR diff to prompt ({len(diff_to_show)} chars shown)")
 
         # Add Sentry issue details if available (from webhook payload)
         if context.sentry_issue:

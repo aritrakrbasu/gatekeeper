@@ -324,38 +324,119 @@ async def gitlab_webhook(request: Request, x_gitlab_event: str = Header(None)):
 
     if agentic_mode:
         from agents import ContextBuilder, build_default_registry, WorkflowEngine
+        from agents import tools  # Import tools module for pre-step functions
 
         # 1. Handle GitLab Merge Request Event
         if x_gitlab_event == "Merge Request Hook":
             print(f"[DEBUG] Processing MR webhook in agentic mode...", flush=True)
 
-            print(f"[DEBUG] Step 1: Building context from webhook payload...", flush=True)
-            context = await ContextBuilder.build_from_gitlab_mr(payload)
-            print(f"[DEBUG] Context built: {context is not None}", flush=True)
+            # Extract basic info
+            obj_attrs = payload.get("object_attributes", {})
+            mr_iid = obj_attrs.get("iid", "unknown")
+            project_id = str(payload.get("project", {}).get("id", "unknown"))
+            user_id = str(payload.get("user", {}).get("id", "unknown"))
+            source_branch = obj_attrs.get("source_branch", "main")
+            target_branch = obj_attrs.get("target_branch", "main")
+            mr_state = obj_attrs.get("state", "unknown")
+            action = obj_attrs.get("action", "unknown")
+            repo_http_url = payload.get("project", {}).get("http_url", "")
 
-            # Handle validation failure (context is None)
-            if context is None:
-                print(f"[DEBUG] Context validation failed, returning skipped response", flush=True)
-                # Extract details for skip response
-                obj_attrs = payload.get("object_attributes", {})
+            print(f"[DEBUG] ===== PRE-STEPS BEFORE LLM PLANNER =====", flush=True)
+
+            # Pre-step 0: Validate webhook
+            print(f"[DEBUG] Pre-step 0: Validating webhook...", flush=True)
+            validation_result = await tools.validate_mr_webhook(
+                project_id=project_id,
+                mr_iid=int(mr_iid),
+                target_branch=target_branch,
+                source_branch=source_branch,
+                mr_state=mr_state,
+                action=action
+            )
+            if not validation_result.get("should_process", True):
+                skip_reason = validation_result.get("skip_reason", "Validation failed")
+                print(f"[INFO] MR validation failed: {skip_reason}", flush=True)
                 return {
                     "status": "skipped",
-                    "reason": "Webhook validation failed",
-                    "project_id": str(obj_attrs.get("target_project_id", payload.get("project", {}).get("id", ""))),
-                    "mr_iid": obj_attrs.get("iid")
+                    "reason": skip_reason,
+                    "project_id": project_id,
+                    "mr_iid": mr_iid
+                }
+            print(f"[OK] Webhook validation passed", flush=True)
+
+            # Build context with validated info
+            print(f"[DEBUG] Step 1: Building context from webhook payload...", flush=True)
+            context = await ContextBuilder.build_from_gitlab_mr(payload)
+            if context is None:
+                print(f"[DEBUG] Context building failed", flush=True)
+                return {
+                    "status": "skipped",
+                    "reason": "Context building failed",
+                    "project_id": project_id,
+                    "mr_iid": mr_iid
+                }
+            print(f"[OK] Context built successfully", flush=True)
+
+            # Pre-step 1: Clone repository
+            print(f"[DEBUG] Pre-step 1: Cloning repository...", flush=True)
+            try:
+                repo_path = await tools.clone_repo(
+                    project_id=project_id,
+                    source_branch=source_branch,
+                    repo_http_url=repo_http_url,
+                    user_id=user_id,
+                    target_branch=target_branch
+                )
+                context.repository.repo_path = repo_path  # Store repo path in context
+                print(f"[OK] Repository cloned to: {repo_path}", flush=True)
+            except Exception as e:
+                print(f"[ERROR] Clone failed: {e}", flush=True)
+                return {
+                    "status": "error",
+                    "message": f"Clone failed: {str(e)}",
+                    "project_id": project_id,
+                    "mr_iid": mr_iid
                 }
 
-            print(f"[DEBUG] Step 1.5: Ingesting MR into MongoDB...", flush=True)
-            # Ingest MR into MongoDB so progress logs can be tracked
+            # Pre-step 2: Run GitNexus analyze
+            print(f"[DEBUG] Pre-step 2: Running GitNexus analyze...", flush=True)
+            try:
+                gitnexus_result = await tools.gitnexus_analyze(repo_path=repo_path)
+                context.metadata["gitnexus_analyze_result"] = gitnexus_result
+                print(f"[OK] GitNexus analyze completed", flush=True)
+            except Exception as e:
+                print(f"[WARN] GitNexus analyze failed: {e}", flush=True)
+                context.metadata["gitnexus_analyze_result"] = {"error": str(e)}
+
+            # Pre-step 3: Fetch MR diffs
+            print(f"[DEBUG] Pre-step 3: Fetching MR diffs...", flush=True)
+            try:
+                from services import review_service
+                mr_diff_content = await review_service._gitlab_get_mr_diffs(
+                    user_id=user_id,
+                    project_id=project_id,
+                    mr_iid=int(mr_iid)
+                )
+                if mr_diff_content:
+                    context.metadata["mr_diff_content"] = mr_diff_content
+                    print(f"[OK] MR diffs fetched ({len(mr_diff_content)} chars)", flush=True)
+                else:
+                    print(f"[WARN] MR diff content is empty", flush=True)
+            except Exception as e:
+                print(f"[WARN] Failed to fetch MR diffs: {e}", flush=True)
+
+            print(f"[DEBUG] ===== PRE-STEPS COMPLETED =====", flush=True)
+
+            # Ingest MR into MongoDB for progress tracking
+            print(f"[DEBUG] Ingesting MR into MongoDB...", flush=True)
             ingest_result = await review_service.ingest_mr_from_webhook(payload)
             if ingest_result.get("skipped"):
                 print(f"[WARN] MR ingestion skipped: {ingest_result.get('reason')}", flush=True)
             else:
                 print(f"[OK] MR ingested into MongoDB", flush=True)
 
-            print(f"[DEBUG] Step 2: Building tool registry...", flush=True)
+            print(f"[DEBUG] Step 2: Building tool registry (without pre-step tools)...", flush=True)
             registry = await build_default_registry()
-            print(f"[DEBUG] Registry built with {len(registry._tools)} tools", flush=True)
 
             engine = WorkflowEngine(registry)
             print(f"[INFO] [Agentic Mode] Executing agentic workflow for Merge Request: {context.task_id}", flush=True)

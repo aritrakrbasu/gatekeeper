@@ -10,15 +10,20 @@ from agents.engine import WorkflowEngine
 async def run_mr_review_workflow(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     MR Review Workflow:
-    Diff -> Context Build -> Impact Analysis -> Memory Retrieval -> Agent Review -> Findings
+    Validation -> Clone -> GitNexus Analysis -> Diff Fetch -> Context Build -> Agent Review -> Findings
+
+    Pre-steps (executed before LLM):
+    0) validate_mr_webhook - Validate if MR should be processed
+    1) clone_repo - Clone repository to temp workspace
+    2) gitnexus_analyze - Index repository for code search
+    3) get_gitlab_mr_diffs - Fetch MR diff content
     """
     mr_iid = payload.get("object_attributes", {}).get("iid", "unknown")
     task_id = f"mr-review-{uuid.uuid4().hex[:8]}"
     objective = (
         f"Perform a comprehensive review on GitLab MR #{mr_iid}. "
-        "The review must clone the repository, run GitNexus call-graph analysis, fetch the MR diff, "
-        "run static impact analysis, perform schema drift inspection, summarize all findings, "
-        "and post a detailed markdown comment on the MR."
+        "The review must run static impact analysis, perform schema drift inspection, "
+        "summarize all findings, and post a detailed markdown comment on the MR."
     )
 
     # Get tracer for creating manual span
@@ -51,14 +56,90 @@ async def run_mr_review_workflow(payload: Dict[str, Any]) -> Dict[str, Any]:
 
             print(f"[INFO] MR review workflow span created with attributes: user_id={user_id}, mr_id={mr_iid}, repository_id={project_id}")
 
+            # ============================================================================
+            # PRE-STEP 0: Validate MR Webhook
+            # ============================================================================
+            from agents import tools
+            print(f"[INFO] [PRE-STEP 0] Validating MR webhook...")
+            validation_result = await tools.validate_mr_webhook(
+                project_id=project_id,
+                mr_iid=int(mr_iid),
+                target_branch=payload.get("object_attributes", {}).get("target_branch", "main"),
+                source_branch=payload.get("object_attributes", {}).get("source_branch", ""),
+                mr_state=payload.get("object_attributes", {}).get("state", "opened"),
+                action=payload.get("object_attributes", {}).get("action", "open")
+            )
+            if not validation_result.get("should_process", False):
+                skip_reason = validation_result.get("skip_reason", "Unknown reason")
+                print(f"[INFO] [PRE-STEP 0] MR validation failed, skipping workflow: {skip_reason}")
+                return {
+                    "status": "skipped",
+                    "reason": skip_reason,
+                    "project_id": project_id,
+                    "mr_iid": mr_iid
+                }
+            print(f"[OK] [PRE-STEP 0] MR validation passed")
+
+            # Extract repository details from payload
+            repo_http_url = payload.get("repository", {}).get("git_http_url", "")
+            source_branch = payload.get("object_attributes", {}).get("source_branch", "")
+            target_branch = payload.get("object_attributes", {}).get("target_branch", "main")
+            base_commit_sha = payload.get("object_attributes", {}).get("last_commit", {}).get("id", "")
+
+            # ============================================================================
+            # PRE-STEP 1: Clone Repository
+            # ============================================================================
+            print(f"[INFO] [PRE-STEP 1] Cloning repository...")
+            repo_path = await tools.clone_repo(
+                project_id=project_id,
+                source_branch=source_branch,
+                repo_http_url=repo_http_url,
+                user_id=user_id,
+                target_branch=target_branch
+            )
+            print(f"[OK] [PRE-STEP 1] Repository cloned to: {repo_path}")
+
+            # ============================================================================
+            # PRE-STEP 2: GitNexus Analysis (Index Repository)
+            # ============================================================================
+            print(f"[INFO] [PRE-STEP 2] Running GitNexus analysis...")
+            gitnexus_result = await tools.gitnexus_analyze(repo_path=repo_path)
+            if gitnexus_result.get("status") != "success":
+                print(f"[WARN] [PRE-STEP 2] GitNexus analysis failed: {gitnexus_result.get('message', 'Unknown error')}")
+            else:
+                print(f"[OK] [PRE-STEP 2] GitNexus analysis completed")
+
+            # ============================================================================
+            # PRE-STEP 3: Get MR Diff Content
+            # ============================================================================
+            print(f"[INFO] [PRE-STEP 3] Fetching MR diff content...")
+            mr_diff_content = await tools.get_gitlab_mr_diffs(
+                user_id=user_id,
+                project_id=project_id,
+                mr_iid=int(mr_iid)
+            )
+            print(f"[OK] [PRE-STEP 3] Fetched {len(mr_diff_content)} chars of diff content")
+
+            # ============================================================================
+            # Build Agent Context with Pre-step Results
+            # ============================================================================
             # 1. Aggregates information from services & create snapshot context
             builder = ContextBuilder()
             agent_context = await builder.build_context(task_id, objective, payload)
 
-            # 2. Build Tool Registry
-            registry = await build_default_registry()
+            # 2. Add pre-step results to metadata for the planner
+            agent_context.metadata["prestep_validation_passed"] = True
+            agent_context.metadata["prestep_repo_path"] = repo_path
+            agent_context.metadata["prestep_gitnexus_completed"] = gitnexus_result.get("status") == "success"
+            agent_context.metadata["mr_diff_content"] = mr_diff_content
+            print(f"[INFO] Added pre-step results to context metadata")
 
-            # 3. Instantiate and run WorkflowEngine
+            # 3. Build Tool Registry (excluding prerequisite tools)
+            registry = await build_default_registry(exclude_prerequisites=True)
+
+            print(f"[INFO] Tool registry built with prerequisite tools excluded")
+
+            # 4. Instantiate and run WorkflowEngine
             engine = WorkflowEngine(registry)
             result = await engine.run_task(agent_context)
 

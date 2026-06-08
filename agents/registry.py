@@ -174,28 +174,59 @@ class ToolRegistry:
         return result.content
 
 
-async def build_default_registry(aril: Optional["ArilSession"] = None) -> ToolRegistry:
+async def build_default_registry(aril: Optional["ArilSession"] = None, exclude_prerequisites: bool = False) -> ToolRegistry:
     """
     Creates and populates a ToolRegistry with all active local services and MCP servers.
+
+    Args:
+        aril: Optional ARIL session for tool lifecycle capture
+        exclude_prerequisites: If True, excludes prerequisite tools that are executed
+                               before LLM planning (validate_mr_webhook, clone_repo,
+                               gitnexus_analyze, get_gitlab_mr_diffs)
     """
     from services import mcp_service
     from agents import tools
 
-    print(f"[DEBUG] [build_default_registry] Starting to build registry...")
+    # Prerequisite tools that are executed before LLM planning
+    PREREQUISITE_TOOLS = {
+        "validate_mr_webhook",
+        "clone_repo",
+        "gitnexus_analyze",
+        "get_gitlab_mr_diffs",
+    }
+
+    print(f"[DEBUG] [build_default_registry] Starting to build registry (exclude_prerequisites={exclude_prerequisites})...")
     registry = ToolRegistry()
     if aril is not None:
         registry.attach_aril(aril)
 
     print(f"[DEBUG] [build_default_registry] Registering local tools...")
-    registry.register_local_tool("clone_repo", tools.clone_repo_schema, tools.clone_repo)
-    registry.register_local_tool("run_impact_analysis", tools.run_impact_analysis_schema, tools.run_impact_analysis)
-    registry.register_local_tool("run_schema_inspection", tools.run_schema_inspection_schema, tools.run_schema_inspection)
-    registry.register_local_tool("get_gitlab_mr_diffs", tools.get_gitlab_mr_diffs_schema, tools.get_gitlab_mr_diffs)
-    registry.register_local_tool("post_gitlab_mr_comment", tools.post_gitlab_mr_comment_schema, tools.post_gitlab_mr_comment)
-    registry.register_local_tool("get_dynatrace_incident_details", tools.get_dynatrace_incident_details_schema, tools.get_dynatrace_incident_details)
-    registry.register_local_tool("apply_hotfix_patch", tools.apply_hotfix_patch_schema, tools.apply_hotfix_patch)
-    registry.register_local_tool("create_hotfix_branch_and_mr", tools.create_hotfix_branch_and_mr_schema, tools.create_hotfix_branch_and_mr)
-    registry.register_local_tool("gitnexus_analyze", tools.gitnexus_analyze_schema, tools.gitnexus_analyze)
+
+    # Core local tools
+    local_tools_to_register = [
+        ("run_impact_analysis", tools.run_impact_analysis_schema, tools.run_impact_analysis),
+        ("run_schema_inspection", tools.run_schema_inspection_schema, tools.run_schema_inspection),
+        ("post_gitlab_mr_comment", tools.post_gitlab_mr_comment_schema, tools.post_gitlab_mr_comment),
+        ("get_dynatrace_incident_details", tools.get_dynatrace_incident_details_schema, tools.get_dynatrace_incident_details),
+        ("apply_hotfix_patch", tools.apply_hotfix_patch_schema, tools.apply_hotfix_patch),
+        ("create_hotfix_branch_and_mr", tools.create_hotfix_branch_and_mr_schema, tools.create_hotfix_branch_and_mr),
+    ]
+
+    # Add prerequisite tools only if not excluding them
+    if not exclude_prerequisites:
+        local_tools_to_register.extend([
+            ("clone_repo", tools.clone_repo_schema, tools.clone_repo),
+            ("get_gitlab_mr_diffs", tools.get_gitlab_mr_diffs_schema, tools.get_gitlab_mr_diffs),
+            ("gitnexus_analyze", tools.gitnexus_analyze_schema, tools.gitnexus_analyze),
+            ("validate_mr_webhook", tools.validate_mr_webhook_schema, tools.validate_mr_webhook),
+        ])
+        print(f"[DEBUG] [build_default_registry] Including prerequisite tools")
+    else:
+        print(f"[DEBUG] [build_default_registry] Excluding prerequisite tools: {PREREQUISITE_TOOLS}")
+
+    # Register all local tools
+    for tool_name, schema, callback in local_tools_to_register:
+        registry.register_local_tool(tool_name, schema, callback)
 
     # GitLab REST API tools (direct API calls without MCP)
     registry.register_local_tool("create_gitlab_branch", tools.create_gitlab_branch_schema, tools.create_gitlab_branch)
@@ -210,37 +241,6 @@ async def build_default_registry(aril: Optional["ArilSession"] = None) -> ToolRe
     registry.register_local_tool("generate_fix", tools.generate_fix_schema, tools.generate_fix)
 
     # MR Review Enhancement Tools (feature parity with standard mode)
-    registry.register_local_tool("validate_mr_webhook", tools.validate_mr_webhook_schema, tools.validate_mr_webhook)
-    registry.register_local_tool("post_loading_indicator", tools.post_loading_indicator_schema, tools.post_loading_indicator)
-    registry.register_local_tool("update_review_comment", tools.update_review_comment_schema, tools.update_review_comment)
-    registry.register_local_tool("update_commit_status", tools.update_commit_status_schema, tools.update_commit_status)
-    registry.register_local_tool("track_progress", tools.track_progress_schema, tools.track_progress)
-
-    # 1. Register local python tools (including GitLab REST API wrappers)
-    registry.register_local_tool("clone_repo", tools.clone_repo_schema, tools.clone_repo)
-    registry.register_local_tool("run_impact_analysis", tools.run_impact_analysis_schema, tools.run_impact_analysis)
-    registry.register_local_tool("run_schema_inspection", tools.run_schema_inspection_schema, tools.run_schema_inspection)
-    registry.register_local_tool("get_gitlab_mr_diffs", tools.get_gitlab_mr_diffs_schema, tools.get_gitlab_mr_diffs)
-    registry.register_local_tool("post_gitlab_mr_comment", tools.post_gitlab_mr_comment_schema, tools.post_gitlab_mr_comment)
-    registry.register_local_tool("get_dynatrace_incident_details", tools.get_dynatrace_incident_details_schema, tools.get_dynatrace_incident_details)
-    registry.register_local_tool("apply_hotfix_patch", tools.apply_hotfix_patch_schema, tools.apply_hotfix_patch)
-    registry.register_local_tool("create_hotfix_branch_and_mr", tools.create_hotfix_branch_and_mr_schema, tools.create_hotfix_branch_and_mr)
-    registry.register_local_tool("gitnexus_analyze", tools.gitnexus_analyze_schema, tools.gitnexus_analyze)
-
-    # GitLab REST API tools (direct API calls without MCP)
-    registry.register_local_tool("create_gitlab_branch", tools.create_gitlab_branch_schema, tools.create_gitlab_branch)
-    registry.register_local_tool("create_gitlab_merge_request", tools.create_gitlab_merge_request_schema, tools.create_gitlab_merge_request)
-    registry.register_local_tool("commit_file_to_branch", tools.commit_file_to_branch_schema, tools.commit_file_to_branch)
-
-    # GitNexus tools (for code search and file reading)
-    registry.register_local_tool("gitnexus_grep", tools.gitnexus_grep_schema, tools.gitnexus_grep)
-    registry.register_local_tool("gitnexus_file", tools.gitnexus_file_schema, tools.gitnexus_file)
-
-    # AI Fix Generation Tool
-    registry.register_local_tool("generate_fix", tools.generate_fix_schema, tools.generate_fix)
-
-    # MR Review Enhancement Tools (feature parity with standard mode)
-    registry.register_local_tool("validate_mr_webhook", tools.validate_mr_webhook_schema, tools.validate_mr_webhook)
     registry.register_local_tool("post_loading_indicator", tools.post_loading_indicator_schema, tools.post_loading_indicator)
     registry.register_local_tool("update_review_comment", tools.update_review_comment_schema, tools.update_review_comment)
     registry.register_local_tool("update_commit_status", tools.update_commit_status_schema, tools.update_commit_status)

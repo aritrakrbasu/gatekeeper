@@ -862,7 +862,7 @@ Please generate a fix for this bug. Return valid JSON with file_path, fixed_code
 
 validate_mr_webhook_schema = {
     "name": "validate_mr_webhook",
-    "description": "Validate if a GitLab MR webhook should be processed. Checks MR state, branch monitoring configuration, and auto-fix branch detection. Returns validation result with skip reason if applicable.",
+    "description": "Validate if a GitLab MR webhook should be processed. Checks MR action (allows open, reopen, update), MR state, branch monitoring configuration, and auto-fix branch detection. Returns validation result with skip reason if applicable.",
     "parameters": {
         "type": "OBJECT",
         "properties": {
@@ -871,7 +871,7 @@ validate_mr_webhook_schema = {
             "target_branch": {"type": "STRING", "description": "Target branch name"},
             "source_branch": {"type": "STRING", "description": "Source branch name"},
             "mr_state": {"type": "STRING", "description": "MR state (opened, closed, merged)"},
-            "action": {"type": "STRING", "description": "Webhook action (open, update, merge, close)"}
+            "action": {"type": "STRING", "description": "Webhook action (open, reopen, update, merge, close)"}
         },
         "required": ["project_id", "mr_iid", "target_branch", "source_branch", "mr_state", "action"]
     }
@@ -890,7 +890,7 @@ async def validate_mr_webhook(
     Validate if a GitLab MR webhook should be processed.
 
     Checks:
-    1. MR action must be 'open' (not update, merge, close)
+    1. MR action must be 'open', 'reopen', or 'update' (not merge, close)
     2. MR state must be 'opened'
     3. Target branch must be monitored (configured in repository)
     4. Source branch must not be auto-fix branch (gatekeeper/*)
@@ -898,11 +898,12 @@ async def validate_mr_webhook(
     Returns:
         Dict with should_process, skip_reason, project_id, mr_iid
     """
-    # Check 1: Action must be 'open'
-    if action != "open":
+    # Check 1: Action must be 'open', 'reopen', or 'update'
+    valid_actions = {"open", "reopen", "update"}
+    if action not in valid_actions:
         return {
             "should_process": False,
-            "skip_reason": f"MR action is '{action}', only 'open' actions are processed",
+            "skip_reason": f"MR action is '{action}', only '{', '.join(valid_actions)}' actions are processed",
             "project_id": project_id,
             "mr_iid": mr_iid
         }
@@ -961,14 +962,15 @@ post_loading_indicator_schema = {
         "type": "OBJECT",
         "properties": {
             "project_id": {"type": "STRING", "description": "GitLab project ID"},
-            "mr_iid": {"type": "INTEGER", "description": "Merge request IID"}
+            "mr_iid": {"type": "INTEGER", "description": "Merge request IID"},
+            "user_id": {"type": "STRING", "description": "User ID for GitLab authentication"}
         },
-        "required": ["project_id", "mr_iid"]
+        "required": ["project_id", "mr_iid", "user_id"]
     }
 }
 
 
-async def post_loading_indicator(project_id: str, mr_iid: int) -> Dict[str, Any]:
+async def post_loading_indicator(project_id: str, mr_iid: int, user_id: str) -> Dict[str, Any]:
     """
     Post a loading indicator comment to a GitLab MR.
 
@@ -988,7 +990,7 @@ async def post_loading_indicator(project_id: str, mr_iid: int) -> Dict[str, Any]
     try:
         # Use the post_gitlab_mr_comment function
         result = await post_gitlab_mr_comment(
-            user_id="",  # Empty user_id to use fallback token
+            user_id=user_id,
             project_id=str(project_id),
             mr_iid=mr_iid,
             comment=loading_message
@@ -1016,9 +1018,10 @@ update_review_comment_schema = {
             "project_id": {"type": "STRING", "description": "GitLab project ID"},
             "mr_iid": {"type": "INTEGER", "description": "Merge request IID"},
             "comment_id": {"type": "INTEGER", "description": "ID of comment to update"},
-            "audit_report": {"type": "STRING", "description": "Full audit report in markdown format"}
+            "audit_report": {"type": "STRING", "description": "Full audit report in markdown format"},
+            "user_id": {"type": "STRING", "description": "User ID for GitLab authentication"}
         },
-        "required": ["project_id", "mr_iid", "comment_id", "audit_report"]
+        "required": ["project_id", "mr_iid", "comment_id", "audit_report", "user_id"]
     }
 }
 
@@ -1027,7 +1030,8 @@ async def update_review_comment(
     project_id: str,
     mr_iid: int,
     comment_id: int,
-    audit_report: str
+    audit_report: str,
+    user_id: str
 ) -> Dict[str, Any]:
     """
     Update an existing MR comment with the full audit report.
@@ -1043,7 +1047,7 @@ async def update_review_comment(
 
     try:
         result = await post_gitlab_mr_comment(
-            user_id="",  # Empty user_id to use fallback token
+            user_id=user_id,
             project_id=str(project_id),
             mr_iid=mr_iid,
             comment=report_with_timestamp,
@@ -1072,9 +1076,10 @@ update_commit_status_schema = {
             "project_id": {"type": "STRING", "description": "GitLab project ID"},
             "commit_sha": {"type": "STRING", "description": "Commit SHA to update status for"},
             "status": {"type": "STRING", "description": "Status value", "enum": ["success", "failed", "running"]},
-            "description": {"type": "STRING", "description": "Description text for the status"}
+            "description": {"type": "STRING", "description": "Description text for the status"},
+            "user_id": {"type": "STRING", "description": "User ID for GitLab authentication"}
         },
-        "required": ["project_id", "commit_sha", "status"]
+        "required": ["project_id", "commit_sha", "status", "user_id"]
     }
 }
 
@@ -1083,7 +1088,8 @@ async def update_commit_status(
     project_id: str,
     commit_sha: str,
     status: str,
-    description: str = "Security audit completed"
+    description: str = "Security audit completed",
+    user_id: str = ""
 ) -> Dict[str, Any]:
     """
     Update the commit status badge for a GitLab MR.
@@ -1103,7 +1109,7 @@ async def update_commit_status(
     try:
         # Use GitLab REST API to update commit status
         result = await _gitlab_rest_api_call(
-            user_id="",  # Empty user_id to use fallback token
+            user_id=user_id,
             project_id=str(project_id),
             method="POST",
             endpoint=f"/projects/{project_id}/statuses/{commit_sha}",
