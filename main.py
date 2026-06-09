@@ -14,8 +14,9 @@ load_dotenv()
 # Import Gatekeeper Services
 from services import (
     mcp_service, review_service, auth_service, repository_service,
-    mongo_client, user_service, billing_service, incident_service
-), fivetran_service
+    mongo_client, user_service, billing_service, incident_service,
+    fivetran_service
+)
 from api_models import (
     OAuthCallbackRequest, TokenResponse, UserResponse,
     VerifyTokenRequest, VerifyTokenResponse, LogoutResponse,
