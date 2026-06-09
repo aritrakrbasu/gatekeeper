@@ -804,6 +804,120 @@ async def logout(request: VerifyTokenRequest):
 
 
 # ============================================================================
+# Dashboard & Alerts Endpoints (Phase 8)
+# ============================================================================
+
+@app.get("/api/dashboard/recent-mrs")
+async def get_dashboard_recent_mrs(
+    limit: int = Query(default=10, ge=1),
+    user: dict = Depends(require_jwt_user)
+):
+    """Get recent merge requests across all connected repositories for the logged-in user."""
+    try:
+        user_id = str(user["id"])
+        mrs = await repository_service.get_recent_mrs_for_user(user_id, limit)
+        return mrs
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch recent MRs for dashboard: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/dashboard/stats")
+async def get_dashboard_stats(
+    user: dict = Depends(require_jwt_user)
+):
+    """Get aggregated dashboard stats for the logged-in user."""
+    try:
+        user_id = str(user["id"])
+        stats = await repository_service.get_dashboard_stats(user_id)
+        return stats
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch dashboard stats: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/dashboard/repos-health")
+async def get_dashboard_repos_health(
+    user: dict = Depends(require_jwt_user)
+):
+    """Get health stats of user's repositories for the dashboard."""
+    try:
+        user_id = str(user["id"])
+        health = await repository_service.get_repos_health(user_id)
+        return health
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch repositories health score: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/alerts")
+async def get_alerts(
+    severity: Optional[str] = Query(default=None),
+    user: dict = Depends(require_jwt_user)
+):
+    """Get alerts for the logged-in user, optionally filtered by severity."""
+    try:
+        user_id = str(user["id"])
+        alerts = await repository_service.get_alerts_for_user(user_id, severity)
+        return alerts
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch alerts: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/api/alerts/{id}/read")
+async def mark_alert_as_read(
+    id: str,
+    user: dict = Depends(require_jwt_user)
+):
+    """Mark a specific alert as read."""
+    try:
+        user_id = str(user["id"])
+        success = await repository_service.mark_alert_read(user_id, id)
+        if not success:
+            raise HTTPException(status_code=404, detail="Alert not found or already read")
+        return {"success": True}
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        print(f"[ERROR] Failed to mark alert as read: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/alerts/{id}")
+async def delete_alert(
+    id: str,
+    user: dict = Depends(require_jwt_user)
+):
+    """Dismiss/delete a specific alert."""
+    try:
+        user_id = str(user["id"])
+        success = await repository_service.dismiss_alert(user_id, id)
+        if not success:
+            raise HTTPException(status_code=404, detail="Alert not found")
+        return {"success": True}
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        print(f"[ERROR] Failed to dismiss alert: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/api/alerts/mark-all-read")
+async def mark_all_alerts_as_read(
+    user: dict = Depends(require_jwt_user)
+):
+    """Mark all unread alerts for the user as read."""
+    try:
+        user_id = str(user["id"])
+        await repository_service.mark_all_alerts_read(user_id)
+        return {"success": True}
+    except Exception as e:
+        print(f"[ERROR] Failed to mark all alerts read: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
 # Repository Endpoints
 # ============================================================================
 

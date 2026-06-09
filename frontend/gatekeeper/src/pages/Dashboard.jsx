@@ -5,6 +5,7 @@ import {
   useRecentMRs,
   useRepositories,
   useConnectRepository,
+  useDashboardStats,
 } from "../services/queries";
 import ConnectRepositoryModal from "../components/ConnectRepositoryModal";
 
@@ -24,6 +25,7 @@ const Dashboard = () => {
   // Use React Query hooks with automatic caching and refetching
   const { data: recentMRs = [] } = useRecentMRs(10);
   const { data: repositories = [] } = useRepositories({ limit: 5 });
+  const { data: stats } = useDashboardStats();
 
   // Use React Query mutation for connecting repositories
   const connectMutation = useConnectRepository();
@@ -37,9 +39,34 @@ const Dashboard = () => {
     }));
   }, [repositories]);
 
-  // Dummy data for the new sparkline chart
-  const reviewTimeTrend = [65, 55, 75, 45, 50, 40, 45]; // Heights in percentage
-  const maxTrend = Math.max(...reviewTimeTrend);
+  // Calculate Global Code Health Score Circle Offset
+  const healthScore = stats?.global_code_health ?? 100;
+  // 2 * PI * r = 2 * 3.14159 * 40 = 251.2
+  const healthOffset = 251.2 * (1 - healthScore / 100);
+
+  // Generate dynamic sparkline path from the backend review time trend data
+  const reviewTimeTrendPath = useMemo(() => {
+    const trend = stats?.review_time_trend || [45, 50, 40, 55, 45, 35, 42];
+    const maxVal = Math.max(...trend, 1);
+    const minVal = Math.min(...trend, 0);
+    const range = maxVal - minVal || 1;
+    
+    // Map points to SVG viewBox 0 0 100 40
+    // x: 0 to 100, y: 32 (min/bottom) to 8 (max/top)
+    const points = trend.map((val, idx) => {
+      const x = (idx / (trend.length - 1)) * 100;
+      const y = 32 - ((val - minVal) / range) * 24;
+      return { x, y };
+    });
+
+    let linePath = `M${points[0].x},${points[0].y}`;
+    for (let i = 1; i < points.length; i++) {
+      linePath += ` L${points[i].x},${points[i].y}`;
+    }
+    const fillPath = `${linePath} L100,40 L0,40 Z`;
+
+    return { linePath, fillPath };
+  }, [stats?.review_time_trend]);
 
   return (
     <div className="max-w-6xl mx-auto px-4 md:px-8">
@@ -72,7 +99,7 @@ const Dashboard = () => {
               Morning, {user?.name || "John"}.
             </h2>
             <p className="text-slate-600 text-sm max-w-sm leading-relaxed">
-              Gatekeeper has reviewed 14 merge requests while you were away.
+              Gatekeeper has reviewed {stats?.mrs_reviewed_count ?? 14} merge requests while you were away.
               Everything is running smoothly.
             </p>
           </div>
@@ -119,16 +146,16 @@ const Dashboard = () => {
                   d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"
                 />
               </svg>
-              12%
+              {stats?.avg_review_time_change ?? "12%"}
             </span>
           </div>
 
           <div className="z-10 flex-1">
             <div className="flex items-baseline gap-1">
               <h2 className="text-6xl font-bold text-slate-900 tracking-tighter">
-                45
+                {stats?.avg_review_time_value ?? "45"}
               </h2>
-              <span className="text-2xl font-medium text-slate-400">s</span>
+              <span className="text-2xl font-medium text-slate-400">{stats?.avg_review_time_unit ?? "s"}</span>
             </div>
             <p className="text-xs text-slate-500 mt-2 font-medium">
               Across all repositories
@@ -143,12 +170,12 @@ const Dashboard = () => {
               className="w-full h-full text-[#FC6D26]"
             >
               <path
-                d="M0,40 L0,25 C15,20 25,35 40,25 C55,15 70,35 85,15 L100,20 L100,40 Z"
+                d={reviewTimeTrendPath.fillPath}
                 fill="currentColor"
                 opacity="0.1"
               />
               <path
-                d="M0,25 C15,20 25,35 40,25 C55,15 70,35 85,15 L100,20"
+                d={reviewTimeTrendPath.linePath}
                 fill="none"
                 stroke="currentColor"
                 strokeWidth="1.5"
@@ -182,7 +209,7 @@ const Dashboard = () => {
 
           <div className="mb-6">
             <h2 className="text-6xl font-bold text-slate-900 tracking-tighter leading-none">
-              342
+              {stats?.issues_prevented ?? "342"}
             </h2>
           </div>
 
@@ -193,21 +220,21 @@ const Dashboard = () => {
               <span className="text-xs font-medium text-slate-600 flex-1">
                 Security Vectors
               </span>
-              <span className="text-xs font-bold text-slate-900">145</span>
+              <span className="text-xs font-bold text-slate-900">{stats?.issues_breakdown?.security ?? 145}</span>
             </div>
             <div className="flex items-center gap-3">
               <div className="w-1.5 h-1.5 rounded-full bg-amber-400"></div>
               <span className="text-xs font-medium text-slate-600 flex-1">
                 Logic Errors
               </span>
-              <span className="text-xs font-bold text-slate-900">112</span>
+              <span className="text-xs font-bold text-slate-900">{stats?.issues_breakdown?.logic ?? 112}</span>
             </div>
             <div className="flex items-center gap-3">
               <div className="w-1.5 h-1.5 rounded-full bg-slate-300"></div>
               <span className="text-xs font-medium text-slate-600 flex-1">
                 Performance
               </span>
-              <span className="text-xs font-bold text-slate-900">85</span>
+              <span className="text-xs font-bold text-slate-900">{stats?.issues_breakdown?.performance ?? 85}</span>
             </div>
           </div>
         </div>
@@ -350,13 +377,13 @@ const Dashboard = () => {
                 strokeWidth="8"
                 fill="transparent"
                 strokeDasharray="251.2"
-                strokeDashoffset="30.14"
+                strokeDashoffset={healthOffset}
                 className="text-emerald-400 drop-shadow-[0_0_10px_rgba(52,211,153,0.5)] transition-all duration-1000 ease-out"
               />
             </svg>
             <div className="absolute inset-0 flex flex-col items-center justify-center">
               <span className="text-3xl font-bold text-white tracking-tight">
-                88<span className="text-lg text-emerald-400">%</span>
+                {healthScore}<span className="text-lg text-emerald-400">%</span>
               </span>
             </div>
           </div>

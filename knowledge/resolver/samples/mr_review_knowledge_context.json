@@ -28,8 +28,8 @@
           "replay_reference": "replay:exec-mr-42-sample"
         },
         "source_execution_id": "exec-mr-42-sample",
-        "reviewed_at": "2026-06-06T12:12:46.597628Z",
-        "created_at": "2026-06-06T12:12:46.596197Z"
+        "reviewed_at": "2026-06-09T19:55:03.584071Z",
+        "created_at": "2026-06-09T19:55:03.583847Z"
       }
     ]
   },
@@ -55,7 +55,7 @@
     },
     "limit": 20,
     "total_available": 1,
-    "resolved_at": "2026-06-06T12:12:46.598589Z",
+    "resolved_at": "2026-06-09T19:55:03.584387Z",
     "subject_id": "mr:42:82576405",
     "question": null
   }

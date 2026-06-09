@@ -54,8 +54,15 @@ class WorkflowEngine:
         self.approval = HumanApprovalLayer()
 
     def _should_pause_for_approval(self, context: AgentContext, tool_name: str) -> bool:
-        """All tools run automatically - no human approval required."""
-        return False
+        """Determines if a tool execution requires human approval pause."""
+        trigger_type = context.metadata.get("trigger_type", "")
+        if trigger_type in WEBHOOK_UNATTENDED_TRIGGERS:
+            return False
+
+        # Mutating write actions require approval
+        mutate_keywords = {"create", "update", "delete", "post", "write", "apply", "hotfix", "push", "patch"}
+        is_mutating = any(kw in tool_name for kw in mutate_keywords)
+        return is_mutating
 
     def _is_webhook_mr_terminal_step(self, context: AgentContext, step: StepSchema) -> bool:
         """Successful MR comment post completes unattended webhook reviews."""
@@ -89,10 +96,6 @@ class WorkflowEngine:
         if aril is not None:
             result["execution_id"] = aril.execution_id
         return result
-
-    def _should_pause_for_approval(self, context: AgentContext, tool_name: str) -> bool:
-        """All tools run automatically - no human approval required."""
-        return False
 
     async def run_task(self, context: AgentContext) -> Dict[str, Any]:
         """

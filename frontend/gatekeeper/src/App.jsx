@@ -16,7 +16,7 @@ import Dashboard from "./pages/Dashboard";
 import Repositories from "./pages/Repositories";
 import RepoDetails from "./pages/RepoDetails";
 import Layout from "./components/Layout";
-import Alerts from "./pages/Alerts";
+
 import Settings from "./pages/Settings";
 import Billing from "./pages/Billing";
 import Onboarding from "./components/Onboarding";
@@ -59,14 +59,7 @@ function App() {
                   </ProtectedRoute>
                 }
               />
-              <Route
-                path="/alerts"
-                element={
-                  <ProtectedRoute>
-                    <Alerts />
-                  </ProtectedRoute>
-                }
-              />
+
               <Route
                 path="/settings"
                 element={
