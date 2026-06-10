@@ -632,6 +632,25 @@ async def sentry_webhook(request: Request, x_sentry_signature: str = Header(None
         document={**payload, "received_at": datetime.utcnow().isoformat()}
     )
 
+    # Surface Sentry issue as a user-facing production signal
+    if repo_owner_user_id:
+        try:
+            repo_name = "unknown"
+            if gitlab_project_id:
+                repo_doc = await mongo_client.find_one(
+                    collection_name="connected_repositories",
+                    filter={"id": gitlab_project_id},
+                )
+                if repo_doc:
+                    repo_name = repo_doc.get("name") or gitlab_project_id
+            await repository_service.create_sentry_alert_from_webhook(
+                user_id=repo_owner_user_id,
+                repo_name=repo_name,
+                payload=payload,
+            )
+        except Exception as alert_exc:
+            print(f"[WARN] Failed to create Sentry alert: {alert_exc}", flush=True)
+
     # Check MCP readiness
     if not mcp_service.mcp_ready:
         print("[⚠️] MCP sessions not ready yet - cannot process webhook")
@@ -853,12 +872,13 @@ async def get_dashboard_repos_health(
 @app.get("/api/alerts")
 async def get_alerts(
     severity: Optional[str] = Query(default=None),
+    source: Optional[str] = Query(default=None),
     user: dict = Depends(require_jwt_user)
 ):
-    """Get alerts for the logged-in user, optionally filtered by severity."""
+    """Get alerts for the logged-in user, optionally filtered by severity and source."""
     try:
         user_id = str(user["id"])
-        alerts = await repository_service.get_alerts_for_user(user_id, severity)
+        alerts = await repository_service.get_alerts_for_user(user_id, severity, source)
         return alerts
     except Exception as e:
         print(f"[ERROR] Failed to fetch alerts: {e}")
@@ -905,12 +925,13 @@ async def delete_alert(
 
 @app.put("/api/alerts/mark-all-read")
 async def mark_all_alerts_as_read(
+    source: Optional[str] = Query(default=None),
     user: dict = Depends(require_jwt_user)
 ):
     """Mark all unread alerts for the user as read."""
     try:
         user_id = str(user["id"])
-        await repository_service.mark_all_alerts_read(user_id)
+        await repository_service.mark_all_alerts_read(user_id, source)
         return {"success": True}
     except Exception as e:
         print(f"[ERROR] Failed to mark all alerts read: {e}")

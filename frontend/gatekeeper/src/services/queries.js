@@ -291,12 +291,13 @@ export function useReposHealth() {
 
 /**
  * Get alerts
- * @param {string} severity - Filter by severity
+ * @param {{ severity?: string, source?: string }} filters
  */
-export function useAlerts(severity) {
+export function useAlerts(filters = {}) {
+  const { severity, source } = filters;
   return useQuery({
-    queryKey: queryKeys.alerts.list(severity),
-    queryFn: () => api.getAlerts(severity),
+    queryKey: queryKeys.alerts.list(severity, source),
+    queryFn: () => api.getAlerts({ severity, source }),
     staleTime: 1 * 60 * 1000, // 1 minute
     refetchInterval: 30 * 1000, // Auto-refresh every 30 seconds
   });
@@ -335,11 +336,11 @@ export function useDismissAlert() {
 /**
  * Mark all alerts as read mutation
  */
-export function useMarkAllAlertsRead() {
+export function useMarkAllAlertsRead(source) {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: () => api.markAllAlertsRead(),
+    mutationFn: () => api.markAllAlertsRead(source),
     onSuccess: () => {
       // Invalidate alerts list
       queryClient.invalidateQueries({ queryKey: queryKeys.alerts.lists() });

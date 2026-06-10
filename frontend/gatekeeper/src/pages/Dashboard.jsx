@@ -6,6 +6,7 @@ import {
   useRepositories,
   useConnectRepository,
   useDashboardStats,
+  useAlerts,
 } from "../services/queries";
 import ConnectRepositoryModal from "../components/ConnectRepositoryModal";
 
@@ -26,6 +27,8 @@ const Dashboard = () => {
   const { data: recentMRs = [] } = useRecentMRs(10);
   const { data: repositories = [] } = useRepositories({ limit: 5 });
   const { data: stats } = useDashboardStats();
+  const { data: alerts = [] } = useAlerts({ source: "sentry" });
+  const unreadAlertCount = alerts.filter((alert) => alert.unread).length;
 
   // Use React Query mutation for connecting repositories
   const connectMutation = useConnectRepository();
@@ -72,7 +75,11 @@ const Dashboard = () => {
     <div className="max-w-6xl mx-auto px-4 md:px-8">
       {/* Desktop Notification Area */}
       <div className="hidden md:flex justify-end mb-6">
-        <button className="relative w-12 h-12 rounded-full bg-white/60 backdrop-blur-xl border border-white/80 flex items-center justify-center text-slate-400 hover:text-slate-900 shadow-[0_8px_32px_rgba(0,0,0,0.04)] transition-all hover:scale-105">
+        <button
+          onClick={() => navigate("/signals")}
+          className="relative w-12 h-12 rounded-full bg-white/60 backdrop-blur-xl border border-white/80 flex items-center justify-center text-slate-400 hover:text-slate-900 shadow-[0_8px_32px_rgba(0,0,0,0.04)] transition-all hover:scale-105"
+          aria-label="Open Sentry production errors"
+        >
           <svg
             className="w-5 h-5"
             fill="none"
@@ -86,7 +93,9 @@ const Dashboard = () => {
               d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"
             />
           </svg>
-          <span className="absolute top-3 right-3 w-2.5 h-2.5 bg-[#FC6D26] rounded-full border-2 border-white"></span>
+          {unreadAlertCount > 0 && (
+            <span className="absolute top-3 right-3 w-2.5 h-2.5 bg-[#FC6D26] rounded-full border-2 border-white"></span>
+          )}
         </button>
       </div>
 

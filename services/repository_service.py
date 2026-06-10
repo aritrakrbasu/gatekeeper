@@ -2179,7 +2179,8 @@ async def update_mr_analysis(
                                     alert_type=alert_type,
                                     title=title,
                                     description=description,
-                                    action="Review Blocked MR"
+                                    action="Review Blocked MR",
+                                    source="mr_review",
                                 )
                                 print(f"[OK] Created review alert for user {target_user_id} on repo {repo_name}: {title}")
                 except Exception as alert_err:
@@ -2814,6 +2815,161 @@ async def update_repository_credentials(repo_id: str, data: Dict) -> Dict:
 # ============================================================================
 
 ALERTS_COLLECTION = "alerts"
+SENTRY_WEBHOOKS_COLLECTION = "sentry_webhooks"
+
+
+def _map_sentry_level_to_severity(level: str) -> str:
+    level_lower = (level or "").lower()
+    if level_lower in {"fatal", "error"}:
+        return "critical"
+    if level_lower in {"warning", "warn"}:
+        return "warning"
+    return "info"
+
+
+def _extract_sentry_org_slug(payload: dict) -> Optional[str]:
+    if not isinstance(payload, dict):
+        return None
+
+    org_slug = payload.get("organization", {}).get("slug")
+    if org_slug:
+        return org_slug
+
+    web_url = payload.get("data", {}).get("issue", {}).get("web_url", "")
+    if "sentry.io" in web_url:
+        return web_url.split("//")[1].split(".sentry.io")[0]
+
+    error_url = payload.get("data", {}).get("error", {}).get("url", "")
+    if "sentry.io" in error_url and "/projects/" in error_url:
+        parts = error_url.split("/projects/")
+        if len(parts) > 1:
+            return parts[1].split("/")[0]
+
+    return None
+
+
+async def create_sentry_alert_from_webhook(
+    user_id: str,
+    repo_name: str,
+    payload: dict,
+) -> str:
+    """Create or refresh an alert from an incoming Sentry webhook payload."""
+    from agents.context import normalize_sentry_payload
+
+    normalized = normalize_sentry_payload(payload)
+    issue_id = str(normalized.get("issue_id") or "").strip()
+    if not issue_id:
+        return ""
+
+    title = normalized.get("title") or "Sentry production error"
+    level = normalized.get("level") or "error"
+    environment = normalized.get("environment") or "production"
+    culprit = normalized.get("culprit") or "unknown location"
+    web_url = normalized.get("url") or payload.get("data", {}).get("issue", {}).get("web_url", "")
+
+    description_parts = [
+        f"Sentry {level} in {environment}.",
+        f"Culprit: {culprit}.",
+    ]
+    if normalized.get("message"):
+        description_parts.append(normalized["message"])
+
+    severity = _map_sentry_level_to_severity(level)
+
+    if MONGO_CONNECTION_STRING:
+        existing = await mongo_client.find_one(
+            collection_name=ALERTS_COLLECTION,
+            filter={"user_id": user_id, "source": "sentry", "issue_id": issue_id},
+        )
+        if existing:
+            await mongo_client.update_one(
+                collection_name=ALERTS_COLLECTION,
+                filter={"_id": existing["_id"], "user_id": user_id},
+                update={
+                    "$set": {
+                        "severity": severity,
+                        "title": title,
+                        "description": " ".join(description_parts),
+                        "web_url": web_url,
+                        "updated_at": datetime.now().isoformat(),
+                        "unread": True,
+                    }
+                },
+            )
+            return str(existing["_id"])
+
+    return await create_alert(
+        user_id=user_id,
+        repo=repo_name,
+        severity=severity,
+        alert_type="Production Error",
+        title=title,
+        description=" ".join(description_parts),
+        action="View in Sentry",
+        source="sentry",
+        issue_id=issue_id,
+        web_url=web_url,
+    )
+
+
+async def _backfill_sentry_alerts_for_user(user_id: str) -> None:
+    """Create alerts from stored sentry_webhooks for repos the user owns."""
+    if not MONGO_CONNECTION_STRING:
+        return
+
+    user_repos = await _get_user_repositories(user_id)
+    if not user_repos:
+        return
+
+    org_to_repo = {}
+    for repo in user_repos:
+        sentry = repo.get("sentry_integration") or {}
+        if not sentry.get("connected"):
+            continue
+        for org in sentry.get("organizations") or []:
+            slug = org.get("slug")
+            if slug:
+                org_to_repo[slug] = repo.get("name") or repo.get("id") or slug
+
+    if not org_to_repo:
+        return
+
+    webhooks = await mongo_client.find(
+        collection_name=SENTRY_WEBHOOKS_COLLECTION,
+        filter={},
+        sort=[("received_at", -1)],
+        limit=100,
+    )
+
+    for webhook in webhooks:
+        org_slug = _extract_sentry_org_slug(webhook)
+        if not org_slug or org_slug not in org_to_repo:
+            continue
+
+        normalized = None
+        try:
+            from agents.context import normalize_sentry_payload
+            normalized = normalize_sentry_payload(webhook)
+        except Exception:
+            continue
+
+        issue_id = str((normalized or {}).get("issue_id") or "").strip()
+        if not issue_id:
+            continue
+
+        existing = await mongo_client.find_one(
+            collection_name=ALERTS_COLLECTION,
+            filter={"user_id": user_id, "source": "sentry", "issue_id": issue_id},
+        )
+        if existing:
+            continue
+
+        await create_sentry_alert_from_webhook(
+            user_id=user_id,
+            repo_name=org_to_repo[org_slug],
+            payload=webhook,
+        )
+
 
 async def get_recent_mrs_for_user(user_id: str, limit: int = 10) -> List[Dict]:
     """
@@ -2895,38 +3051,33 @@ async def get_recent_mrs_for_user(user_id: str, limit: int = 10) -> List[Dict]:
         return []
 
 
-async def get_alerts_for_user(user_id: str, severity: Optional[str] = None) -> List[Dict]:
+async def get_alerts_for_user(
+    user_id: str,
+    severity: Optional[str] = None,
+    source: Optional[str] = None,
+) -> List[Dict]:
     """
-    Get alerts for a user from MongoDB. Seeds defaults if none exist.
+    Get alerts for a user from MongoDB.
+    Optionally filter by severity and/or source (e.g. source='sentry').
     """
     if not MONGO_CONNECTION_STRING:
         return []
 
     try:
+        if source in (None, "sentry"):
+            await _backfill_sentry_alerts_for_user(user_id)
+
         filter_query = {"user_id": user_id}
         if severity:
             filter_query["severity"] = severity.lower()
+        if source:
+            filter_query["source"] = source.lower()
 
         alerts = await mongo_client.find(
             collection_name=ALERTS_COLLECTION,
             filter=filter_query,
             sort=[("created_at", -1)]
         )
-
-        # If no alerts exist at all for the user, seed default alerts to populate the UI
-        user_has_any_alerts = await mongo_client.find_one(
-            collection_name=ALERTS_COLLECTION,
-            filter={"user_id": user_id}
-        )
-        if not user_has_any_alerts:
-            print(f"[INFO] Seeding initial alerts for user {user_id}")
-            await seed_default_alerts(user_id)
-            # Fetch again after seeding
-            alerts = await mongo_client.find(
-                collection_name=ALERTS_COLLECTION,
-                filter=filter_query,
-                sort=[("created_at", -1)]
-            )
 
         result = []
         for alert in alerts:
@@ -2939,7 +3090,10 @@ async def get_alerts_for_user(user_id: str, severity: Optional[str] = None) -> L
                 "description": alert.get("description", ""),
                 "time": _relative_time(alert.get("created_at", "")),
                 "unread": alert.get("unread", True),
-                "action": alert.get("action", "View Details")
+                "action": alert.get("action", "View Details"),
+                "source": alert.get("source", "system"),
+                "issue_id": alert.get("issue_id"),
+                "web_url": alert.get("web_url"),
             })
         return result
     except Exception as e:
@@ -2954,7 +3108,10 @@ async def create_alert(
     alert_type: str,
     title: str,
     description: str,
-    action: str = "View Details"
+    action: str = "View Details",
+    source: str = "system",
+    issue_id: Optional[str] = None,
+    web_url: Optional[str] = None,
 ) -> str:
     """
     Create a new alert in MongoDB.
@@ -2973,8 +3130,13 @@ async def create_alert(
         "description": description,
         "unread": True,
         "action": action,
+        "source": source,
         "created_at": datetime.now().isoformat()
     }
+    if issue_id:
+        alert_doc["issue_id"] = issue_id
+    if web_url:
+        alert_doc["web_url"] = web_url
 
     try:
         inserted_id = await mongo_client.insert_one(
@@ -3024,7 +3186,7 @@ async def dismiss_alert(user_id: str, alert_id: str) -> bool:
         return False
 
 
-async def mark_all_alerts_read(user_id: str) -> bool:
+async def mark_all_alerts_read(user_id: str, source: Optional[str] = None) -> bool:
     """
     Mark all unread alerts for a user as read.
     """
@@ -3034,8 +3196,11 @@ async def mark_all_alerts_read(user_id: str) -> bool:
     try:
         db = await mongo_client.get_database()
         collection = db[ALERTS_COLLECTION]
+        filter_query = {"user_id": user_id, "unread": True}
+        if source:
+            filter_query["source"] = source.lower()
         result = await collection.update_many(
-            {"user_id": user_id, "unread": True},
+            filter_query,
             {"$set": {"unread": False}}
         )
         return result.modified_count > 0
@@ -3190,12 +3355,6 @@ async def get_dashboard_stats(user_id: str) -> Dict[str, Any]:
         critical_count = await alerts_col.count_documents({"user_id": user_id, "severity": "critical"})
         warning_count = await alerts_col.count_documents({"user_id": user_id, "severity": "warning"})
         info_count = await alerts_col.count_documents({"user_id": user_id, "severity": "info"})
-        
-        if critical_count == 0 and warning_count == 0 and info_count == 0:
-            await seed_default_alerts(user_id)
-            critical_count = await alerts_col.count_documents({"user_id": user_id, "severity": "critical"})
-            warning_count = await alerts_col.count_documents({"user_id": user_id, "severity": "warning"})
-            info_count = await alerts_col.count_documents({"user_id": user_id, "severity": "info"})
             
         total_issues = critical_count + warning_count + info_count
 

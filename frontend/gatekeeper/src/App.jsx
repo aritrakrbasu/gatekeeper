@@ -19,6 +19,7 @@ import Layout from "./components/Layout";
 
 import Settings from "./pages/Settings";
 import Billing from "./pages/Billing";
+import Signals from "./pages/Signals";
 import Onboarding from "./components/Onboarding";
 import GatekeeperLanding from "./pages/GatekeeperLanding";
 
@@ -60,6 +61,14 @@ function App() {
                 }
               />
 
+              <Route
+                path="/signals"
+                element={
+                  <ProtectedRoute>
+                    <Signals />
+                  </ProtectedRoute>
+                }
+              />
               <Route
                 path="/settings"
                 element={

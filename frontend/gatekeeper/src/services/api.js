@@ -237,11 +237,15 @@ export const api = {
   // ============================================================================
 
   /**
-   * Get all alerts
+   * Get alerts
+   * @param {{ severity?: string, source?: string }} filters
    */
-  getAlerts: (severity) => {
-    const params = severity ? `?severity=${severity}` : "";
-    return apiRequest(`/api/alerts${params}`);
+  getAlerts: ({ severity, source } = {}) => {
+    const params = new URLSearchParams();
+    if (severity) params.set("severity", severity);
+    if (source) params.set("source", source);
+    const query = params.toString();
+    return apiRequest(`/api/alerts${query ? `?${query}` : ""}`);
   },
 
   /**
@@ -258,8 +262,10 @@ export const api = {
   /**
    * Mark all alerts as read
    */
-  markAllAlertsRead: () =>
-    apiRequest("/api/alerts/mark-all-read", { method: "PUT" }),
+  markAllAlertsRead: (source) => {
+    const params = source ? `?source=${encodeURIComponent(source)}` : "";
+    return apiRequest(`/api/alerts/mark-all-read${params}`, { method: "PUT" });
+  },
 
   // ============================================================================
   // Billing

@@ -97,7 +97,7 @@ export const queryKeys = {
   alerts: {
     all: ["alerts"],
     lists: () => ["alerts", "list"],
-    list: (severity) => ["alerts", "list", severity],
+    list: (severity, source) => ["alerts", "list", severity, source],
   },
 
   // ============================================================================
