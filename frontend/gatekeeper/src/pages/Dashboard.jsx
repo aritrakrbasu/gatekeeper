@@ -78,7 +78,7 @@ const Dashboard = () => {
         <button
           onClick={() => navigate("/signals")}
           className="relative w-12 h-12 rounded-full bg-white/60 backdrop-blur-xl border border-white/80 flex items-center justify-center text-slate-400 hover:text-slate-900 shadow-[0_8px_32px_rgba(0,0,0,0.04)] transition-all hover:scale-105"
-          aria-label="Open Sentry production errors"
+          aria-label="Open alerts"
         >
           <svg
             className="w-5 h-5"

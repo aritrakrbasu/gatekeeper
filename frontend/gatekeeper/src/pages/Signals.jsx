@@ -55,7 +55,7 @@ const Signals = () => {
     <div className="max-w-6xl mx-auto px-4 md:px-8 pb-10">
       <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-4 mb-8">
         <div>
-          <p className="text-sm font-medium text-[#FC6D26] mb-2">Sentry</p>
+          <p className="text-sm font-medium text-[#FC6D26] mb-2">Alerts</p>
           <h1 className="text-3xl font-semibold text-slate-900 tracking-tight">
             Production Errors
           </h1>
