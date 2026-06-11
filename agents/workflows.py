@@ -381,6 +381,9 @@ async def build_sentry_registry():
     # AI Fix Generation tool
     registry.register_local_tool("generate_fix", tools.generate_fix_schema, tools.generate_fix)
 
+    # Sentry PR Attachment tool
+    registry.register_local_tool("attach_pr_to_sentry_issue", tools.attach_pr_to_sentry_issue_schema, tools.attach_pr_to_sentry_issue)
+
     # 2. Register active MCP sessions (EXCLUDING GitLab MCP)
     # MongoDB
     if mcp_service.mongo_session:

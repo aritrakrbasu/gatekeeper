@@ -247,6 +247,9 @@ async def build_default_registry(aril: Optional["ArilSession"] = None, exclude_p
     registry.register_local_tool("update_commit_status", tools.update_commit_status_schema, tools.update_commit_status)
     registry.register_local_tool("track_progress", tools.track_progress_schema, tools.track_progress)
 
+    # Sentry PR Attachment Tool
+    registry.register_local_tool("attach_pr_to_sentry_issue", tools.attach_pr_to_sentry_issue_schema, tools.attach_pr_to_sentry_issue)
+
     print(f"[DEBUG] [build_default_registry] Starting MCP session registrations...")
     print(f"[DEBUG] [build_default_registry] GitLab session: {mcp_service.gitlab_session is not None}")
     print(f"[DEBUG] [build_default_registry] Mongo session: {mcp_service.mongo_session is not None}")

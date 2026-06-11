@@ -1606,4 +1606,110 @@ async def commit_file_to_branch(
                 "commit_message": result.get("commit_message"),
                 "updated": True
             }
+
+
+# ============================================================================
+# Attach PR to Sentry Issue Tool
+# ============================================================================
+
+attach_pr_to_sentry_issue_schema = {
+    "name": "attach_pr_to_sentry_issue",
+    "description": "Attaches a GitLab merge request (PR) to a Sentry issue in MongoDB. This allows the UI to display the associated autofix PR for Sentry alerts. Returns an object with fields: status (success/already_attached/not_found), alert_id, pr_id, pr_title, pr_web_url.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "user_id": {"type": "STRING", "description": "The user ID who owns the Sentry alert."},
+            "sentry_issue_id": {"type": "STRING", "description": "The Sentry issue ID to attach the PR to."},
+            "pr_id": {"type": "INTEGER", "description": "The GitLab merge request ID (IID)."},
+            "pr_title": {"type": "STRING", "description": "The merge request title."},
+            "pr_web_url": {"type": "STRING", "description": "The merge request web URL."}
+        },
+        "required": ["user_id", "sentry_issue_id", "pr_id", "pr_title", "pr_web_url"]
+    }
+}
+
+
+async def attach_pr_to_sentry_issue(
+    user_id: str,
+    sentry_issue_id: str,
+    pr_id: int,
+    pr_title: str,
+    pr_web_url: str
+) -> Dict[str, Any]:
+    """
+    Attach a GitLab merge request to a Sentry issue in MongoDB.
+
+    This function updates the alert document in the 'alerts' collection with PR details,
+    allowing the UI to display the associated autofix PR for each Sentry issue.
+
+    Args:
+        user_id: User ID who owns the Sentry alert
+        sentry_issue_id: Sentry issue ID to attach the PR to
+        pr_id: GitLab merge request ID (IID)
+        pr_title: Merge request title
+        pr_web_url: Merge request web URL
+
+    Returns:
+        Dictionary with attachment status and PR details
+    """
+    from services import mongo_client
+    from datetime import datetime
+
+    try:
+        # Find the existing Sentry alert
+        existing = await mongo_client.find_one(
+            collection_name="alerts",
+            filter={"user_id": user_id, "source": "sentry", "issue_id": sentry_issue_id}
+        )
+
+        if not existing:
+            print(f"[WARN] [attach_pr_to_sentry_issue] No alert found for user {user_id}, sentry_issue_id {sentry_issue_id}")
+            return {
+                "status": "not_found",
+                "message": f"No alert found for sentry_issue_id {sentry_issue_id}"
+            }
+
+        # Check if PR is already attached
+        if existing.get("pr_id") and existing.get("pr_id") == pr_id:
+            print(f"[INFO] [attach_pr_to_sentry_issue] PR {pr_id} already attached to sentry_issue_id {sentry_issue_id}")
+            return {
+                "status": "already_attached",
+                "alert_id": str(existing["_id"]),
+                "pr_id": existing.get("pr_id"),
+                "pr_title": existing.get("pr_title"),
+                "pr_web_url": existing.get("pr_web_url")
+            }
+
+        # Update the alert with PR details
+        await mongo_client.update_one(
+            collection_name="alerts",
+            filter={"_id": existing["_id"], "user_id": user_id},
+            update={
+                "$set": {
+                    "pr_id": pr_id,
+                    "pr_title": pr_title,
+                    "pr_web_url": pr_web_url,
+                    "pr_attached_at": datetime.now().isoformat(),
+                    "updated_at": datetime.now().isoformat()
+                }
+            }
+        )
+
+        print(f"[OK] [attach_pr_to_sentry_issue] Attached PR {pr_id} to sentry_issue_id {sentry_issue_id}")
+
+        return {
+            "status": "success",
+            "alert_id": str(existing["_id"]),
+            "pr_id": pr_id,
+            "pr_title": pr_title,
+            "pr_web_url": pr_web_url,
+            "sentry_issue_id": sentry_issue_id
+        }
+
+    except Exception as e:
+        print(f"[ERROR] [attach_pr_to_sentry_issue] Failed to attach PR: {e}")
+        return {
+            "status": "error",
+            "message": str(e)
+        }
         raise

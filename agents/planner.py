@@ -90,6 +90,8 @@ class PlannerAgent:
             "   d. NEVER use complex expressions: NO '{{step_id.result.field || \"default\"}}'\n"
             "   e. If a step returns an array, pass the entire result: '{{step_id.result}}'\n"
             "   f. The executor will handle array extraction automatically\n"
+            "   g. CRITICAL: ALWAYS use the format '{{step_id.result.field}}' EXACTLY - with double curly braces and NO SPACES inside\n"
+            "   h. NEVER split template references across multiple lines or add extra braces\n"
             "4. CRITICAL: Any step that generates a fix MUST depend on and use results from analysis steps.\n\n"
             "SENTRY BUG FIXING WORKFLOW - PROBLEM TYPE ANALYSIS:\n"
             "FIRST, you MUST analyze the Sentry issue (stack trace, culprit, title) to determine the problem type:\n\n"
@@ -105,6 +107,13 @@ class PlannerAgent:
             "   - Issue involves application logic, API calls, or business rules\n"
             "   - Culprit points to application code files (routes, controllers, services)\n"
             "   - Error mentions line numbers and code logic issues\n\n"
+            "SENTRY BUG FIXING WORKFLOW - TEMPLATE SYNTAX CRITICAL RULES:\n"
+            "When using template references in arguments_json, ALWAYS use this EXACT format: {{step_id.result.field}}\n"
+            "Examples: {{create_mr_step.result.iid}} or {{generate_fix_step.result.file_path}}\n"
+            "NEVER add extra braces, NEVER split across lines, NEVER add formatting\n"
+            "WRONG: '{\n      {\n        create_mr_step.result.iid\n      }\n    }' (nested braces with newlines)\n"
+            "CORRECT: '{{create_mr_step.result.iid}}' (single line, double braces, NO extra formatting)\n"
+            "The executor will replace these with actual values from previous steps.\n\n"
             "SENTRY BUG FIXING WORKFLOW - CRITICAL CORRECT ORDER:\n"
             "   Step 1: Clone the repository via 'clone_repo' -> 'clone_repo_step' (MUST BE FIRST)\n"
             "   Step 2: Based on problem type analysis, choose appropriate analysis path:\n\n"
@@ -156,7 +165,8 @@ class PlannerAgent:
             "                      The gitnexus_file tool will fetch every file and merge their contents together.\n"
             "                      This provides complete context from all relevant files for fix generation.\n\n"
             "   Step 5: Create branch via 'create_gitlab_branch' -> 'create_branch_step'\n"
-            "           Arguments: '{\"repository_id\": \"<repo_id>\", \"branch_name\": \"fix/sentry-<issue_id>-<timestamp>\"}'\n"
+            "           Arguments: '{\"user_id\": \"USER_ID_FROM_PROMPT\", \"project_id\": \"REPOSITORY_ID_FROM_PROMPT\", "
+            "           \"branch_name\": \"fix/sentry-{{SENTRY_ISSUE_ID}}-{{TIMESTAMP}}\", \"ref\": \"main\"}'\n"
             "           This step MUST depend on clone_repo_step\n\n"
             "   Step 6: Generate fix using analysis results -> 'generate_fix_step'\n"
             "           DO NOT use gitnexus_analyze for fix generation - it is only for indexing\n"
@@ -175,16 +185,31 @@ class PlannerAgent:
             "   Step 7: Commit fix to branch via 'commit_file_to_branch' -> 'commit_fix_step'\n"
             "           This step MUST depend on BOTH create_branch_step AND generate_fix_step\n"
             "           CRITICAL: Use the SAME branch name from create_branch_step\n"
-            "           Arguments: '{\"file_path\": \"{{generate_fix_step.result.file_path}}\", "
+            "           Arguments: '{\"user_id\": \"USER_ID_FROM_PROMPT\", \"project_id\": \"REPOSITORY_ID_FROM_PROMPT\", "
+            "           \"file_path\": \"{{generate_fix_step.result.file_path}}\", "
             "           \"content\": \"{{generate_fix_step.result.fixed_code}}\", "
-            "           \"commit_message\": \"Fix Sentry issue <issue_id>: <brief_description>\", "
-            "           \"branch_name\": \"fix/sentry-<issue_id>-<timestamp>\"}'\n"
+            "           \"commit_message\": \"Fix Sentry issue {{SENTRY_ISSUE_ID}}: {{SENTRY_TITLE}}\", "
+            "           \"branch_name\": \"fix/sentry-{{SENTRY_ISSUE_ID}}-{{TIMESTAMP}}\"}'\n"
             "           NOTE: Use the EXACT SAME branch name pattern as in create_branch_step\n"
             "           DO NOT use placeholder comments - commit the ACTUAL fixed code\n\n"
             "   Step 8: Create draft MR via 'create_gitlab_merge_request' -> 'create_mr_step'\n"
-            "           Arguments: '{\"repository_id\": \"<repo_id>\", \"source_branch\": \"<from create_branch_step>\", "
-            "           \"title\": \"Fix Sentry issue <issue_id>: <title>\", \"description\": \"{{generate_fix_step.result.description}}\"}'\n"
+            "           Arguments: '{\"user_id\": \"USER_ID_FROM_PROMPT\", \"project_id\": \"REPOSITORY_ID_FROM_PROMPT\", "
+            "           \"source_branch\": \"{{create_branch_step.result.branch_name}}\", "
+            "           \"title\": \"Fix Sentry issue {{SENTRY_ISSUE_ID}}: {{SENTRY_TITLE}}\", "
+            "           \"description\": \"{{generate_fix_step.result.description}}\"}'\n"
             "           This step MUST depend on commit_fix_step\n\n"
+
+            "   Step 9: Attach PR to Sentry issue via 'attach_pr_to_sentry_issue' -> 'attach_pr_step'\n"
+            "           Purpose: Update the Sentry alert in MongoDB with the PR details for UI display\n"
+            "           Arguments: '{\"user_id\": \"USER_ID_FROM_PROMPT\", \"sentry_issue_id\": \"{{SENTRY_ISSUE_ID}}\", "
+            "           \"pr_id\": \"{{create_mr_step.result.iid}}\", "
+            "           \"pr_title\": \"{{create_mr_step.result.title}}\", "
+            "           \"pr_web_url\": \"{{create_mr_step.result.web_url}}\"}'\n"
+            "           CRITICAL TEMPLATE FORMAT: Use EXACT format '{{create_mr_step.result.iid}}' and '{{SENTRY_ISSUE_ID}}' - double braces, NO extra formatting\n"
+            "           This step MUST depend on create_mr_step\n"
+            "           Use the EXACT USER ID value from the USER ID field in the prompt above\n"
+            "           This will allow the UI to show the attached autofix PR for the Sentry issue\n\n"
+
             "CRITICAL REMINDER:\n"
             "- The commit_fix_step arguments_json MUST include 'file_path', 'content', and 'commit_message'\n"
             "- The 'content' field MUST contain the ACTUAL fixed code, NOT placeholders\n"
@@ -670,7 +695,9 @@ class PlannerAgent:
             'commit_file_to_branch', 'merge_merge_request',
             # MR Review Enhancement Tools (exclude validate_mr_webhook - already executed)
             'post_loading_indicator', 'update_review_comment',
-            'update_commit_status', 'track_progress'
+            'update_commit_status', 'track_progress',
+            # Sentry PR attachment
+            'attach_pr_to_sentry_issue'
         }
 
         # Add prerequisite tools for non-MR workflows only
