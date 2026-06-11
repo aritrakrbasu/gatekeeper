@@ -217,13 +217,19 @@ async def process_production_crash(payload: dict) -> dict:
 
             # --- 🧠 GEMINI PRODUCTION DIAGNOSIS CORE ---
             print("[*] Presenting incident indicators to Gemini Pro for immediate root-cause extraction...")
-            
-            diagnosis_instruction = (
-                "You are The Gatekeeper, an elite Site Reliability Engineer and automated debugging agent.\n"
-                "You have been invoked because a production environment crash has occurred.\n"
-                "Analyze the provided stack trace, error context, and current repo files to identify the root cause.\n"
-                "Determine exactly which file and lines contain the structural error (e.g., memory leak, unhandled rejection, syntax bug)."
-            )
+
+            # Load diagnosis instruction from Arize AX
+            try:
+                from config.prompts import load_diagnosis_instruction
+                diagnosis_instruction = await load_diagnosis_instruction(label="production")
+            except Exception as e:
+                print(f"[WARN] Failed to load diagnosis_instruction from Arize AX: {e}, using fallback")
+                diagnosis_instruction = (
+                    "You are The Gatekeeper, an elite Site Reliability Engineer and automated debugging agent.\n"
+                    "You have been invoked because a production environment crash has occurred.\n"
+                    "Analyze the provided stack trace, error context, and current repo files to identify the root cause.\n"
+                    "Determine exactly which file and lines contain the structural error (e.g., memory leak, unhandled rejection, syntax bug)."
+                )
 
             combined_incident_data = (
                 f"LIVE DYNATRACE PRODUCTION EXCEPTION LOGS:\n{raw_crash_telemetry}\n\n"
@@ -257,12 +263,20 @@ async def process_production_crash(payload: dict) -> dict:
                 "You MUST output ONLY pure code snippets inside the schema parameters with no conversational text blocks."
             )
 
+            # Load remediation instruction from Arize AX
+            try:
+                from config.prompts import load_remediation_instruction
+                remediation_instruction = await load_remediation_instruction(label="production")
+            except Exception as e:
+                print(f"[WARN] Failed to load remediation_instruction from Arize AX: {e}, using fallback")
+                remediation_instruction = "You are an automated software patch generation engine. Output pure code configurations matching the response schema properties."
+
             fix_analysis = await asyncio.to_thread(
                 ai_client.models.generate_content,
                 model='gemini-2.5-flash',
                 contents=remediation_prompt,
                 config=types.GenerateContentConfig(
-                    system_instruction="You are an automated software patch generation engine. Output pure code configurations matching the response schema properties.",
+                    system_instruction=remediation_instruction,
                     temperature=0.1,
                     response_mime_type="application/json",
                     response_schema=IncidentRemediationSchema

@@ -76,7 +76,7 @@ class ReviewQualityEvaluator:
     Uses Gemini to evaluate the quality of code reviews based on multiple criteria.
     """
 
-    # Evaluation prompts for each criteria
+    # Fallback evaluation prompts for each criteria (used if Arize AX is unavailable)
     EVALUATION_PROMPTS = {
         EvaluationCriteria.SECURITY_COVERAGE: """
 You are evaluating a code review for security vulnerability coverage.
@@ -252,6 +252,38 @@ Return only the number, nothing else.
             self._client = genai.Client()
         return self._client
 
+    async def _get_evaluation_prompt(self, criterion: EvaluationCriteria) -> str:
+        """
+        Get evaluation prompt for a specific criterion from Arize AX.
+
+        Args:
+            criterion: The evaluation criterion
+
+        Returns:
+            Evaluation prompt template
+        """
+        # Mapping of criteria to prompt IDs
+        prompt_id_mapping = {
+            EvaluationCriteria.SECURITY_COVERAGE: "eval_security",
+            EvaluationCriteria.CODE_QUALITY_COVERAGE: "eval_quality",
+            EvaluationCriteria.ACTIONABILITY: "eval_actionability",
+            EvaluationCriteria.CLARITY: "eval_clarity",
+            EvaluationCriteria.COMPLETENESS: "eval_completeness",
+            EvaluationCriteria.CORRECTNESS: "eval_correctness",
+        }
+
+        prompt_id = prompt_id_mapping.get(criterion)
+
+        if prompt_id:
+            try:
+                from config.prompts import load_prompt
+                return await load_prompt(prompt_id, label="production")
+            except Exception as e:
+                print(f"[WARN] Failed to load {prompt_id} from Arize AX: {e}, using fallback")
+
+        # Fallback to hardcoded prompts
+        return self.EVALUATION_PROMPTS.get(criterion, "")
+
     async def evaluate_review(
         self,
         diff: str,
@@ -290,8 +322,9 @@ Return only the number, nothing else.
 
         for criterion in criteria:
             try:
-                # Get evaluation prompt for this criteria
-                prompt = self.EVALUATION_PROMPTS[criterion].format(
+                # Get evaluation prompt for this criteria (from Arize AX or fallback)
+                prompt_template = await self._get_evaluation_prompt(criterion)
+                prompt = prompt_template.format(
                     diff=diff[:10000],  # Limit size
                     review=review[:10000],
                 )

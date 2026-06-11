@@ -97,6 +97,7 @@ def load_prompt(prompt_name: str) -> str:
         return prompt_path.read_text(encoding="utf-8")
     else:
         print(f"[WARN] Prompt file not found: {prompt_path}, using fallback")
+        # Fallback prompt - consider moving to Arize AX as 'code_review_fallback'
         return "You are a senior code reviewer. Analyze the provided code changes for security, quality, and performance issues."
 
 
@@ -228,9 +229,18 @@ async def run_gemini_review(raw_diff_content: str, impact_context: str, user_con
         dict with "review_text" (str) and "usage" (dict with token counts and model)
     """
     # Load prompt from Arize AX with fallback to local file
-    system_instruction = await load_prompt_async("senior_pr_reviewer_v1")
-
-    review_prompt = f"""Review this raw pull request diff change stream:
+    try:
+        from config.prompts import load_code_review_prompt, load_and_format_prompt
+        system_instruction = await load_code_review_prompt(label="production")
+        review_prompt = await load_and_format_prompt(
+            "review_template",
+            raw_diff_content=raw_diff_content,
+            impact_context=impact_context
+        )
+    except Exception as e:
+        print(f"[WARN] Failed to load prompts from Arize AX: {e}, using legacy method")
+        system_instruction = await load_prompt_async("senior_pr_reviewer_v1")
+        review_prompt = f"""Review this raw pull request diff change stream:
 
 {raw_diff_content}
 
@@ -754,9 +764,58 @@ async def run_gemini_review_with_gitnexus(
         dict with "review_text" (str), "usage" (dict), and "tools_called" (list)
     """
     # Load prompt from Arize AX with fallback to local file
-    system_instruction = await load_prompt_async("senior_pr_reviewer_v1")
+    try:
+        from config.prompts import load_code_review_prompt, load_and_format_prompt
+        system_instruction = await load_code_review_prompt(label="production")
 
-    review_prompt = f"""Review this raw pull request diff change stream:
+        # Try to load GitNexus-enhanced review prompt from Arize AX
+        try:
+            gitnexus_review = await load_prompt_async("gitnexus_review_enhanced", label="production")
+            review_prompt = await load_and_format_prompt(
+                "review_template",
+                raw_diff_content=raw_diff_content,
+                impact_context=f"{impact_context}\n\n{gitnexus_review}"
+            )
+        except Exception:
+            # Fallback to legacy GitNexus-enhanced prompt
+            review_prompt = f"""Review this raw pull request diff change stream:
+
+{raw_diff_content}
+
+{impact_context}
+
+You have access to GitNexus tools for advanced code intelligence:
+- impact: Analyze blast radius and dependencies
+- detect_changes: Map changed lines to affected processes
+- context: Get 360-degree symbol view
+- query: Search the codebase
+- gitnexus_grep: Fallback literal text search across all indexed files
+- gitnexus_file: Read the full content of a specific file
+
+Use these tools when you need more context about dependencies, call chains,
+or the broader impact of the changes.
+
+CRITICAL INSTRUCTION FOR THIS REVIEW:
+You have access to the `detect_changes` tool. Because this is a raw pull request diff stream, you MUST execute `detect_changes(scope: "compare")` first to map the git diff against the codebase's existing architectural processes and blast radius. Do not rely on `impact()` for renamed or deleted exports, as the definition anchors will be missing on disk. Use `detect_changes` to see what will break.
+
+IMPORTANT - Fallback to gitnexus_grep and gitnexus_file:
+If you are NOT confident about the results from `detect_changes` or `impact` analysis (e.g., missing symbols, unclear impact, or tool failures):
+1. First, call `gitnexus_grep` with relevant symbol names or patterns to get the complete impacted file list
+2. Then, use `gitnexus_file` to read the full content of specific files you need to examine
+
+The grep tool searches across ALL indexed files and will find references that graph-based tools might miss. The file tool then lets you read the complete content of any file to understand the full context.
+
+IMPORTANT - Dual-Branch Tool Execution:
+For all tools EXCEPT `detect_changes`, `gitnexus_grep`, and `gitnexus_file`, results will be gathered from BOTH branches:
+- Target branch (base/main): Shows current production state
+- Source branch (feature): Shows proposed changes
+
+This allows you to compare architectural impact between the current state and proposed changes.
+"""
+    except Exception as e:
+        print(f"[WARN] Failed to load prompts from Arize AX: {e}, using legacy method")
+        system_instruction = await load_prompt_async("senior_pr_reviewer_v1")
+        review_prompt = f"""Review this raw pull request diff change stream:
 
 {raw_diff_content}
 
@@ -1385,34 +1444,45 @@ async def run_gemini_fix_analysis(audit_report: str, patch_summary: str, schema_
             f"{schema_context}\n"
         )
 
-    fix_prompt = (
-        f"Review this software engineering audit report:\n\n{audit_report}\n\n"
-        f"ANALYZE THESE ATOMIC PATCHES FOR FIXABLE ISSUES:\n\n"
-        f"{patch_summary}\n\n"
-        f"{schema_prefix}"
-        f"TASK: Determine if the identified problems can be resolved automatically at the HUNK level.\n\n"
-        "FIXABLE ISSUES INCLUDE (but are not limited to):\n"
-        "- Hardcoded secrets, API keys, passwords, tokens -> Extract to environment variables\n"
-        "- Hardcoded configuration values -> Extract to environment variables\n"
-        "- Insecure default values -> Replace with secure defaults or env vars\n"
-        "- SQL injection vulnerabilities -> Use parameterized queries\n"
-        "- Missing input validation -> Add validation logic\n"
-        "- Insecure cryptographic algorithms -> Use secure alternatives\n"
-        "- Sensitive data in logs -> Remove or sanitize\n\n"
-        "For each fixable issue, provide:\n"
-        "- hunk_id: The ID of the hunk to fix (from the patch summary above)\n"
-        "- issue: Brief description of the problem\n"
-        "- original_lines: The EXACT lines from the hunk that need to be fixed (preserve formatting)\n"
-        "- fixed_lines: The corrected replacement lines\n"
-        "- extracted_env_vars: If secrets/configs are extracted, map them as {\"VAR_NAME\": \"value\"}\n\n"
-        "IMPORTANT RULES:\n"
-        "1. Use the EXACT hunk_id from the patch summary above\n"
-        "2. original_lines must match the hunk content exactly\n"
-        "3. For hardcoded values, extract to environment variables using format: process.env.VAR_NAME (JavaScript) or os.getenv('VAR_NAME') (Python)\n"
-        "4. If no issues are fixable, return {\"fixable\": false, \"fixes\": []}\n\n"
-        "Respond ONLY with valid JSON in this exact format:\n"
-        '{"fixable": true/false, "fixes": [{"hunk_id": "id", "issue": "description", "original_lines": ["line1", "line2"], "fixed_lines": ["line1_fixed", "line2_fixed"], "extracted_env_vars": {"KEY": "value"}}]}'
-    )
+    # Try to load fix analysis prompt from Arize AX
+    try:
+        from config.prompts import load_and_format_prompt
+        fix_prompt = await load_and_format_prompt(
+            "fix_analysis",
+            audit_report=audit_report,
+            patch_summary=patch_summary,
+            schema_prefix=schema_prefix
+        )
+    except Exception as e:
+        print(f"[WARN] Failed to load fix_analysis prompt from Arize AX: {e}, using legacy method")
+        fix_prompt = (
+            f"Review this software engineering audit report:\n\n{audit_report}\n\n"
+            f"ANALYZE THESE ATOMIC PATCHES FOR FIXABLE ISSUES:\n\n"
+            f"{patch_summary}\n\n"
+            f"{schema_prefix}"
+            f"TASK: Determine if the identified problems can be resolved automatically at the HUNK level.\n\n"
+            "FIXABLE ISSUES INCLUDE (but are not limited to):\n"
+            "- Hardcoded secrets, API keys, passwords, tokens -> Extract to environment variables\n"
+            "- Hardcoded configuration values -> Extract to environment variables\n"
+            "- Insecure default values -> Replace with secure defaults or env vars\n"
+            "- SQL injection vulnerabilities -> Use parameterized queries\n"
+            "- Missing input validation -> Add validation logic\n"
+            "- Insecure cryptographic algorithms -> Use secure alternatives\n"
+            "- Sensitive data in logs -> Remove or sanitize\n\n"
+            "For each fixable issue, provide:\n"
+            "- hunk_id: The ID of the hunk to fix (from the patch summary above)\n"
+            "- issue: Brief description of the problem\n"
+            "- original_lines: The EXACT lines from the hunk that need to be fixed (preserve formatting)\n"
+            "- fixed_lines: The corrected replacement lines\n"
+            "- extracted_env_vars: If secrets/configs are extracted, map them as {\"VAR_NAME\": \"value\"}\n\n"
+            "IMPORTANT RULES:\n"
+            "1. Use the EXACT hunk_id from the patch summary above\n"
+            "2. original_lines must match the hunk content exactly\n"
+            "3. For hardcoded values, extract to environment variables using format: process.env.VAR_NAME (JavaScript) or os.getenv('VAR_NAME') (Python)\n"
+            "4. If no issues are fixable, return {\"fixable\": false, \"fixes\": []}\n\n"
+            "Respond ONLY with valid JSON in this exact format:\n"
+            '{"fixable": true/false, "fixes": [{"hunk_id": "id", "issue": "description", "original_lines": ["line1", "line2"], "fixed_lines": ["line1_fixed", "line2_fixed"], "extracted_env_vars": {"KEY": "value"}}]}'
+        )
 
     # Get tracer for creating manual span
     tracer = trace.get_tracer(__name__)

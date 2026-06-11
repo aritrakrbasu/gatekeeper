@@ -325,6 +325,260 @@ class ArizeAXClient:
         """Check if the client is connected."""
         return self._connected
 
+    async def health_check(self) -> bool:
+        """
+        Test Arize AX connectivity.
+
+        Returns:
+            True if connection successful, False otherwise
+        """
+        try:
+            if not self._connected:
+                await self.connect()
+
+            # Simple test - try to list prompts with limit=1
+            params = {"space_id": self.space_id, "limit": 1}
+            response = await self._client.get("/prompts", params=params)
+
+            is_healthy = response.status_code == 200
+
+            if is_healthy:
+                logger.info("[OK] Arize AX health check passed")
+            else:
+                logger.warning(f"[WARN] Arize AX health check failed: HTTP {response.status_code}")
+
+            return is_healthy
+
+        except Exception as e:
+            logger.error(f"[ERROR] Arize AX health check failed: {e}")
+            return False
+
+    async def register_prompt(
+        self,
+        prompt_id: str,
+        content: str,
+        description: str = "",
+        template_vars: List[str] = None,
+        label: str = "development"
+    ) -> Optional[str]:
+        """
+        Register a new prompt in Arize AX.
+
+        Args:
+            prompt_id: Unique identifier for the prompt
+            content: Prompt content (can contain {variable} placeholders)
+            description: Description of the prompt
+            template_vars: List of template variable names used in content
+            label: Environment label (development, staging, production)
+
+        Returns:
+            Prompt ID if successful, None otherwise
+        """
+        if not self._connected:
+            await self.connect()
+
+        if not self._connected:
+            logger.error("[ERROR] Cannot register prompt - not connected to Arize AX")
+            return None
+
+        try:
+            # Check if prompt already exists
+            existing_id = await self._find_prompt_id_by_name(prompt_id)
+            if existing_id:
+                logger.info(f"[INFO] Prompt '{prompt_id}' already exists with ID: {existing_id}")
+                logger.info(f"[INFO] Use update_prompt() to modify existing prompts")
+                return existing_id
+
+            # Create new prompt
+            payload = {
+                "space_id": self.space_id,
+                "name": prompt_id,
+                "description": description or f"Prompt: {prompt_id}",
+                "versions": [
+                    {
+                        "label": label,
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": content
+                            }
+                        ],
+                        "metadata": {
+                            "template_vars": template_vars or []
+                        }
+                    }
+                ]
+            }
+
+            logger.info(f"[INFO] Registering prompt '{prompt_id}' in Arize AX...")
+
+            response = await self._client.post("/prompts", json=payload)
+
+            if response.status_code in (200, 201):
+                data = response.json()
+                new_prompt_id = data.get("id") or data.get("prompt_id")
+                logger.info(f"[OK] Successfully registered prompt '{prompt_id}' with ID: {new_prompt_id}")
+
+                # Cache the new ID
+                self._prompt_cache[prompt_id] = new_prompt_id
+
+                return new_prompt_id
+            else:
+                logger.error(f"[ERROR] Failed to register prompt: HTTP {response.status_code}")
+                logger.debug(f"[DEBUG] Response: {response.text[:500]}")
+                return None
+
+        except Exception as e:
+            logger.error(f"[ERROR] Failed to register prompt '{prompt_id}': {e}")
+            return None
+
+    async def update_prompt(
+        self,
+        prompt_id: str,
+        content: str,
+        description: str = None,
+        label: str = "development"
+    ) -> bool:
+        """
+        Update an existing prompt in Arize AX.
+
+        Args:
+            prompt_id: ID of the prompt to update
+            content: New prompt content
+            description: New description (optional)
+            label: Label for the new version
+
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self._connected:
+            await self.connect()
+
+        if not self._connected:
+            return False
+
+        try:
+            # Find the prompt ID
+            actual_id = await self._find_prompt_id_by_name(prompt_id)
+            if not actual_id:
+                logger.error(f"[ERROR] Prompt '{prompt_id}' not found - cannot update")
+                return False
+
+            # Create a new version with updated content
+            payload = {
+                "label": label,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": content
+                    }
+                ]
+            }
+
+            if description:
+                payload["description"] = description
+
+            logger.info(f"[INFO] Updating prompt '{prompt_id}'...")
+
+            response = await self._client.post(
+                f"/prompts/{actual_id}/versions",
+                json=payload
+            )
+
+            if response.status_code in (200, 201):
+                logger.info(f"[OK] Successfully updated prompt '{prompt_id}'")
+                return True
+            else:
+                logger.error(f"[ERROR] Failed to update prompt: HTTP {response.status_code}")
+                logger.debug(f"[DEBUG] Response: {response.text[:500]}")
+                return False
+
+        except Exception as e:
+            logger.error(f"[ERROR] Failed to update prompt '{prompt_id}': {e}")
+            return False
+
+    def validate_prompt_template(
+        self,
+        content: str,
+        template_vars: List[str] = None
+    ) -> tuple[bool, List[str]]:
+        """
+        Validate a prompt template by checking placeholder syntax.
+
+        Args:
+            content: Prompt content to validate
+            template_vars: Expected template variables
+
+        Returns:
+            Tuple of (is_valid, list_of_found_variables)
+        """
+        import re
+
+        # Find all {variable} placeholders
+        pattern = r'\{([^}]+)\}'
+        found_vars = re.findall(pattern, content)
+
+        # Check if all expected vars are present
+        if template_vars:
+            missing = set(template_vars) - set(found_vars)
+            if missing:
+                logger.warning(f"[WARN] Missing expected template vars: {missing}")
+                return False, found_vars
+
+        logger.debug(f"[DEBUG] Validated prompt template with vars: {found_vars}")
+        return True, found_vars
+
+    async def get_prompt_with_fallback(
+        self,
+        prompt_name: str,
+        label: str = "production",
+        local_path: str = None,
+        default: str = None
+    ) -> Optional[str]:
+        """
+        Load prompt with multi-level fallback chain.
+
+        Fallback order:
+        1. Arize AX (primary)
+        2. Local file (if local_path provided)
+        3. Default prompt (if default provided)
+
+        Args:
+            prompt_name: Name/ID of the prompt
+            label: Prompt label to fetch
+            local_path: Local file path for fallback
+            default: Default prompt string for fallback
+
+        Returns:
+            Prompt content string or None if all sources fail
+        """
+        # Try Arize AX first
+        try:
+            prompt = await self.get_prompt(prompt_name, label=label, fallback_to_file=False)
+            if prompt:
+                return prompt
+        except Exception as e:
+            logger.warning(f"[WARN] Failed to load '{prompt_name}' from Arize AX: {e}")
+
+        # Try local file
+        if local_path:
+            local_file = Path(local_path)
+            if local_file.exists():
+                try:
+                    content = local_file.read_text(encoding="utf-8")
+                    logger.info(f"[OK] Loaded prompt '{prompt_name}' from local file: {local_path}")
+                    return content
+                except Exception as e:
+                    logger.warning(f"[WARN] Failed to read local file {local_path}: {e}")
+
+        # Try default
+        if default:
+            logger.info(f"[OK] Using default fallback for '{prompt_name}'")
+            return default
+
+        logger.error(f"[ERROR] All fallback sources failed for '{prompt_name}'")
+        return None
+
     async def __aenter__(self):
         """Async context manager entry."""
         await self.connect()

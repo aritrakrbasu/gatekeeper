@@ -878,8 +878,25 @@ async def generate_fix(
     from google.genai import types
     from services.gemini_service import ai_client
 
-    # Build the system instruction for fix generation
-    system_instruction = """You are an elite code fixer specializing in automated bug remediation.
+    # Try to load fix generation prompts from Arize AX
+    try:
+        from config.prompts import load_fix_generation_system, load_and_format_prompt
+        system_instruction = await load_fix_generation_system(label="production")
+        prompt = await load_and_format_prompt(
+            "fix_generation_template",
+            sentry_issue_id=sentry_issue_id,
+            sentry_title=sentry_title,
+            problem_type=problem_type,
+            stack_trace=stack_trace,
+            culprit=culprit,
+            analysis_findings=analysis_findings,
+            file_path=file_path
+        )
+    except Exception as e:
+        print(f"[WARN] Failed to load fix_generation prompts from Arize AX: {e}, using fallback")
+
+        # Build the system instruction for fix generation
+        system_instruction = """You are an elite code fixer specializing in automated bug remediation.
 
 Your task is to analyze Sentry error reports and generate correct, minimal fixes.
 
@@ -909,8 +926,8 @@ OUTPUT FORMAT (must be valid JSON):
 }
 """
 
-    # Build the prompt with Sentry context and analysis
-    prompt = f"""SENTRY ISSUE DETAILS:
+        # Build the prompt with Sentry context and analysis
+        prompt = f"""SENTRY ISSUE DETAILS:
 Issue ID: {sentry_issue_id}
 Title: {sentry_title}
 Error Type: {problem_type}

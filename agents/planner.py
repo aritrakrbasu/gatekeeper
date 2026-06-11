@@ -68,9 +68,14 @@ class PlannerAgent:
         else:
             return "mr_review"  # Default
 
-    def _build_sentry_system_instruction(self) -> str:
+    async def _build_sentry_system_instruction(self) -> str:
         """System instruction for Sentry bug fixing workflows."""
-        return (
+        try:
+            from config.prompts import load_planner_prompt
+            return await load_planner_prompt("sentry", label="production")
+        except Exception as e:
+            print(f"[WARN] Failed to load sentry_planner from Arize AX: {e}, using fallback")
+            return (
             "You are the elite Gatekeeper AI Planner for Sentry bug fixing workflows.\n\n"
             "Your job is to construct a DAG execution plan to automatically fix Sentry bugs.\n\n"
             "CRITICAL CONSTRAINTS:\n"
@@ -221,9 +226,14 @@ class PlannerAgent:
             "IMPORTANT: Call submit_execution_plan ONCE with your COMPLETE plan including ALL steps."
         )
 
-    def _build_mr_review_system_instruction(self) -> str:
+    async def _build_mr_review_system_instruction(self) -> str:
         """System instruction for MR review workflows."""
-        return (
+        try:
+            from config.prompts import load_planner_prompt
+            return await load_planner_prompt("mr_review", label="production")
+        except Exception as e:
+            print(f"[WARN] Failed to load mr_review_planner from Arize AX: {e}, using fallback")
+            return (
             "You are the elite Gatekeeper AI Planner for Merge Request code review workflows.\n\n"
             "Your job is to construct a DAG execution plan to review GitLab Merge Requests.\n\n"
             "CRITICAL CONSTRAINTS:\n"
@@ -403,9 +413,14 @@ class PlannerAgent:
             "- Call submit_execution_plan ONCE with your COMPLETE plan.\n"
         )
 
-    def _build_dynatrace_system_instruction(self) -> str:
+    async def _build_dynatrace_system_instruction(self) -> str:
         """System instruction for Dynatrace incident self-healing workflows."""
-        return (
+        try:
+            from config.prompts import load_planner_prompt
+            return await load_planner_prompt("dynatrace", label="production")
+        except Exception as e:
+            print(f"[WARN] Failed to load dynatrace_planner from Arize AX: {e}, using fallback")
+            return (
             "You are the elite Gatekeeper AI Planner for Dynatrace incident self-healing workflows.\n\n"
             "Your job is to construct a DAG execution plan to heal production incidents.\n\n"
             "CRITICAL CONSTRAINTS:\n"
@@ -787,11 +802,11 @@ class PlannerAgent:
         print(f"[INFO] [Planner] Detected workflow type: {workflow_type}")
 
         if workflow_type == "sentry":
-            system_instruction = self._build_sentry_system_instruction()
+            system_instruction = await self._build_sentry_system_instruction()
         elif workflow_type == "dynatrace":
-            system_instruction = self._build_dynatrace_system_instruction()
+            system_instruction = await self._build_dynatrace_system_instruction()
         else:  # mr_review (default)
-            system_instruction = self._build_mr_review_system_instruction()
+            system_instruction = await self._build_mr_review_system_instruction()
 
         prompt = (
             f"OBJECTIVE: {context.objective}\n"

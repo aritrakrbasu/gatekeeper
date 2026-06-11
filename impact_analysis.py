@@ -74,10 +74,10 @@ class GitNexusGeminiIntegration:
             ImpactAnalysisResult with analysis text and usage metrics
         """
         if system_instruction is None:
-            system_instruction = self._default_system_instruction()
+            system_instruction = await self._default_system_instruction()
 
         # Build the analysis prompt
-        analysis_prompt = self._build_analysis_prompt(diff_content, changed_files)
+        analysis_prompt = await self._build_analysis_prompt(diff_content, changed_files)
 
         # Track tools that were called
         tools_called = []
@@ -256,9 +256,14 @@ class GitNexusGeminiIntegration:
             tools_called=tools_called
         )
 
-    def _default_system_instruction(self) -> str:
+    async def _default_system_instruction(self) -> str:
         """Default system instruction for impact analysis."""
-        return """You are a senior code reviewer specializing in impact analysis.
+        try:
+            from config.prompts import load_impact_analysis_system
+            return await load_impact_analysis_system(label="production")
+        except Exception as e:
+            print(f"[WARN] Failed to load impact_analysis_system from Arize AX: {e}, using fallback")
+            return """You are a senior code reviewer specializing in impact analysis.
 
 Your task is to analyze code changes and identify:
 1. Breaking changes that could affect other parts of the codebase
@@ -280,9 +285,19 @@ Use these tools strategically when you need more context about:
 
 Provide a clear, structured analysis with severity levels (CRITICAL, HIGH, MEDIUM, LOW)."""
 
-    def _build_analysis_prompt(self, diff_content: str, changed_files: List[str]) -> str:
+    async def _build_analysis_prompt(self, diff_content: str, changed_files: List[str]) -> str:
         """Build the analysis prompt for Gemini."""
-        return f"""Analyze this code change for impact and potential issues:
+        try:
+            from config.prompts import load_and_format_prompt
+            changed_files_str = chr(10).join(f"- {f}" for f in changed_files)
+            return await load_and_format_prompt(
+                "impact_analysis_template",
+                diff_content=diff_content,
+                changed_files=changed_files_str
+            )
+        except Exception as e:
+            print(f"[WARN] Failed to load impact_analysis_template from Arize AX: {e}, using fallback")
+            return f"""Analyze this code change for impact and potential issues:
 
 ## Changed Files
 {chr(10).join(f"- {f}" for f in changed_files)}

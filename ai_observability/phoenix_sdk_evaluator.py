@@ -356,22 +356,62 @@ Evaluate whether the fixes comprehensively address all identified issues.
         # Initialize LLM wrapper for Gemini
         self.llm = LLM(provider=LlmProvider.VERTEX_AI, model=model)
 
-        # Create evaluators for all criteria
-        self.evaluators = self._create_evaluators()
+        # Create evaluators for all criteria (will be loaded asynchronously on first use)
+        self.evaluators = None  # Lazy-loaded
 
         logger.info(
             f"[✅] Phoenix SDK Evaluator initialized: model={model}, "
             f"concurrency={concurrency}, max_retries={max_retries}"
         )
 
-    def _create_evaluators(self) -> Dict[str, ClassificationEvaluator]:
+    async def _get_evaluator_prompt(self, criterion: EvaluationCriteria, fallback_prompt: str) -> str:
+        """
+        Get evaluation prompt from Arize AX with fallback to class constant.
+
+        Args:
+            criterion: The evaluation criterion
+            fallback_prompt: The fallback prompt from class constant
+
+        Returns:
+            Evaluation prompt template
+        """
+        # Mapping of criteria to prompt IDs
+        prompt_id_mapping = {
+            EvaluationCriteria.SECURITY_COVERAGE: "eval_security",
+            EvaluationCriteria.CODE_QUALITY_COVERAGE: "eval_quality",
+            EvaluationCriteria.ACTIONABILITY: "eval_actionability",
+            EvaluationCriteria.CLARITY: "eval_clarity",
+            EvaluationCriteria.COMPLETENESS: "eval_completeness",
+            EvaluationCriteria.CORRECTNESS: "eval_correctness",
+        }
+
+        prompt_id = prompt_id_mapping.get(criterion)
+
+        if prompt_id:
+            try:
+                from config.prompts import load_prompt
+                return await load_prompt(prompt_id, label="production")
+            except Exception as e:
+                logger.debug(f"[DEBUG] Failed to load {prompt_id} from Arize AX: {e}, using fallback")
+
+        return fallback_prompt
+
+    async def _create_evaluators(self) -> Dict[str, ClassificationEvaluator]:
         """Create Phoenix ClassificationEvaluators for each criterion."""
+        # Load prompts from Arize AX (with fallbacks)
+        security_prompt = await self._get_evaluator_prompt(EvaluationCriteria.SECURITY_COVERAGE, self.SECURITY_COVERAGE_PROMPT)
+        quality_prompt = await self._get_evaluator_prompt(EvaluationCriteria.CODE_QUALITY_COVERAGE, self.CODE_QUALITY_COVERAGE_PROMPT)
+        actionability_prompt = await self._get_evaluator_prompt(EvaluationCriteria.ACTIONABILITY, self.ACTIONABILITY_PROMPT)
+        clarity_prompt = await self._get_evaluator_prompt(EvaluationCriteria.CLARITY, self.CLARITY_PROMPT)
+        completeness_prompt = await self._get_evaluator_prompt(EvaluationCriteria.COMPLETENESS, self.COMPLETENESS_PROMPT)
+        correctness_prompt = await self._get_evaluator_prompt(EvaluationCriteria.CORRECTNESS, self.CORRECTNESS_PROMPT)
+
         return {
             # Code Review Evaluators
             EvaluationCriteria.SECURITY_COVERAGE.value: ClassificationEvaluator(
                 name="security_coverage",
                 llm=self.llm,
-                prompt_template=self.SECURITY_COVERAGE_PROMPT,
+                prompt_template=security_prompt,
                 choices={
                     "critical": 5.0,
                     "high": 4.0,
@@ -384,7 +424,7 @@ Evaluate whether the fixes comprehensively address all identified issues.
             EvaluationCriteria.CODE_QUALITY_COVERAGE.value: ClassificationEvaluator(
                 name="code_quality_coverage",
                 llm=self.llm,
-                prompt_template=self.CODE_QUALITY_COVERAGE_PROMPT,
+                prompt_template=quality_prompt,
                 choices={
                     "excellent": 5.0,
                     "good": 4.0,
@@ -397,7 +437,7 @@ Evaluate whether the fixes comprehensively address all identified issues.
             EvaluationCriteria.ACTIONABILITY.value: ClassificationEvaluator(
                 name="actionability",
                 llm=self.llm,
-                prompt_template=self.ACTIONABILITY_PROMPT,
+                prompt_template=actionability_prompt,
                 choices={
                     "excellent": 5.0,
                     "good": 4.0,
@@ -410,7 +450,7 @@ Evaluate whether the fixes comprehensively address all identified issues.
             EvaluationCriteria.CLARITY.value: ClassificationEvaluator(
                 name="clarity",
                 llm=self.llm,
-                prompt_template=self.CLARITY_PROMPT,
+                prompt_template=clarity_prompt,
                 choices={
                     "excellent": 5.0,
                     "good": 4.0,
@@ -423,7 +463,7 @@ Evaluate whether the fixes comprehensively address all identified issues.
             EvaluationCriteria.COMPLETENESS.value: ClassificationEvaluator(
                 name="completeness",
                 llm=self.llm,
-                prompt_template=self.COMPLETENESS_PROMPT,
+                prompt_template=completeness_prompt,
                 choices={
                     "excellent": 5.0,
                     "good": 4.0,
@@ -436,7 +476,7 @@ Evaluate whether the fixes comprehensively address all identified issues.
             EvaluationCriteria.CORRECTNESS.value: ClassificationEvaluator(
                 name="correctness",
                 llm=self.llm,
-                prompt_template=self.CORRECTNESS_PROMPT,
+                prompt_template=correctness_prompt,
                 choices={
                     "excellent": 5.0,
                     "good": 4.0,
@@ -446,7 +486,7 @@ Evaluate whether the fixes comprehensively address all identified issues.
                 },
                 include_explanation=True,
             ),
-            # Auto-Fix Evaluators
+            # Auto-Fix Evaluators (using class constants as fallbacks)
             EvaluationCriteria.FIX_CORRECTNESS.value: ClassificationEvaluator(
                 name="fix_correctness",
                 llm=self.llm,
@@ -487,6 +527,12 @@ Evaluate whether the fixes comprehensively address all identified issues.
                 include_explanation=True,
             ),
         }
+
+    async def _get_evaluators(self) -> Dict[str, ClassificationEvaluator]:
+        """Get evaluators, initializing them on first use."""
+        if self.evaluators is None:
+            self.evaluators = await self._create_evaluators()
+        return self.evaluators
 
     async def evaluate_review_async(
         self,
@@ -534,10 +580,11 @@ Evaluate whether the fixes comprehensively address all identified issues.
         }])
 
         # Select evaluators for requested criteria
+        evaluators = await self._get_evaluators()
         selected_evaluators = [
-            self.evaluators[c.value]
+            evaluators[c.value]
             for c in criteria
-            if c.value in self.evaluators
+            if c.value in evaluators
         ]
 
         if not selected_evaluators:
@@ -614,10 +661,11 @@ Evaluate whether the fixes comprehensively address all identified issues.
         }])
 
         # Select evaluators for requested criteria
+        evaluators = await self._get_evaluators()
         selected_evaluators = [
-            self.evaluators[c.value]
+            evaluators[c.value]
             for c in criteria
-            if c.value in self.evaluators
+            if c.value in evaluators
         ]
 
         if not selected_evaluators:
